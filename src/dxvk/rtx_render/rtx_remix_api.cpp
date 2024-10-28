@@ -299,6 +299,8 @@ namespace {
           preloadTexture(preload.subsurfaceSingleScatteringAlbedoTexture),
           preloadTexture(preload.subsurfaceRadiusTexture),
           TextureRef(),
+          TextureRef(),
+          TextureRef(),
           src.getAnisotropyConstant(),
           src.getEmissiveIntensity(),
           src.getAlbedoConstant(),
@@ -307,6 +309,7 @@ namespace {
           src.getMetallicConstant(),
           src.getEmissiveColorConstant(),
           src.getEnableEmission(),
+          src.getEnableAlbedoEmission(),
           src.getSpriteSheetRows(),
           src.getSpriteSheetCols(),
           src.getSpriteSheetFPS(),
@@ -377,7 +380,7 @@ namespace {
         const auto& src = materialWithoutPreload.getRayPortalMaterialData();
         return MaterialData { RayPortalMaterialData {
           preloadTexture(preload.emissiveTexture),
-          {}, // unused
+          preloadTexture(preload.albedoTexture), // portal mask
           src.getRayPortalIndex(),
           src.getSpriteSheetRows(),
           src.getSpriteSheetCols(),
@@ -412,6 +415,8 @@ namespace {
           {},
           {},
           {},
+          {},
+          {},
           extOpaque->anisotropy,
           info.emissiveIntensity,
           tovec3(extOpaque->albedoConstant),
@@ -420,6 +425,7 @@ namespace {
           extOpaque->metallicConstant,
           tovec3(info.emissiveColorConstant),
           info.emissiveIntensity > 0.f,
+          false, // EnableAlbedoEmission - not available in API
           info.spriteSheetRow,
           info.spriteSheetCol,
           info.spriteSheetFps,

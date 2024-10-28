@@ -98,15 +98,19 @@ struct OpaqueSurfaceMaterial
 
   // 26
   uint16_t samplerFeedbackStamp;
-  uint16_t data0;
 
-  // 28-29
-  uint dlssControlMask;
+  // 27-30
+  // Note: These take the space upstream uses for the per-material DLSS control mask, which is not stored on this branch
+  uint16_t samplerIndex1;
+  uint16_t samplerIndex2;
+  uint16_t BikRTextureIndex;
+  uint16_t BikBTextureIndex;
 
   // Todo: Fixed function blend state info here in the future (Actually this should go on a Legacy Material, or some sort of non-PBR Legacy Surface)
 
   // padding (to keep size matching with MemoryPolymorphicSurfaceMaterial)
-  uint16_t data[2];
+  //uint16_t data[1];
+  float16_t m_freeFloat01;
 
   bool hasValidDisplacement() {
     return flags & OPAQUE_SURFACE_MATERIAL_FLAG_HAS_DISPLACEMENT;
