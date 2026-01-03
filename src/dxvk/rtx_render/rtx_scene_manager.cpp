@@ -1083,7 +1083,7 @@ namespace dxvk {
                              samplerInfo.borderColor);
     }
     uint32_t samplerIndex = trackSampler(sampler);
-    uint32_t samplerIndex2 = UINT32_MAX;
+    uint32_t samplerIndex2 = UINT32_MAX; /// !!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!!
     if (renderMaterialDataType == MaterialDataType::RayPortal) {
       samplerIndex2 = trackSampler(drawCallState.getMaterialData().getSampler2());
     }
@@ -1142,6 +1142,8 @@ namespace dxvk {
 
       bool ignoreAlphaChannel = false;
 
+      uint8_t d3dModifierFlags = REMIX_MODIFIER_TO_OPAQUE_SHADER_NONE;
+
       constexpr Vector4 kWhiteModeAlbedo = Vector4(0.7f, 0.7f, 0.7f, 1.0f);
 
       const auto& opaqueMaterialData = renderMaterialData.getOpaqueMaterialData();
@@ -1182,6 +1184,16 @@ namespace dxvk {
       displaceOut = opaqueMaterialData.getDisplaceOut();
 
       ignoreAlphaChannel = opaqueMaterialData.getIgnoreAlphaChannel();
+
+      // rtx_materials.cpp is doing a hashlookup (ignoreAlphaChannel = lookupHash(RtxOptions::ignoreAlphaOnTextures(), getHash());)
+      // so we need to check d3d flag here
+      if (!ignoreAlphaChannel && CategoryFlags(drawCallState.materialData.remixTextureCategoryFlagsFromD3D).test(InstanceCategories::IgnoreAlphaChannel)) {
+        ignoreAlphaChannel = true;
+      }
+
+      if (drawCallState.materialData.remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_EMISSIVE_SCALAR) {
+        emissiveIntensity *= drawCallState.materialData.remixFloatRS169FromD3D;
+      }
 
       subsurfaceMeasurementDistance = opaqueMaterialData.getSubsurfaceMeasurementDistance() * RtxOptions::SubsurfaceScattering::surfaceThicknessScale();
 
@@ -1252,6 +1264,7 @@ namespace dxvk {
         thinFilmThicknessConstant, samplerIndex, displaceIn, displaceOut, 
         subsurfaceMaterialIndex, isUsingRaytracedRenderTarget,
         samplerFeedbackStamp,
+        d3dModifierFlags
       };
 
       if (opaqueSurfaceMaterial.hasValidDisplacement()) {
@@ -1261,6 +1274,8 @@ namespace dxvk {
       surfaceMaterial.emplace(opaqueSurfaceMaterial);
     } else if (renderMaterialDataType == MaterialDataType::Translucent) {
       const auto& translucentMaterialData = renderMaterialData.getTranslucentMaterialData();
+
+      uint8_t d3dModifierFlags = REMIX_MODIFIER_TO_OPAQUE_SHADER_NONE;
 
       uint32_t normalTextureIndex = kSurfaceMaterialInvalidTextureIndex;
       uint32_t transmittanceTextureIndex = kSurfaceMaterialInvalidTextureIndex;
@@ -1280,12 +1295,22 @@ namespace dxvk {
       float thinWallThickness = translucentMaterialData.getThinWallThickness();
       bool useDiffuseLayer = translucentMaterialData.getEnableDiffuseLayer();
 
+      if (drawCallState.materialData.remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_EMISSIVE_SCALAR) {
+        emissiveIntensity *= drawCallState.materialData.remixFloatRS169FromD3D;
+      }
+
+      if (drawCallState.materialData.remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_EMISSIVE_FORCE_ON_WITH_ALBEDO) {
+        enableEmissive = true;
+        d3dModifierFlags |= REMIX_MODIFIER_TO_OPAQUE_SHADER_EMISSIVE_USE_ALBEDO;
+      }
+
       const RtTranslucentSurfaceMaterial translucentSurfaceMaterial{
         normalTextureIndex, transmittanceTextureIndex, emissiveColorTextureIndex,
         refractiveIndex,
         transmittanceMeasureDistance, transmittanceColor,
         enableEmissive, emissiveIntensity, emissiveColorConstant,
-        isThinWalled, thinWallThickness, useDiffuseLayer, samplerIndex
+        isThinWalled, thinWallThickness, useDiffuseLayer, samplerIndex,
+        d3dModifierFlags
       };
 
       surfaceMaterial.emplace(translucentSurfaceMaterial);
