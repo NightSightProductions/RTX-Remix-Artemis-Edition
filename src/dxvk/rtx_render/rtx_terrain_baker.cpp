@@ -654,6 +654,7 @@ namespace dxvk {
       Material::Properties::metallicConstant(),
       Material::Properties::emissiveColorConstant(),
       Material::Properties::enableEmission(),
+      false, // EnableAlbedoEmission
       // Setting expected constant values. Baked terrain should not need to have other values for the below material parameters set
       1, 1, 0, /* spriteSheet* */
       false, // LegacyMaterialDefaults::enableThinFilm(),

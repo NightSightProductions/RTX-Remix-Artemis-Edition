@@ -263,6 +263,7 @@ namespace {
           src.getMetallicConstant(),
           src.getEmissiveColorConstant(),
           src.getEnableEmission(),
+          src.getEnableAlbedoEmission(),
           src.getSpriteSheetRows(),
           src.getSpriteSheetCols(),
           src.getSpriteSheetFPS(),
@@ -359,6 +360,7 @@ namespace {
           extOpaque->metallicConstant,
           tovec3(info.emissiveColorConstant),
           info.emissiveIntensity > 0.f,
+          false, // EnableAlbedoEmission - not available in API
           info.spriteSheetRow,
           info.spriteSheetCol,
           info.spriteSheetFps,
