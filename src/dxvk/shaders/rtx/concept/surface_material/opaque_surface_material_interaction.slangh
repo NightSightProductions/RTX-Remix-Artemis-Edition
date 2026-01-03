@@ -559,10 +559,6 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   {
     emissiveColor = emissiveColorSample.xyz;
   }
-  else if (d3dModEmissiveForceOnWithAlbedo)
-  {
-    emissiveColor = albedo;
-  }
   
   // Load Albedo/Opacity
 
@@ -605,6 +601,11 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       opacity = albedoOpacitySample.a;
       thinFilmThickness = float16_t(0.0f);
     }
+  }
+
+  if (!emissiveColorLoaded && d3dModEmissiveForceOnWithAlbedo)
+  {
+      emissiveColor = albedo;
   }
 
 #if defined(RAY_TRACING_PRIMARY_RAY)
