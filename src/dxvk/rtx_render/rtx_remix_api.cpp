@@ -970,7 +970,7 @@ namespace {
     if (!remixDevice) {
       return REMIXAPI_ERROR_CODE_REMIX_DEVICE_WAS_NOT_REGISTERED;
     }
-    if (dxvk::RtxOptions::Get()->getEnableAnyReplacements()) {
+    if (dxvk::RtxOptions::getEnableAnyReplacements()) {
       std::lock_guard lock { s_mutex };
       remixDevice->EmitCs([cRtDrawState = convert::toRtDrawState(*info)](dxvk::DxvkContext* dxvkCtx) mutable {
         auto* ctx = static_cast<dxvk::RtxContext*>(dxvkCtx);

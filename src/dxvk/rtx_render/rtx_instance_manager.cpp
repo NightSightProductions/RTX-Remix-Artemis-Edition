@@ -1672,7 +1672,7 @@ namespace dxvk {
     Vector3 playerModelPosition = bodyInstance->getTransform()[3].xyz();
 
     // This can be used if the world transform is baked into the vertices
-    if (RtxOptions::Get()->enableAlwaysCalculateAABB()) {
+    if (RtxOptions::enableAlwaysCalculateAABB()) {
       playerModelPosition = bodyInstance->getBlas()->input.getGeometryData().boundingBox.getCentroid();
     }
 
