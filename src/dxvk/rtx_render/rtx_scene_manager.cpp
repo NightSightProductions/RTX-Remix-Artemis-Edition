@@ -1172,7 +1172,7 @@ namespace dxvk {
       trackTexture(opaqueMaterialData.getHeightTexture(), heightTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
       trackTexture(opaqueMaterialData.getEmissiveColorTexture(), emissiveColorTextureIndex, hasTexcoords, true, samplerFeedbackStamp);
 
-      emissiveIntensity = opaqueMaterialData.getEmissiveIntensity() * RtxOptions::emissiveIntensity();
+      emissiveIntensity = opaqueMaterialData.getEmissiveIntensity();// todo * RtxOptions::emissiveIntensity();
       emissiveColorConstant = opaqueMaterialData.getEmissiveColorConstant();
       enableEmissive = opaqueMaterialData.getEnableEmission();
       anisotropy = opaqueMaterialData.getAnisotropyConstant();
@@ -1195,8 +1195,9 @@ namespace dxvk {
         emissiveIntensity = drawCallState.materialData.remixFloatRS169FromD3D;
       }
 
-      if (opaqueMaterialData.getEnableAlbedoEmission()) {
+      if (opaqueMaterialData.getEnableAlbedoEmission() || drawCallState.materialData.remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_EMISSIVE_FORCE_ON_WITH_ALBEDO) {
         d3dModifierFlags |= REMIX_MODIFIER_TO_OPAQUE_SHADER_EMISSIVE_USE_ALBEDO;
+        enableEmissive = true;
       }
 
       subsurfaceMeasurementDistance = opaqueMaterialData.getSubsurfaceMeasurementDistance() * RtxOptions::SubsurfaceScattering::surfaceThicknessScale();
@@ -1294,13 +1295,13 @@ namespace dxvk {
       float transmittanceMeasureDistance = translucentMaterialData.getTransmittanceMeasurementDistance();
       Vector3 emissiveColorConstant = translucentMaterialData.getEmissiveColorConstant();
       bool enableEmissive = translucentMaterialData.getEnableEmission();
-      float emissiveIntensity = translucentMaterialData.getEmissiveIntensity() * RtxOptions::emissiveIntensity();
+      float emissiveIntensity = translucentMaterialData.getEmissiveIntensity();// todo * RtxOptions::emissiveIntensity();
       bool isThinWalled = translucentMaterialData.getEnableThinWalled();
       float thinWallThickness = translucentMaterialData.getThinWallThickness();
       bool useDiffuseLayer = translucentMaterialData.getEnableDiffuseLayer();
 
       if (drawCallState.materialData.remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_EMISSIVE_SCALAR) {
-        emissiveIntensity *= drawCallState.materialData.remixFloatRS169FromD3D;
+        emissiveIntensity = drawCallState.materialData.remixFloatRS169FromD3D;
       }
 
       if (drawCallState.materialData.remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_EMISSIVE_FORCE_ON_WITH_ALBEDO) {
@@ -1329,7 +1330,7 @@ namespace dxvk {
       uint8_t rayPortalIndex = rayPortalMaterialData.getRayPortalIndex();
       float rotationSpeed = rayPortalMaterialData.getRotationSpeed();
       bool enableEmissive = rayPortalMaterialData.getEnableEmission();
-      float emissiveIntensity = rayPortalMaterialData.getEmissiveIntensity() * RtxOptions::emissiveIntensity();
+      float emissiveIntensity = rayPortalMaterialData.getEmissiveIntensity();// todo * RtxOptions::emissiveIntensity();
 
       const RtRayPortalSurfaceMaterial rayPortalSurfaceMaterial{
         maskTextureIndex, maskTextureIndex2, rayPortalIndex,
@@ -1719,7 +1720,7 @@ namespace dxvk {
   }
 
   static_assert(std::is_same_v< decltype(RtSurface::objectPickingValue), ObjectPickingValue>);
-
+#pragma optimize("", off)
   void SceneManager::submitExternalDraw(Rc<DxvkContext> ctx, ExternalDrawState&& state) {
     if (m_externalSampler == nullptr) {
       auto s = DxvkSamplerCreateInfo {};
