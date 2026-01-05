@@ -1199,6 +1199,9 @@ namespace dxvk {
         d3dModifierFlags |= REMIX_MODIFIER_TO_OPAQUE_SHADER_EMISSIVE_USE_ALBEDO;
         enableEmissive = true;
       }
+      else if(enableEmissive && drawCallState.testCategoryFlags(InstanceCategories::WorldUI)) {
+        d3dModifierFlags |= REMIX_MODIFIER_TO_OPAQUE_SHADER_EMISSIVE_USE_ALBEDO;
+      }
 
       subsurfaceMeasurementDistance = opaqueMaterialData.getSubsurfaceMeasurementDistance() * RtxOptions::SubsurfaceScattering::surfaceThicknessScale();
 
