@@ -79,7 +79,7 @@ enum REMIX_MODIFIER_FROM_D3D : std::uint16_t {
   REMIX_MODIFIER_FROM_D3D_NONE = 0,
   REMIX_MODIFIER_FROM_D3D_EMISSIVE_SCALAR = 1 << 0,
   REMIX_MODIFIER_FROM_D3D_EMISSIVE_FORCE_ON_WITH_ALBEDO = 1 << 1,
-  REMIX_MODIFIER_FROM_D3D_FREE02 = 1 << 2,
+  REMIX_MODIFIER_FROM_D3D_BIK = 1 << 2,
   REMIX_MODIFIER_FROM_D3D_FREE03 = 1 << 3,
   REMIX_MODIFIER_FROM_D3D_FREE04 = 1 << 4,
   REMIX_MODIFIER_FROM_D3D_FREE05 = 1 << 5,
@@ -98,7 +98,7 @@ enum REMIX_MODIFIER_FROM_D3D : std::uint16_t {
 enum REMIX_MODIFIER_TO_OPAQUE_SHADER : std::uint8_t {
   REMIX_MODIFIER_TO_OPAQUE_SHADER_NONE = 0,
   REMIX_MODIFIER_TO_OPAQUE_SHADER_EMISSIVE_USE_ALBEDO = 1 << 0,
-  REMIX_MODIFIER_TO_OPAQUE_SHADER_FREE2 = 1 << 1,
+  REMIX_MODIFIER_TO_OPAQUE_SHADER_BIK = 1 << 1,
   REMIX_MODIFIER_TO_OPAQUE_SHADER_FREE3 = 1 << 2,
   REMIX_MODIFIER_TO_OPAQUE_SHADER_FREE4 = 1 << 3,
   REMIX_MODIFIER_TO_OPAQUE_SHADER_FREE5 = 1 << 4,
@@ -539,26 +539,26 @@ struct RtOpaqueSurfaceMaterial {
   RtOpaqueSurfaceMaterial(
     uint32_t albedoOpacityTextureIndex, uint32_t normalTextureIndex,
     uint32_t tangentTextureIndex, uint32_t heightTextureIndex, uint32_t roughnessTextureIndex,
-    uint32_t metallicTextureIndex, uint32_t emissiveColorTextureIndex,
+    uint32_t metallicTextureIndex, uint32_t emissiveColorTextureIndex, uint32_t bikRTextureIndex, uint32_t bikBTextureIndex,
     float anisotropy, float emissiveIntensity,
     const Vector4& albedoOpacityConstant,
     float roughnessConstant, float metallicConstant,
     const Vector3& emissiveColorConstant, bool enableEmission,
     bool ignoreAlphaChannel, bool enableThinFilm, bool alphaIsThinFilmThickness, float thinFilmThicknessConstant,
-    uint32_t samplerIndex, float displaceIn, float displaceOut,
+    uint32_t samplerIndex, uint32_t samplerIndex1, uint32_t samplerIndex2, float displaceIn, float displaceOut,
     uint32_t subsurfaceMaterialIndex, bool isRaytracedRenderTarget,
     uint16_t samplerFeedbackStamp,
     uint8_t d3dModifierFlags
   ) :
     m_albedoOpacityTextureIndex{ albedoOpacityTextureIndex }, m_normalTextureIndex{ normalTextureIndex },
     m_tangentTextureIndex { tangentTextureIndex }, m_heightTextureIndex { heightTextureIndex }, m_roughnessTextureIndex{ roughnessTextureIndex },
-    m_metallicTextureIndex{ metallicTextureIndex }, m_emissiveColorTextureIndex{ emissiveColorTextureIndex },
+    m_metallicTextureIndex{ metallicTextureIndex }, m_emissiveColorTextureIndex{ emissiveColorTextureIndex }, m_bikRTextureIndex { bikRTextureIndex }, m_bikBTextureIndex { bikBTextureIndex },
     m_anisotropy{ anisotropy }, m_emissiveIntensity{ emissiveIntensity },
     m_albedoOpacityConstant{ albedoOpacityConstant },
     m_roughnessConstant{ roughnessConstant }, m_metallicConstant{ metallicConstant },
     m_emissiveColorConstant{ emissiveColorConstant }, m_enableEmission{ enableEmission },
     m_ignoreAlphaChannel { ignoreAlphaChannel }, m_enableThinFilm { enableThinFilm }, m_alphaIsThinFilmThickness { alphaIsThinFilmThickness },
-    m_thinFilmThicknessConstant { thinFilmThicknessConstant }, m_samplerIndex{ samplerIndex }, m_displaceIn{ displaceIn },
+    m_thinFilmThicknessConstant { thinFilmThicknessConstant }, m_samplerIndex{ samplerIndex }, m_samplerIndex1 { samplerIndex1 }, m_samplerIndex2 { samplerIndex2 }, m_displaceIn{ displaceIn },
     m_displaceOut{ displaceOut }, m_subsurfaceMaterialIndex(subsurfaceMaterialIndex), m_isRaytracedRenderTarget(isRaytracedRenderTarget),
     m_samplerFeedbackStamp{ samplerFeedbackStamp },
     m_d3dModifierFlags { d3dModifierFlags }
@@ -598,8 +598,8 @@ struct RtOpaqueSurfaceMaterial {
       flags |= OPAQUE_SURFACE_MATERIAL_FLAG_D3D_EMISSIVE_FORCE_ON_WITH_ALBEDO;
     }
 
-    if (m_d3dModifierFlags & REMIX_MODIFIER_TO_OPAQUE_SHADER_FREE2) {
-      flags |= OPAQUE_SURFACE_MATERIAL_FLAG_D3D_02;
+    if (m_d3dModifierFlags & REMIX_MODIFIER_TO_OPAQUE_SHADER_BIK) {
+      flags |= OPAQUE_SURFACE_MATERIAL_FLAG_D3D_BIK;
     }
 
     if (m_d3dModifierFlags & REMIX_MODIFIER_TO_OPAQUE_SHADER_FREE3) {
@@ -678,11 +678,15 @@ struct RtOpaqueSurfaceMaterial {
     writeGPUHelper(data, offset, glm::packHalf1x16(m_anisotropy));
     writeGPUHelperExplicit<2>(data, offset, m_tangentTextureIndex);
 
-    // data[24]
+    // data[24 - 27]
     writeGPUHelperExplicit<2>(data, offset, m_samplerFeedbackStamp);
-
-    // data[25 - 31]
-    writeGPUPadding<14>(data, offset);
+    writeGPUHelperExplicit<2>(data, offset, m_samplerIndex1);
+    writeGPUHelperExplicit<2>(data, offset, m_samplerIndex2);
+    writeGPUHelperExplicit<2>(data, offset, m_bikRTextureIndex);
+    
+    // data[28 - 31]
+    writeGPUHelperExplicit<2>(data, offset, m_bikBTextureIndex);
+    writeGPUPadding<6>(data, offset);
     assert(offset - oldOffset == kSurfaceMaterialGPUSize);
   }
 
@@ -714,6 +718,14 @@ struct RtOpaqueSurfaceMaterial {
     return m_samplerIndex;
   }
 
+  uint32_t getSamplerIndex1() const {
+    return m_samplerIndex1;
+  }
+
+  uint32_t getSamplerIndex2() const {
+    return m_samplerIndex2;
+  }
+
   uint32_t getAlbedoOpacityTextureIndex() const {
     return m_albedoOpacityTextureIndex;
   }
@@ -740,6 +752,14 @@ struct RtOpaqueSurfaceMaterial {
 
   uint32_t getEmissiveColorTextureIndex() const {
     return m_emissiveColorTextureIndex;
+  }
+
+  uint32_t getBikRTextureIndex() const {
+    return m_bikRTextureIndex;
+  }
+
+  uint32_t getBikBTextureIndex() const {
+    return m_bikBTextureIndex;
   }
 
   float getAnisotropy() const {
@@ -793,6 +813,8 @@ private:
     h = XXH64(&m_roughnessTextureIndex, sizeof(m_roughnessTextureIndex), h);
     h = XXH64(&m_metallicTextureIndex, sizeof(m_metallicTextureIndex), h);
     h = XXH64(&m_emissiveColorTextureIndex, sizeof(m_emissiveColorTextureIndex), h);
+    h = XXH64(&m_bikRTextureIndex, sizeof(m_bikRTextureIndex), h);
+    h = XXH64(&m_bikBTextureIndex, sizeof(m_bikBTextureIndex), h);
     h = XXH64(&m_anisotropy, sizeof(m_anisotropy), h);
     h = XXH64(&m_emissiveIntensity, sizeof(m_emissiveIntensity), h);
     h = XXH64(&m_albedoOpacityConstant, sizeof(m_albedoOpacityConstant), h);
@@ -805,6 +827,8 @@ private:
     h = XXH64(&m_alphaIsThinFilmThickness, sizeof(m_alphaIsThinFilmThickness), h);
     h = XXH64(&m_thinFilmThicknessConstant, sizeof(m_thinFilmThicknessConstant), h);
     h = XXH64(&m_samplerIndex, sizeof(m_samplerIndex), h);
+    h = XXH64(&m_samplerIndex1, sizeof(m_samplerIndex1), h);
+    h = XXH64(&m_samplerIndex2, sizeof(m_samplerIndex2), h);
     h = XXH64(&m_displaceIn, sizeof(m_displaceIn), h);
     h = XXH64(&m_displaceOut, sizeof(m_displaceOut), h);
     h = XXH64(&m_subsurfaceMaterialIndex, sizeof(m_subsurfaceMaterialIndex), h);
@@ -834,7 +858,12 @@ private:
   uint32_t m_roughnessTextureIndex;
   uint32_t m_metallicTextureIndex;
   uint32_t m_emissiveColorTextureIndex;
+  uint32_t m_bikRTextureIndex;
+  uint32_t m_bikBTextureIndex;
+
   uint32_t m_samplerIndex;
+  uint32_t m_samplerIndex1;
+  uint32_t m_samplerIndex2;
 
   float m_anisotropy;
   float m_emissiveIntensity;
@@ -1644,16 +1673,24 @@ struct LegacyMaterialData {
     return colorTextures[0];
   }
 
-  const TextureRef& getColorTexture2() const {
+  const TextureRef& getColorTexture1() const {
     return colorTextures[1];
+  }
+
+  const TextureRef& getColorTexture2() const {
+    return colorTextures[2];
   }
 
   const Rc<DxvkSampler>& getSampler() const {
     return samplers[0];
   }
 
-  const Rc<DxvkSampler>& getSampler2() const {
+  const Rc<DxvkSampler>& getSampler1() const {
     return samplers[1];
+  }
+
+  const Rc<DxvkSampler>& getSampler2() const {
+    return samplers[2];
   }
 
   const D3DMATERIAL9& getLegacyMaterial() const {
@@ -1767,7 +1804,7 @@ private:
     }
   }
 
-  const static uint32_t kMaxSupportedTextures = 2;
+  const static uint32_t kMaxSupportedTextures = 3;
   TextureRef colorTextures[kMaxSupportedTextures] = {};
   Rc<DxvkSampler> samplers[kMaxSupportedTextures] = {};
   static_assert(kInvalidResourceSlot == 0 && "Below initialization of all array members is only valid for a value of 0.");
@@ -1862,6 +1899,8 @@ struct MaterialData {
       if constexpr (std::is_same_v<T, OpaqueMaterialData>) {
         OpaqueMaterialData tmp;
         tmp.getAlbedoOpacityTexture() = input.getColorTexture();
+        tmp.getBikRTexture() = input.getColorTexture1();
+        tmp.getBikBTexture() = input.getColorTexture2();
         if (auto s = input.getSampler().ptr()) {
           tmp.getFilterMode() = lss::Mdl::Filter::vkToMdl(s->info().magFilter);
           tmp.getWrapModeU() = lss::Mdl::WrapMode::vkToMdl(s->info().addressModeU);
