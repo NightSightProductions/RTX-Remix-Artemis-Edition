@@ -1100,8 +1100,12 @@ namespace dxvk {
 
     XXH64_hash_t preCreationHash = renderMaterialData.getHash();
     preCreationHash = XXH64(&samplerIndex, sizeof(samplerIndex), preCreationHash);
-    preCreationHash = XXH64(&samplerIndex1, sizeof(samplerIndex1), preCreationHash);
-    preCreationHash = XXH64(&samplerIndex2, sizeof(samplerIndex2), preCreationHash);
+    if (isBik)
+    {
+      preCreationHash = XXH64(&samplerIndex1, sizeof(samplerIndex1), preCreationHash);
+      preCreationHash = XXH64(&samplerIndex2, sizeof(samplerIndex2), preCreationHash);
+    }
+    
     preCreationHash = XXH64(&hasTexcoords, sizeof(hasTexcoords), preCreationHash);
     preCreationHash = XXH64(&drawCallState.isUsingRaytracedRenderTarget, sizeof(drawCallState.isUsingRaytracedRenderTarget), preCreationHash);
 

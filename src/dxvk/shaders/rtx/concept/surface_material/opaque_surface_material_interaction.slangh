@@ -582,29 +582,33 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
       const bool bikRLoaded = surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.BikRTextureIndex, opaqueSurfaceMaterial.samplerIndex1, surfaceInteraction, bikRSample);
       const bool bikBLoaded = surfaceMaterialInteractionTextureReadHelper(opaqueSurfaceMaterial.BikBTextureIndex, opaqueSurfaceMaterial.samplerIndex2, surfaceInteraction, bikBSample);
 
-      if (bikRLoaded && bikBLoaded)
-      {
-        float  y = (float) albedo.r;
-        float cR = (float) bikRSample.r;
-        float cB = (float) bikBSample.r;
+      float  cR = 0.0f, cB = 0.0f;
+	  float  y = (float) albedo.r;
 
-        float4 c;
-        c = float4( y, cR, cB, 1.0f );
-      
-        float4 tor = float4( 1.164123535f,  1.595794678f,  0.0f,         -0.87065506f );
-        float4 tog = float4( 1.164123535f, -0.813476563f, -0.391448975f,  0.529705048f );
-        float4 tob = float4( 1.164123535f,  0.0f,          2.017822266f, -1.081668854f );
-      
-        // Note: The YCbCr->RGB conversion can legitimately produce values outside [0, 1] due to offsets
-        // and filtering. The original game's output would get clamped/saturated by the render target,
-        // but here we feed this into material albedo (and sometimes emissive). Clamp to avoid
-        // extreme values / FP16 issues causing color speckling when used as emissive.
-        float3 bikRgb = float3(dot(c, tor), dot(c, tog), dot(c, tob));
-        bikRgb = saturate(bikRgb);
-	    albedo.r = (float16_t)bikRgb.r;
-	    albedo.g = (float16_t)bikRgb.g;
-	    albedo.b = (float16_t)bikRgb.b;
+      if (bikRLoaded) {
+        cR = (float) bikRSample.r;
       }
+ 
+      if (bikBLoaded) {
+        cB = (float) bikBSample.r;
+      }
+
+      float4 c;
+      c = float4( y, cR, cB, 1.0f );
+      
+      float4 tor = float4( 1.164123535f,  1.595794678f,  0.0f,         -0.87065506f );
+      float4 tog = float4( 1.164123535f, -0.813476563f, -0.391448975f,  0.529705048f );
+      float4 tob = float4( 1.164123535f,  0.0f,          2.017822266f, -1.081668854f );
+      
+      // Note: The YCbCr->RGB conversion can legitimately produce values outside [0, 1] due to offsets
+      // and filtering. The original game's output would get clamped/saturated by the render target,
+      // but here we feed this into material albedo (and sometimes emissive). Clamp to avoid
+      // extreme values / FP16 issues causing color speckling when used as emissive.
+      float3 bikRgb = float3(dot(c, tor), dot(c, tog), dot(c, tob));
+      bikRgb = saturate(bikRgb);
+	  albedo.r = (float16_t)bikRgb.r;
+	  albedo.g = (float16_t)bikRgb.g;
+	  albedo.b = (float16_t)bikRgb.b;
     }
 
     // Note: Thin film thickness and opacity deriving their values from the alpha channel are mutually exclusive, set the appropriate
