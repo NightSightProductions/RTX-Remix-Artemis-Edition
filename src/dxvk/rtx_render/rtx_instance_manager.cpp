@@ -548,7 +548,11 @@ namespace dxvk {
 
     // Search for an existing instance matching our input
     if (currentInstance == nullptr) {
-      currentInstance = findSimilarInstance(blas, materialData, firstInstanceObjectToWorld, drawCall.cameraType, rayPortalManager);
+      if (materialData.getType() == MaterialDataType::RayPortal || drawCall.isDrawingToRaytracedRenderTarget) {
+        currentInstance = nullptr;
+      } else {
+        currentInstance = findSimilarInstance(blas, materialData, firstInstanceObjectToWorld, drawCall.cameraType, rayPortalManager);
+      }
     }
 
     if (currentInstance == nullptr) {
