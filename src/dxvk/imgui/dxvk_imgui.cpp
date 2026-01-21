@@ -47,6 +47,8 @@
 #include "rtx_render/rtx_neural_radiance_cache.h"
 #include "rtx_render/rtx_ray_reconstruction.h"
 #include "rtx_render/rtx_xess.h"
+#include "rtx_render/rtx_fsr.h"
+#include "rtx_render/rtx_fsr_framegen.h"
 #include "rtx_render/rtx_rtxdi_rayquery.h"
 #include "rtx_render/rtx_restir_gi_rayquery.h"
 #include "rtx_render/rtx_debug_view.h"
@@ -336,6 +338,7 @@ namespace dxvk {
       {UpscalerType::NIS, "NIS"},
       {UpscalerType::TAAU, "TAA-U"},
       {UpscalerType::XeSS, "XeSS"},
+      {UpscalerType::FSR, "FSR"},
   } });
 
   static auto upscalerDLSSCombo = ImGui::ComboWithKey<UpscalerType>(
@@ -346,6 +349,7 @@ namespace dxvk {
       {UpscalerType::NIS, "NIS"},
       {UpscalerType::TAAU, "TAA-U"},
       {UpscalerType::XeSS, "XeSS"},
+      {UpscalerType::FSR, "FSR"},
   } });
 
   ImGui::ComboWithKey<DlssPreset> dlssPresetCombo{
@@ -404,6 +408,17 @@ namespace dxvk {
     } }
   };
 
+  ImGui::ComboWithKey<FSRPreset> fsrPresetCombo{
+    "FSR Preset",
+    ImGui::ComboWithKey<FSRPreset>::ComboEntries{ {
+        {FSRPreset::UltraPerformance, "Ultra Performance (33% scale, 3.0x)"},
+        {FSRPreset::Performance, "Performance (2.0x)"},
+        {FSRPreset::Balanced, "Balanced (1.7x)"},
+        {FSRPreset::Quality, "Quality (1.5x)"},
+        {FSRPreset::NativeAA, "Native Anti-Aliasing (1.0x)"},
+    } }
+  };
+
   ImGui::ComboWithKey<RussianRouletteMode> secondPlusBounceRussianRouletteModeCombo {
     "2nd+ Bounce Russian Roulette Mode",
     ImGui::ComboWithKey<RussianRouletteMode>::ComboEntries { {
@@ -434,6 +449,16 @@ namespace dxvk {
       {DxvkRayReconstruction::RayReconstructionModel::Transformer, "Transformer", "Ensures highest image quality. Can be more expensive than CNN in terms of memory and performance."},
       {DxvkRayReconstruction::RayReconstructionModel::CNN, "CNN", "Ensures great image quality"},
   } });
+
+  // Frame Generation Type selector (DLSS-G or FSR)
+  ImGui::ComboWithKey<FrameGenerationType> frameGenTypeCombo {
+    "Frame Generation",
+    ImGui::ComboWithKey<FrameGenerationType>::ComboEntries { {
+        {FrameGenerationType::None, "Off", "Frame generation disabled"},
+        {FrameGenerationType::DLSS, "DLSS", "NVIDIA DLSS 3.0/4.0 Frame Generation (requires RTX 40 series or newer)"},
+        {FrameGenerationType::FSR, "FSR 3", "AMD FSR 3 Frame Generation (works on any GPU)"},
+    } }
+  };
 
   ImGui::ComboWithKey<int> dlfgMfgModeCombo {
     "DLSS Frame Generation Mode",
@@ -486,6 +511,7 @@ namespace dxvk {
       { RtxFramePassStage::DLSSRR, "DLSSRR" },
       { RtxFramePassStage::NIS, "NIS" },
       { RtxFramePassStage::XeSS, "XeSS" },
+      { RtxFramePassStage::FSR, "FSR" },
       { RtxFramePassStage::TAA, "TAA" },
       { RtxFramePassStage::DustParticles, "DustParticles" },
       { RtxFramePassStage::Bloom, "Bloom" },
@@ -1463,6 +1489,19 @@ namespace dxvk {
           uint32_t inputWidth;
           uint32_t inputHeight;
           xess.getInputSize(inputWidth, inputHeight);
+          ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
+
+          break;
+        }
+        case UpscalerType::FSR: {
+          m_userGraphicsSettingChanged |= fsrPresetCombo.getKey(&DxvkFSR::FSROptions::presetObject());
+
+          // Display FSR internal resolution
+          auto& fsr = ctx->getCommonObjects()->metaFSR();
+
+          uint32_t inputWidth;
+          uint32_t inputHeight;
+          fsr.getInputSize(inputWidth, inputHeight);
           ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
 
           break;
@@ -3588,37 +3627,60 @@ namespace dxvk {
   }
 
   void ImGUI::showDLFGOptions(const Rc<DxvkContext>& ctx) {
-    const bool supportsDLFG = ctx->getCommonObjects()->metaNGXContext().supportsDLFG() && !ctx->getCommonObjects()->metaDLFG().hasDLFGFailed();
-    const uint32_t maxInterpolatedFrames = ctx->getCommonObjects()->metaNGXContext().dlfgMaxInterpolatedFrames();
-    const bool supportsMultiFrame = maxInterpolatedFrames > 1;
+    // Frame Generation type selection
+    m_userGraphicsSettingChanged |= frameGenTypeCombo.getKey(&RtxOptions::frameGenerationTypeObject());
+    
+    const FrameGenerationType selectedType = RtxOptions::frameGenerationType();
+    
+    // DLSS Frame Generation options
+    if (selectedType == FrameGenerationType::DLSS) {
+      const bool supportsDLFG = ctx->getCommonObjects()->metaNGXContext().supportsDLFG() && !ctx->getCommonObjects()->metaDLFG().hasDLFGFailed();
+      const uint32_t maxInterpolatedFrames = ctx->getCommonObjects()->metaNGXContext().dlfgMaxInterpolatedFrames();
+      const bool supportsMultiFrame = maxInterpolatedFrames > 1;
 
-    if (!supportsDLFG) {
-      ImGui::BeginDisabled();
-    }
-
-    bool dlfgChanged = ImGui::Checkbox("Enable DLSS Frame Generation", &DxvkDLFG::enableObject());
-    m_userGraphicsSettingChanged |= dlfgChanged;
-    if (supportsMultiFrame) {
-      dlfgMfgModeCombo.getKey(&DxvkDLFG::maxInterpolatedFramesObject());
-    }
-
-    const auto& reason = ctx->getCommonObjects()->metaNGXContext().getDLFGNotSupportedReason();
-    if (reason.size()) {
-      ImGui::SetTooltipToLastWidgetOnHover(reason.c_str());
-      ImGui::TextWrapped(reason.c_str());
-    }
-
-    if (!supportsDLFG) {
-      ImGui::EndDisabled();
-    }
-
-    // Need to change Reflex in sync with DLFG, not on the next frame.
-    if (dlfgChanged) {
       if (!supportsDLFG) {
-        DxvkDLFG::enable.setDeferred(false);
-      } else if (!DxvkDLFG::enable()){
-        // DLFG was just enabled.  force Reflex to Low Latency.
-        RtxOptions::reflexMode.setDeferred(ReflexMode::LowLatency);
+        ImGui::BeginDisabled();
+      }
+
+      bool dlfgChanged = ImGui::Checkbox("Enable DLSS Frame Generation", &DxvkDLFG::enableObject());
+      m_userGraphicsSettingChanged |= dlfgChanged;
+      if (supportsMultiFrame) {
+        dlfgMfgModeCombo.getKey(&DxvkDLFG::maxInterpolatedFramesObject());
+      }
+
+      const auto& reason = ctx->getCommonObjects()->metaNGXContext().getDLFGNotSupportedReason();
+      if (reason.size()) {
+        ImGui::SetTooltipToLastWidgetOnHover(reason.c_str());
+        ImGui::TextWrapped(reason.c_str());
+      }
+
+      if (!supportsDLFG) {
+        ImGui::EndDisabled();
+      }
+
+      // Need to change Reflex in sync with DLFG, not on the next frame.
+      if (dlfgChanged) {
+        if (!supportsDLFG) {
+          DxvkDLFG::enable.setDeferred(false);
+        } else if (!DxvkDLFG::enable()){
+          // DLFG was just enabled.  force Reflex to Low Latency.
+          RtxOptions::reflexMode.setDeferred(ReflexMode::LowLatency);
+        }
+      }
+    }
+    // FSR 3 Frame Generation options
+    else if (selectedType == FrameGenerationType::FSR) {
+      const bool supportsFSRFG = DxvkFSRFrameGen::supportsFSRFrameGen();
+
+      if (!supportsFSRFG) {
+        ImGui::TextWrapped("FSR 3 Frame Generation is not supported on this system.");
+      } else {
+        // FSR FG is automatically enabled when this option is selected
+        ImGui::TextWrapped("FSR 3 Frame Generation is enabled. Works on any modern GPU.");
+        
+        // Still provide the toggle for users who want to temporarily disable it
+        bool fsrfgChanged = ImGui::Checkbox("Enable FSR 3 Frame Generation", &DxvkFSRFrameGen::enableObject());
+        m_userGraphicsSettingChanged |= fsrfgChanged;
       }
     }
 
@@ -3873,6 +3935,15 @@ namespace dxvk {
           ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
         } else if (RtxOptions::upscalerType() == UpscalerType::TAAU) {
         ImGui::SliderFloat("Resolution scale", &RtxOptions::resolutionScaleObject(), 0.5f, 1.0f);
+      } else if (RtxOptions::upscalerType() == UpscalerType::FSR) {
+        fsrPresetCombo.getKey(&DxvkFSR::FSROptions::presetObject());
+        ctx->getCommonObjects()->metaFSR().showImguiSettings();
+        
+        // Display FSR internal resolution
+        auto& fsr = ctx->getCommonObjects()->metaFSR();
+        uint32_t inputWidth, inputHeight;
+        fsr.getInputSize(inputWidth, inputHeight);
+        ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
       }
 
       ImGui::Separator();
