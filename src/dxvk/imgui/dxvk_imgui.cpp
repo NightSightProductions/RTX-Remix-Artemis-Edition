@@ -47,6 +47,8 @@
 #include "rtx_render/rtx_neural_radiance_cache.h"
 #include "rtx_render/rtx_ray_reconstruction.h"
 #include "rtx_render/rtx_xess.h"
+#include "rtx_render/rtx_fsr.h"
+#include "rtx_render/rtx_fsr_framegen.h"
 #include "rtx_render/rtx_rtxdi_rayquery.h"
 #include "rtx_render/rtx_restir_gi_rayquery.h"
 #include "rtx_render/rtx_debug_view.h"
@@ -336,6 +338,7 @@ namespace dxvk {
       {UpscalerType::NIS, "NIS"},
       {UpscalerType::TAAU, "TAA-U"},
       {UpscalerType::XeSS, "XeSS"},
+      {UpscalerType::FSR, "FSR"},
   } });
 
   static auto upscalerDLSSCombo = ImGui::ComboWithKey<UpscalerType>(
@@ -346,6 +349,7 @@ namespace dxvk {
       {UpscalerType::NIS, "NIS"},
       {UpscalerType::TAAU, "TAA-U"},
       {UpscalerType::XeSS, "XeSS"},
+      {UpscalerType::FSR, "FSR"},
   } });
 
   ImGui::ComboWithKey<DlssPreset> dlssPresetCombo{
@@ -404,6 +408,17 @@ namespace dxvk {
     } }
   };
 
+  ImGui::ComboWithKey<FSRPreset> fsrPresetCombo{
+    "FSR Preset",
+    ImGui::ComboWithKey<FSRPreset>::ComboEntries{ {
+        {FSRPreset::UltraPerformance, "Ultra Performance"},
+        {FSRPreset::Performance, "Performance"},
+        {FSRPreset::Balanced, "Balanced"},
+        {FSRPreset::Quality, "Quality"},
+        {FSRPreset::NativeAA, "Native Anti-Aliasing"},
+    } }
+  };
+
   ImGui::ComboWithKey<RussianRouletteMode> secondPlusBounceRussianRouletteModeCombo {
     "2nd+ Bounce Russian Roulette Mode",
     ImGui::ComboWithKey<RussianRouletteMode>::ComboEntries { {
@@ -434,6 +449,26 @@ namespace dxvk {
       {DxvkRayReconstruction::RayReconstructionModel::Transformer, "Transformer", "Ensures highest image quality. Can be more expensive than CNN in terms of memory and performance."},
       {DxvkRayReconstruction::RayReconstructionModel::CNN, "CNN", "Ensures great image quality"},
   } });
+
+  // Frame Generation Type selector (DLSS-G or FSR)
+  // Full combo shown when DLSS FG is supported
+  ImGui::ComboWithKey<FrameGenerationType> frameGenTypeCombo {
+    "Frame Generation",
+    ImGui::ComboWithKey<FrameGenerationType>::ComboEntries { {
+        {FrameGenerationType::None, "Off", "Frame generation disabled"},
+        {FrameGenerationType::DLSS, "DLSS", "NVIDIA DLSS Frame Generation"},
+        {FrameGenerationType::FSR, "FSR", "AMD FSR Frame Generation"},
+    } }
+  };
+
+  // Reduced combo shown when DLSS FG is NOT supported (no DLSS FG capable GPU)
+  ImGui::ComboWithKey<FrameGenerationType> frameGenTypeComboNoDLSS {
+    "Frame Generation",
+    ImGui::ComboWithKey<FrameGenerationType>::ComboEntries { {
+        {FrameGenerationType::None, "Off", "Frame generation disabled"},
+        {FrameGenerationType::FSR, "FSR", "AMD FSR Frame Generation"},
+    } }
+  };
 
   ImGui::ComboWithKey<int> dlfgMfgModeCombo {
     "DLSS Frame Generation Mode",
@@ -486,6 +521,7 @@ namespace dxvk {
       { RtxFramePassStage::DLSSRR, "DLSSRR" },
       { RtxFramePassStage::NIS, "NIS" },
       { RtxFramePassStage::XeSS, "XeSS" },
+      { RtxFramePassStage::FSR, "FSR" },
       { RtxFramePassStage::TAA, "TAA" },
       { RtxFramePassStage::DustParticles, "DustParticles" },
       { RtxFramePassStage::Bloom, "Bloom" },
@@ -1467,10 +1503,27 @@ namespace dxvk {
 
           break;
         }
+        case UpscalerType::FSR: {
+          m_userGraphicsSettingChanged |= fsrPresetCombo.getKey(&DxvkFSR::FSROptions::presetObject());
+
+          // Display FSR internal resolution
+          auto& fsr = ctx->getCommonObjects()->metaFSR();
+
+          uint32_t inputWidth;
+          uint32_t inputHeight;
+          fsr.getInputSize(inputWidth, inputHeight);
+          ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
+
+          break;
+        }
         case UpscalerType::None: {
           // No custom UI here.
           break;
         }
+      }
+
+      if (RtxOptions::upscalerType() != UpscalerType::None) {
+        m_userGraphicsSettingChanged |= ImGui::SliderFloat("Sharpness", &DxvkFSR::FSROptions::sharpnessObject(), 0.0f, 1.0f, "%.2f");
       }
 
       ImGui::Unindent(static_cast<float>(subItemIndent));
@@ -1479,11 +1532,13 @@ namespace dxvk {
       ImGui::EndDisabled();
     }
 
-    // Latency Reduction Settings
-    if (dlfgSupported) {
+    // Frame Generation Settings — show if any FG technology is supported (DLSS FG or FSR FG)
+    const bool fsrfgSupported = DxvkFSRFrameGen::supportsFSRFrameGen();
+    const bool anyFrameGenSupported = dlfgSupported || fsrfgSupported;
+    if (anyFrameGenSupported) {
       ImGui::Dummy(ImVec2(0.0f, 3.0f));
       ImGui::TextSeparator("Frame Generation Settings");
-      showDLFGOptions(ctx);
+      showDLFGOptions(ctx, dlfgSupported);
     }
 
     if (reflexInitialized) {
@@ -3559,8 +3614,10 @@ namespace dxvk {
   void ImGUI::showVsyncOptions(bool enableDLFGGuard) {
     // we should never get here without a swapchain, so we must have latched the vsync value already
     assert(RtxOptions::enableVsyncState != EnableVsync::WaitingForImplicitSwapchain);
+
+    const bool anyFGActive = enableDLFGGuard && (DxvkDLFG::enable() || DxvkFSRFrameGen::enable());
     
-    if (enableDLFGGuard && DxvkDLFG::enable()) {
+    if (anyFGActive) {
       ImGui::BeginDisabled();
     }
 
@@ -3578,7 +3635,7 @@ namespace dxvk {
     ImGui::Unindent();
     ImGui::EndDisabled();
     
-    if (enableDLFGGuard && DxvkDLFG::enable()) {
+    if (anyFGActive) {
       ImGui::Indent();
       ImGui::TextWrapped("When Frame Generation is active, V-Sync is automatically disabled.");
       ImGui::Unindent();
@@ -3587,38 +3644,92 @@ namespace dxvk {
     }
   }
 
-  void ImGUI::showDLFGOptions(const Rc<DxvkContext>& ctx) {
-    const bool supportsDLFG = ctx->getCommonObjects()->metaNGXContext().supportsDLFG() && !ctx->getCommonObjects()->metaDLFG().hasDLFGFailed();
-    const uint32_t maxInterpolatedFrames = ctx->getCommonObjects()->metaNGXContext().dlfgMaxInterpolatedFrames();
-    const bool supportsMultiFrame = maxInterpolatedFrames > 1;
-
-    if (!supportsDLFG) {
-      ImGui::BeginDisabled();
+  void ImGUI::showDLFGOptions(const Rc<DxvkContext>& ctx, bool isDLSSFGSupported) {
+    // Frame Generation type selection
+    // Use the appropriate combo based on whether DLSS FG is supported by the GPU
+    if (isDLSSFGSupported) {
+      m_userGraphicsSettingChanged |= frameGenTypeCombo.getKey(&RtxOptions::frameGenerationTypeObject());
+    } else {
+      // DLSS FG not supported — only show Off and FSR options
+      // If DLSS was previously selected (e.g. from config), reset to None
+      if (RtxOptions::frameGenerationType() == FrameGenerationType::DLSS) {
+        RtxOptions::frameGenerationType.setDeferred(FrameGenerationType::None);
+      }
+      m_userGraphicsSettingChanged |= frameGenTypeComboNoDLSS.getKey(&RtxOptions::frameGenerationTypeObject());
     }
+    
+    const FrameGenerationType selectedType = RtxOptions::frameGenerationType();
 
-    bool dlfgChanged = ImGui::Checkbox("Enable DLSS Frame Generation", &DxvkDLFG::enableObject());
-    m_userGraphicsSettingChanged |= dlfgChanged;
-    if (supportsMultiFrame) {
-      dlfgMfgModeCombo.getKey(&DxvkDLFG::maxInterpolatedFramesObject());
+    // Keep runtime toggles aligned with the type selector.
+    if (selectedType == FrameGenerationType::None) {
+      DxvkDLFG::enable.setDeferred(false);
+      DxvkFSRFrameGen::enable.setDeferred(false);
     }
+    
+    // DLSS Frame Generation options
+    if (selectedType == FrameGenerationType::DLSS) {
+      const bool supportsDLFG = ctx->getCommonObjects()->metaNGXContext().supportsDLFG() && !ctx->getCommonObjects()->metaDLFG().hasDLFGFailed();
+      const uint32_t maxInterpolatedFrames = ctx->getCommonObjects()->metaNGXContext().dlfgMaxInterpolatedFrames();
+      const bool supportsMultiFrame = maxInterpolatedFrames > 1;
+      const bool fsrFgEnabled = DxvkFSRFrameGen::enable();
 
-    const auto& reason = ctx->getCommonObjects()->metaNGXContext().getDLFGNotSupportedReason();
-    if (reason.size()) {
-      ImGui::SetTooltipToLastWidgetOnHover(reason.c_str());
-      ImGui::TextWrapped(reason.c_str());
-    }
+      const bool disableDlfgToggle = !supportsDLFG || fsrFgEnabled;
+      ImGui::BeginDisabled(disableDlfgToggle);
 
-    if (!supportsDLFG) {
+      bool dlfgChanged = ImGui::Checkbox("Enable DLSS Frame Generation", &DxvkDLFG::enableObject());
+      m_userGraphicsSettingChanged |= dlfgChanged;
+      if (supportsMultiFrame) {
+        dlfgMfgModeCombo.getKey(&DxvkDLFG::maxInterpolatedFramesObject());
+      }
+
+      if (fsrFgEnabled) {
+        ImGui::SetTooltipToLastWidgetOnHover("Disable FSR Frame Generation before enabling DLSS Frame Generation.");
+        ImGui::TextWrapped("DLSS Frame Generation is unavailable while FSR Frame Generation is enabled.");
+      }
+
+      const auto& reason = ctx->getCommonObjects()->metaNGXContext().getDLFGNotSupportedReason();
+      if (reason.size()) {
+        ImGui::SetTooltipToLastWidgetOnHover(reason.c_str());
+        ImGui::TextWrapped(reason.c_str());
+      }
+
       ImGui::EndDisabled();
-    }
 
-    // Need to change Reflex in sync with DLFG, not on the next frame.
-    if (dlfgChanged) {
-      if (!supportsDLFG) {
-        DxvkDLFG::enable.setDeferred(false);
-      } else if (!DxvkDLFG::enable()){
-        // DLFG was just enabled.  force Reflex to Low Latency.
-        RtxOptions::reflexMode.setDeferred(ReflexMode::LowLatency);
+      // Need to change Reflex in sync with DLFG, not on the next frame.
+      if (dlfgChanged) {
+        if (!supportsDLFG) {
+          DxvkDLFG::enable.setDeferred(false);
+        } else if (!DxvkDLFG::enable()){
+          // DLFG was just enabled.  force Reflex to Low Latency.
+          RtxOptions::reflexMode.setDeferred(ReflexMode::LowLatency);
+          DxvkFSRFrameGen::enable.setDeferred(false);
+        }
+      }
+    }
+    // FSR Frame Generation options
+    else if (selectedType == FrameGenerationType::FSR) {
+      const bool supportsFSRFG = DxvkFSRFrameGen::supportsFSRFrameGen();
+      const bool dlssFgEnabled = DxvkDLFG::enable();
+
+      if (!supportsFSRFG) {
+        ImGui::TextWrapped("FSR Frame Generation is not supported on this system.");
+      } else {
+        // FSR FG is automatically enabled when this option is selected
+        ImGui::TextWrapped("FSR Frame Generation is enabled. Works on any modern GPU.");
+        
+        // Still provide the toggle for users who want to temporarily disable it
+        ImGui::BeginDisabled(dlssFgEnabled);
+        bool fsrfgChanged = ImGui::Checkbox("Enable FSR Frame Generation", &DxvkFSRFrameGen::enableObject());
+        m_userGraphicsSettingChanged |= fsrfgChanged;
+        if (dlssFgEnabled) {
+          ImGui::SetTooltipToLastWidgetOnHover("Disable DLSS Frame Generation before enabling FSR Frame Generation.");
+          ImGui::TextWrapped("FSR Frame Generation is unavailable while DLSS Frame Generation is enabled.");
+        }
+        ImGui::EndDisabled();
+
+        if (fsrfgChanged && DxvkFSRFrameGen::enable()) {
+          DxvkDLFG::enable.setDeferred(false);
+        }
       }
     }
 
@@ -3817,7 +3928,10 @@ namespace dxvk {
         ImGui::Separator();
       }
 
-      showDLFGOptions(ctx);
+      {
+        const bool dlfgSupportedDev = ctx->getCommonObjects()->metaDLFG().supportsDLFG();
+        showDLFGOptions(ctx, dlfgSupportedDev);
+      }
 
       ImGui::Separator();
 
@@ -3854,7 +3968,6 @@ namespace dxvk {
         dlss.showImguiSettings();
       } else if (RtxOptions::upscalerType() == UpscalerType::NIS) {
         ImGui::SliderFloat("Resolution scale", &RtxOptions::resolutionScaleObject(), 0.5f, 1.0f);
-        ImGui::SliderFloat("Sharpness", &ctx->getCommonObjects()->metaNIS().m_sharpness, 0.1f, 1.0f);
         ImGui::Checkbox("Use FP16", &ctx->getCommonObjects()->metaNIS().m_useFp16);
       } else if (RtxOptions::upscalerType() == UpscalerType::XeSS) {
           xessPresetCombo.getKey(&DxvkXeSS::XessOptions::presetObject());
@@ -3873,7 +3986,19 @@ namespace dxvk {
           ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
         } else if (RtxOptions::upscalerType() == UpscalerType::TAAU) {
         ImGui::SliderFloat("Resolution scale", &RtxOptions::resolutionScaleObject(), 0.5f, 1.0f);
+      } else if (RtxOptions::upscalerType() == UpscalerType::FSR) {
+        fsrPresetCombo.getKey(&DxvkFSR::FSROptions::presetObject());
+        
+        // Display FSR internal resolution
+        auto& fsr = ctx->getCommonObjects()->metaFSR();
+        uint32_t inputWidth, inputHeight;
+        fsr.getInputSize(inputWidth, inputHeight);
+        ImGui::TextWrapped(str::format("Render Resolution: ", inputWidth, "x", inputHeight).c_str());
       }
+
+        if (RtxOptions::upscalerType() != UpscalerType::None) {
+          ImGui::SliderFloat("Sharpness", &DxvkFSR::FSROptions::sharpnessObject(), 0.0f, 1.0f, "%.2f");
+        }
 
       ImGui::Separator();
 
