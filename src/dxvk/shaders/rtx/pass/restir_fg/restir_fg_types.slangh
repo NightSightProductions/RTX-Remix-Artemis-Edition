@@ -1,0 +1,247 @@
+/*
+* Copyright (c) 2024-2026, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+// ReSTIR-FG: Real-Time Reservoir Resampled Photon Final Gathering
+// Data structures based on the paper by Kern, Brüll, and Grosch (TU Clausthal)
+// Simplified stub types for initial build validation
+
+#include "rtx/utility/packing.slangh"
+
+// =====================================================
+// Photon Data Structure
+// =====================================================
+
+struct PhotonData {
+  float3 position;    // World-space position where photon hit diffuse surface
+  float  radius;      // Collection radius
+  float3 flux;        // Photon flux (power)
+  uint   dirPacked;   // Incoming direction (octahedral encoded)
+  uint   photonType;  // 0 = global, 1 = caustic
+  
+  float3 getDirection() {
+    return signedOctahedralToSphereDirection(snorm2x16ToFloat2x32(dirPacked));
+  }
+};
+
+// Packed version for storage (32 bytes)
+struct PackedPhotonData {
+  uint4 data0;  // position.xyz + radius
+  uint4 data1;  // flux.xyz + dirPacked
+  
+  static PackedPhotonData pack(PhotonData pd) {
+    PackedPhotonData packed;
+    packed.data0 = uint4(asuint(pd.position.x), asuint(pd.position.y), asuint(pd.position.z), asuint(pd.radius));
+    packed.data1 = uint4(asuint(pd.flux.x), asuint(pd.flux.y), asuint(pd.flux.z), pd.dirPacked);
+    return packed;
+  }
+  
+  PhotonData unpack() {
+    PhotonData pd;
+    pd.position = float3(asfloat(data0.x), asfloat(data0.y), asfloat(data0.z));
+    pd.radius = asfloat(data0.w);
+    pd.flux = float3(asfloat(data1.x), asfloat(data1.y), asfloat(data1.z));
+    pd.dirPacked = data1.w;
+    pd.photonType = 0;
+    return pd;
+  }
+};
+
+// Helper function to create a packed direction from a float3
+uint packDirection(float3 dir) {
+  return float2x32ToSnorm2x16(sphereDirectionToSignedOctahedral(dir));
+}
+
+// =====================================================
+// Final Gather Reservoir
+// =====================================================
+
+struct ReSTIRFG_Reservoir {
+  float wSum;           // Sum of weights
+  float targetFunc;     // Target function value p_hat(y)
+  uint  M;              // Number of samples seen
+  uint  age;            // Age in frames for temporal capping
+};
+
+// Packed reservoir (16 bytes)
+struct PackedReSTIRFG_Reservoir {
+  uint4 data;  // wSum, targetFunc, M, age
+  
+  static PackedReSTIRFG_Reservoir pack(ReSTIRFG_Reservoir r) {
+    PackedReSTIRFG_Reservoir packed;
+    packed.data = uint4(asuint(r.wSum), asuint(r.targetFunc), r.M, r.age);
+    return packed;
+  }
+  
+  ReSTIRFG_Reservoir unpack() {
+    ReSTIRFG_Reservoir r;
+    r.wSum = asfloat(data.x);
+    r.targetFunc = asfloat(data.y);
+    r.M = data.z;
+    r.age = data.w;
+    return r;
+  }
+};
+
+// =====================================================
+// Final Gather Sample Data
+// =====================================================
+
+struct ReSTIRFG_Sample {
+  float3 hitPosition;     // Position of the final gather hit point
+  float3 hitNormal;       // Normal at the hit point
+  float3 radiance;        // Estimated radiance from photon collection
+  float3 throughput;      // Path throughput to this point
+  float  pdf;             // PDF of generating this sample
+  uint   pathLength;      // Number of bounces to reach this point
+  uint   surfaceHit;      // Packed hit info
+};
+
+// Packed sample (64 bytes)
+struct PackedReSTIRFG_Sample {
+  uint4 data0;  // hitPosition.xyz + hitNormal.x
+  uint4 data1;  // hitNormal.yz + radiance.xy
+  uint4 data2;  // radiance.z + throughput.xyz
+  uint4 data3;  // pdf + pathLength + surfaceHit + padding
+  
+  static PackedReSTIRFG_Sample pack(ReSTIRFG_Sample s) {
+    PackedReSTIRFG_Sample packed;
+    packed.data0 = uint4(asuint(s.hitPosition.x), asuint(s.hitPosition.y), asuint(s.hitPosition.z), asuint(s.hitNormal.x));
+    packed.data1 = uint4(asuint(s.hitNormal.y), asuint(s.hitNormal.z), asuint(s.radiance.x), asuint(s.radiance.y));
+    packed.data2 = uint4(asuint(s.radiance.z), asuint(s.throughput.x), asuint(s.throughput.y), asuint(s.throughput.z));
+    packed.data3 = uint4(asuint(s.pdf), s.pathLength, s.surfaceHit, 0);
+    return packed;
+  }
+  
+  ReSTIRFG_Sample unpack() {
+    ReSTIRFG_Sample s;
+    s.hitPosition = float3(asfloat(data0.x), asfloat(data0.y), asfloat(data0.z));
+    s.hitNormal = float3(asfloat(data0.w), asfloat(data1.x), asfloat(data1.y));
+    s.radiance = float3(asfloat(data1.z), asfloat(data1.w), asfloat(data2.x));
+    s.throughput = float3(asfloat(data2.y), asfloat(data2.z), asfloat(data2.w));
+    s.pdf = asfloat(data3.x);
+    s.pathLength = data3.y;
+    s.surfaceHit = data3.z;
+    return s;
+  }
+};
+
+// =====================================================
+// Caustic Reservoir
+// =====================================================
+
+struct ReSTIRFG_CausticReservoir {
+  float wSum;           // Sum of weights
+  float targetFunc;     // Target function value
+  uint  M;              // Confidence weight (number of samples)
+  uint  pathLength;     // Path length to the caustic
+};
+
+// Packed caustic reservoir (16 bytes)
+struct PackedReSTIRFG_CausticReservoir {
+  uint4 data;
+  
+  static PackedReSTIRFG_CausticReservoir pack(ReSTIRFG_CausticReservoir r) {
+    PackedReSTIRFG_CausticReservoir packed;
+    packed.data = uint4(asuint(r.wSum), asuint(r.targetFunc), r.M, r.pathLength);
+    return packed;
+  }
+  
+  ReSTIRFG_CausticReservoir unpack() {
+    ReSTIRFG_CausticReservoir r;
+    r.wSum = asfloat(data.x);
+    r.targetFunc = asfloat(data.y);
+    r.M = data.z;
+    r.pathLength = data.w;
+    return r;
+  }
+};
+
+// =====================================================
+// Caustic Sample Data
+// =====================================================
+
+struct ReSTIRFG_CausticSample {
+  float3 photonPosition;  // Position of the photon
+  float3 photonDirection; // Incoming direction of the photon
+  float3 photonFlux;      // Photon flux/radiance
+};
+
+// Packed caustic sample (48 bytes)
+struct PackedReSTIRFG_CausticSample {
+  uint4 data0;  // photonPosition.xyz + photonDirection.x
+  uint4 data1;  // photonDirection.yz + photonFlux.xy
+  uint4 data2;  // photonFlux.z + padding
+  
+  static PackedReSTIRFG_CausticSample pack(ReSTIRFG_CausticSample s) {
+    PackedReSTIRFG_CausticSample packed;
+    packed.data0 = uint4(asuint(s.photonPosition.x), asuint(s.photonPosition.y), asuint(s.photonPosition.z), asuint(s.photonDirection.x));
+    packed.data1 = uint4(asuint(s.photonDirection.y), asuint(s.photonDirection.z), asuint(s.photonFlux.x), asuint(s.photonFlux.y));
+    packed.data2 = uint4(asuint(s.photonFlux.z), 0, 0, 0);
+    return packed;
+  }
+  
+  ReSTIRFG_CausticSample unpack() {
+    ReSTIRFG_CausticSample s;
+    s.photonPosition = float3(asfloat(data0.x), asfloat(data0.y), asfloat(data0.z));
+    s.photonDirection = float3(asfloat(data0.w), asfloat(data1.x), asfloat(data1.y));
+    s.photonFlux = float3(asfloat(data1.z), asfloat(data1.w), asfloat(data2.x));
+    return s;
+  }
+};
+
+// =====================================================
+// Surface Data (for resampling similarity checks)
+// =====================================================
+
+struct ReSTIRFG_SurfaceData {
+  float3 position;      // World position
+  float3 normal;        // Shading normal
+  float  roughness;     // Perceptual roughness
+  float3 albedo;        // Base albedo
+  uint   hitInfo;       // Packed surface hit info (0 = invalid)
+};
+
+// Packed surface data (48 bytes)
+struct PackedReSTIRFG_SurfaceData {
+  uint4 data0;  // position.xyz + normal.x
+  uint4 data1;  // normal.yz + roughness + albedo.x
+  uint4 data2;  // albedo.yz + hitInfo + padding
+  
+  static PackedReSTIRFG_SurfaceData pack(ReSTIRFG_SurfaceData s) {
+    PackedReSTIRFG_SurfaceData packed;
+    packed.data0 = uint4(asuint(s.position.x), asuint(s.position.y), asuint(s.position.z), asuint(s.normal.x));
+    packed.data1 = uint4(asuint(s.normal.y), asuint(s.normal.z), asuint(s.roughness), asuint(s.albedo.x));
+    packed.data2 = uint4(asuint(s.albedo.y), asuint(s.albedo.z), s.hitInfo, 0);
+    return packed;
+  }
+  
+  ReSTIRFG_SurfaceData unpack() {
+    ReSTIRFG_SurfaceData s;
+    s.position = float3(asfloat(data0.x), asfloat(data0.y), asfloat(data0.z));
+    s.normal = float3(asfloat(data0.w), asfloat(data1.x), asfloat(data1.y));
+    s.roughness = asfloat(data1.z);
+    s.albedo = float3(asfloat(data1.w), asfloat(data2.x), asfloat(data2.y));
+    s.hitInfo = data2.z;
+    return s;
+  }
+};

@@ -165,6 +165,7 @@ namespace dxvk {
     ImportanceSampled = 0,   // Importance sampled integration - provides the noisiest output and used primarily for reference comparisons
     ReSTIRGI = 1,            // Importance Sampled + ReSTIR GI integrations
     NeuralRadianceCache = 2, // Implements a live trained neural network to provide a world space radiance cache and allow the pathtracer to terminate paths earlier into the cache.
+    ReSTIRFG = 3,            // ReSTIR Final Gathering - uses photon mapping combined with reservoir resampling for real-time GI and caustics.
   
     Count
   };

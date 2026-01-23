@@ -69,6 +69,7 @@ struct CompositeArgs {
 
   float primaryDirectMissLinearViewZ;
   uint enableReSTIRGI;
+  uint enableReSTIRFG;
   float pixelHighlightReuseStrength;
   uint debugViewIdx;
 

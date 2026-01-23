@@ -270,9 +270,10 @@ void main(uint2 thread_id : SV_DispatchThreadID, uint2 localIndex : SV_GroupThre
   vec3 primaryIndirectDiffuseRadiance = vec3(0);
   vec3 primaryIndirectSpecularRadiance = vec3(0);
 
-  if (cb.enableSeparatedDenoisers)
+  // Load indirect radiance when using separated denoisers or ReSTIR-FG
+  if (cb.enableSeparatedDenoisers || cb.enableReSTIRFG)
   {
-    if (cb.usePostFilter)
+    if (cb.usePostFilter && !cb.enableReSTIRFG)
     {
       primaryIndirectDiffuseRadiance = applyPostFilter(PrimaryIndirectDiffuseRadianceHitDistance, thread_id.xy, cb.primaryIndirectDenoiser);
       primaryIndirectSpecularRadiance = applyPostFilter(PrimaryIndirectSpecularRadianceHitDistance, thread_id.xy, cb.primaryIndirectDenoiser);
@@ -282,8 +283,12 @@ void main(uint2 thread_id : SV_DispatchThreadID, uint2 localIndex : SV_GroupThre
       primaryIndirectDiffuseRadiance = texelFetch(PrimaryIndirectDiffuseRadianceHitDistance, thread_id.xy, 0).xyz;
       primaryIndirectSpecularRadiance = texelFetch(PrimaryIndirectSpecularRadianceHitDistance, thread_id.xy, 0).xyz;
 
-      unpackDenoiserRadiance(primaryIndirectDiffuseRadiance, cb.primaryIndirectDenoiser);
-      unpackDenoiserRadiance(primaryIndirectSpecularRadiance, cb.primaryIndirectDenoiser);
+      // Only apply denoiser unpacking when using separated denoisers (not for ReSTIR-FG which handles its own output format)
+      if (cb.enableSeparatedDenoisers && !cb.enableReSTIRFG)
+      {
+        unpackDenoiserRadiance(primaryIndirectDiffuseRadiance, cb.primaryIndirectDenoiser);
+        unpackDenoiserRadiance(primaryIndirectSpecularRadiance, cb.primaryIndirectDenoiser);
+      }
     }
   }
 
@@ -306,7 +311,8 @@ void main(uint2 thread_id : SV_DispatchThreadID, uint2 localIndex : SV_GroupThre
   vec3 primaryCombinedSpecularRadiance;
 
   vec2 bsdfFactor = cb.enableRtxdi ? BSDFFactor[thread_id.xy].xy : vec2(1);
-  vec2 bsdfFactor2 = cb.enableReSTIRGI? BSDFFactor2[thread_id.xy].xy : vec2(1);
+  // ReSTIR-FG uses vec2(1) since it doesn't have a separate BSDF factor texture
+  vec2 bsdfFactor2 = cb.enableReSTIRGI ? BSDFFactor2[thread_id.xy].xy : vec2(1);
 
   if (cb.enhanceAlbedo)
   {

@@ -389,6 +389,9 @@ namespace dxvk {
       case IntegrateIndirectMode::NeuralRadianceCache:
         Logger::info("[RTX] Integrate Indirect Mode: Neural Radiance Cache - activated");
         break;
+      case IntegrateIndirectMode::ReSTIRFG:
+        Logger::info("[RTX] Integrate Indirect Mode: ReSTIR-FG (Photon Final Gather) - activated");
+        break;
       }
     }
   }

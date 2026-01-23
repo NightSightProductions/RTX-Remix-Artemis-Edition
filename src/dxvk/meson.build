@@ -308,6 +308,8 @@ dxvk_src = files([
   'rtx_render/rtx_resources.h',
   'rtx_render/rtx_restir_gi_rayquery.cpp',
   'rtx_render/rtx_restir_gi_rayquery.h',
+  'rtx_render/rtx_restir_fg.cpp',
+  'rtx_render/rtx_restir_fg.h',
   'rtx_render/rtx_rtxdi_rayquery.cpp',
   'rtx_render/rtx_rtxdi_rayquery.h',
   'rtx_render/rtx_scene_manager.cpp',

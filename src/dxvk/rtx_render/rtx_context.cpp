@@ -41,6 +41,7 @@
 #include "rtx_xess.h"
 #include "rtx_rtxdi_rayquery.h"
 #include "rtx_restir_gi_rayquery.h"
+#include "rtx_restir_fg.h"
 #include "rtx_composite.h"
 #include "rtx_debug_view.h"
 
@@ -606,6 +607,9 @@ namespace dxvk {
 
         // ReSTIR GI
         m_common->metaReSTIRGIRayQuery().dispatch(this, rtOutput);
+
+        // ReSTIR-FG (Photon Final Gather)
+        m_common->metaReSTIRFG().dispatch(this, rtOutput);
         
         if (captureScreenImage && captureDebugImage) {
           takeScreenshot("baseReflectivity", rtOutput.m_primaryBaseReflectivity.image(Resources::AccessType::Read));
@@ -1173,6 +1177,31 @@ namespace dxvk {
     constants.enableReSTIRGIVisibilityValidation = restirGI.validateVisibilityChange();
     constants.reSTIRGIVisibilityValidationRange = 1.0f + restirGI.visibilityValidationRange();
 
+    // ReSTIR-FG (Final Gather)
+    DxvkReSTIRFG& restirFG = m_common->metaReSTIRFG();
+    constants.enableReSTIRFG = restirFG.isActive();
+    constants.restirFGPhotonsPerFrame = restirFG.photonsPerFrame();
+    constants.restirFGPhotonRadius = restirFG.photonRadius();
+    constants.restirFGCausticPhotonRadius = restirFG.causticPhotonRadius();
+    constants.restirFGRoughnessThreshold = restirFG.roughnessThreshold();
+    constants.restirFGGlobalPhotonRejectionProbability = restirFG.globalPhotonRejectionProbability();
+    constants.restirFGResamplingMode = (uint32_t)restirFG.resamplingMode();
+    constants.restirFGSpatialSamples = restirFG.spatialSamples();
+    constants.restirFGDisocclusionBoostSamples = restirFG.disocclusionBoostSamples();
+    constants.restirFGSpatialRadius = restirFG.spatialRadius();
+    constants.restirFGCausticSpatialSamples = restirFG.causticSpatialSamples();
+    constants.restirFGCausticSpatialRadius = restirFG.causticSpatialRadius();
+    constants.restirFGCausticMode = (uint32_t)restirFG.causticMode();
+    constants.restirFGBiasCorrectionMode = (uint32_t)restirFG.biasCorrectionMode();
+    constants.restirFGPairwiseMISCentralWeight = restirFG.pairwiseMISCentralWeight();
+    constants.restirFGTemporalHistoryLength = restirFG.temporalHistoryLength();
+    constants.restirFGNormalThreshold = restirFG.normalThreshold();
+    constants.restirFGDepthThreshold = restirFG.depthThreshold();
+    constants.restirFGMaxLuminance = restirFG.maxLuminance();
+    constants.restirFGMaxPhotonBounces = restirFG.maxPhotonBounces();
+    constants.restirFGMaxFinalGatherBounces = restirFG.maxFinalGatherBounces();
+    constants.restirFGMinPhotonContribution = restirFG.minPhotonContribution();
+
     // Neural Radiance Cache
     NeuralRadianceCache& nrc = m_common->metaNeuralRadianceCache();
     constants.enableNrc = nrc.isActive();
@@ -1421,16 +1450,20 @@ namespace dxvk {
     // RTXDI Gradient pass
     m_common->metaRtxdiRayQuery().dispatchGradient(this, rtOutput);
 
-    // Integrate indirect
-    {
-      ScopedGpuProfileZone(this, "Integrate Indirect Raytracing");
-      setFramePassStage(RtxFramePassStage::IndirectIntegration);
-      
-      m_common->metaPathtracerIntegrateIndirect().dispatch(this, rtOutput);
-    }
+    // Skip standard integrate indirect pass when ReSTIR-FG is handling indirect lighting
+    const bool useReSTIRFG = RtxOptions::integrateIndirectMode() == IntegrateIndirectMode::ReSTIRFG;
+    if (!useReSTIRFG) {
+      // Integrate indirect
+      {
+        ScopedGpuProfileZone(this, "Integrate Indirect Raytracing");
+        setFramePassStage(RtxFramePassStage::IndirectIntegration);
+        
+        m_common->metaPathtracerIntegrateIndirect().dispatch(this, rtOutput);
+      }
 
-    // Integrate indirect - NEE Cache pass
-    m_common->metaPathtracerIntegrateIndirect().dispatchNEE(this, rtOutput);
+      // Integrate indirect - NEE Cache pass
+      m_common->metaPathtracerIntegrateIndirect().dispatchNEE(this, rtOutput);
+    }
   }
 
   void RtxContext::dispatchPathTracing(const Resources::RaytracingOutput& rtOutput) {
@@ -1549,8 +1582,9 @@ namespace dxvk {
       referenceDenoiserSecondLobe0.releaseResources();
     }
 
-    // Primary Indirect light denoiser, if separate denoiser is used.
-    if (RtxOptions::denoiseDirectAndIndirectLightingSeparately() && !isSecondaryOnly)
+    // Primary Indirect light denoiser, if separate denoiser is used or ReSTIR-FG is enabled.
+    const bool useReSTIRFG = (RtxOptions::integrateIndirectMode() == IntegrateIndirectMode::ReSTIRFG);
+    if ((RtxOptions::denoiseDirectAndIndirectLightingSeparately() || useReSTIRFG) && !isSecondaryOnly)
     {
       ScopedGpuProfileZone(this, "Primary Indirect Denoising");
 

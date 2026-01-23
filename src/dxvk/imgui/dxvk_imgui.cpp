@@ -50,6 +50,7 @@
 #include "rtx_render/rtx_xess.h"
 #include "rtx_render/rtx_rtxdi_rayquery.h"
 #include "rtx_render/rtx_restir_gi_rayquery.h"
+#include "rtx_render/rtx_restir_fg.h"
 #include "rtx_render/rtx_debug_view.h"
 #include "rtx_render/rtx_composite.h"
 #include "dxvk_image.h"
@@ -425,7 +426,10 @@ namespace dxvk {
           "RTX Neural Radiance Cache (NRC). NRC is an AI based world space radiance cache. It is live trained by the path tracer\n"
           "and allows paths to terminate early by looking up the cached value and saving performance.\n"
           "NRC supports infinite bounces and often provides results closer to that of reference than ReSTIR GI\n"
-          "while increasing performance in scenarios where ray paths have 2 or more bounces on average."}
+          "while increasing performance in scenarios where ray paths have 2 or more bounces on average."},
+        {IntegrateIndirectMode::ReSTIRFG, "ReSTIR-FG (Photon Gathering)", 
+          "ReSTIR Final Gathering uses photon mapping combined with reservoir resampling for real-time GI and caustics.\n"
+          "It provides high quality indirect lighting with support for caustics from specular surfaces."}
     } }
   };
 
@@ -4070,6 +4074,15 @@ namespace dxvk {
             ImGui::PushID("Neural Radiance Cache");
             NeuralRadianceCache& nrc = common->metaNeuralRadianceCache();
             nrc.showImguiSettings(*ctx);
+            ImGui::PopID();
+            ImGui::Unindent();
+          }
+        } else if (RtxOptions::integrateIndirectMode() == IntegrateIndirectMode::ReSTIRFG) {
+          if (RemixGui::CollapsingHeader("ReSTIR-FG (Photon Gathering)", collapsingHeaderClosedFlags)) {
+            ImGui::Indent();
+            ImGui::PushID("ReSTIR-FG");
+            auto& restirFG = common->metaReSTIRFG();
+            restirFG.showImguiSettings();
             ImGui::PopID();
             ImGui::Unindent();
           }

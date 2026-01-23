@@ -531,6 +531,7 @@ namespace dxvk {
     m_pathtracerGbuffer(device),
     m_rtxdiRayQuery(device),
     m_restirgiRayQuery(device),
+    m_restirFG(device),
     m_pathtracerIntegrateDirect(device),
     m_pathtracerIntegrateIndirect(device),
     m_demodulate(device),

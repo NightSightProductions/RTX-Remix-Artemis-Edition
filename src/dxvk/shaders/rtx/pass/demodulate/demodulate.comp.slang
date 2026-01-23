@@ -637,8 +637,8 @@ void main(uint2 pixelCoordinate : SV_DispatchThreadID, uint2 localIndex : SV_Gro
   vec4 secondaryCombinedSpecularInput = vec4(vec3(0), kEmptyPixelHitDistance);
   
   // Load the primary direct and indirect signals
-  // If rtxdi and restir gi are enabled, the primary surface input is dense and demodulation can always be enabled.
-  bool demodulatePrimaryInput = (cb.enableRtxdi && cb.enableReSTIRGI) || geometryFlags.primarySelectedIntegrationSurface;
+  // If rtxdi and restir gi/fg are enabled, the primary surface input is dense and demodulation can always be enabled.
+  bool demodulatePrimaryInput = (cb.enableRtxdi && cb.enableReSTIRGI) || cb.enableReSTIRFG || geometryFlags.primarySelectedIntegrationSurface;
   if (demodulatePrimaryInput)
   {
     primaryDirectDiffuseInput = PrimaryDirectDiffuseRadiance[pixelCoordinate];

@@ -38,6 +38,7 @@
 #include "rtx_render/rtx_pathtracer_integrate_direct.h"
 #include "rtx_render/rtx_pathtracer_integrate_indirect.h"
 #include "rtx_render/rtx_demodulate.h"
+#include "rtx_render/rtx_restir_fg.h"
 #include "rtx_render/rtx_nee_cache.h"
 #include "rtx_render/rtx_denoise.h"
 #include "rtx_render/rtx_ngx_wrapper.h"
@@ -70,6 +71,7 @@ namespace dxvk {
   class DxvkRayReconstruction;
   class DxvkRtxdiRayQuery;
   class DxvkReSTIRGIRayQuery;
+  class DxvkReSTIRFG;
   class DxvkToneMapping;
   class DxvkBloom;
   class RtxGeometryUtils;
@@ -148,6 +150,10 @@ namespace dxvk {
 
     DxvkReSTIRGIRayQuery& metaReSTIRGIRayQuery() {
       return m_restirgiRayQuery.get();
+    }
+
+    DxvkReSTIRFG& metaReSTIRFG() {
+      return m_restirFG.get();
     }
 
     DxvkPathtracerIntegrateDirect& metaPathtracerIntegrateDirect() {
@@ -354,6 +360,7 @@ namespace dxvk {
     Active<DxvkPathtracerGbuffer>           m_pathtracerGbuffer;
     Active<DxvkRtxdiRayQuery>               m_rtxdiRayQuery;
     Active<DxvkReSTIRGIRayQuery>            m_restirgiRayQuery;
+    Active<DxvkReSTIRFG>                    m_restirFG;
     Active<DxvkPathtracerIntegrateDirect>   m_pathtracerIntegrateDirect;
     Active<DxvkPathtracerIntegrateIndirect> m_pathtracerIntegrateIndirect;
     Active<DemodulatePass>                  m_demodulate;

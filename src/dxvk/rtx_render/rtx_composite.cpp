@@ -314,13 +314,13 @@ namespace dxvk {
     ctx->bindResourceView(COMPOSITE_PRIMARY_DIRECT_DIFFUSE_RADIANCE_HIT_DISTANCE_INPUT, rtOutput.m_primaryDirectDiffuseRadiance.view(Resources::AccessType::Read), nullptr);
     ctx->bindResourceView(COMPOSITE_PRIMARY_DIRECT_SPECULAR_RADIANCE_HIT_DISTANCE_INPUT, rtOutput.m_primaryDirectSpecularRadiance.view(Resources::AccessType::Read), nullptr);
 
-    const bool isIndirectRadianceHitDistanceUsed = compositeArgs.enableSeparatedDenoisers;
+    const bool useReSTIRFG = (RtxOptions::integrateIndirectMode() == IntegrateIndirectMode::ReSTIRFG);
+    const bool isIndirectRadianceHitDistanceUsed = compositeArgs.enableSeparatedDenoisers || useReSTIRFG;
     ctx->bindResourceView(COMPOSITE_PRIMARY_INDIRECT_DIFFUSE_RADIANCE_HIT_DISTANCE_INPUT, rtOutput.m_primaryIndirectDiffuseRadiance.view(Resources::AccessType::Read, isIndirectRadianceHitDistanceUsed), nullptr);
     ctx->bindResourceView(COMPOSITE_PRIMARY_INDIRECT_SPECULAR_RADIANCE_HIT_DISTANCE_INPUT, rtOutput.m_primaryIndirectSpecularRadiance.view(Resources::AccessType::Read, isIndirectRadianceHitDistanceUsed), nullptr);
 
     ctx->bindResourceView(COMPOSITE_SECONDARY_COMBINED_DIFFUSE_RADIANCE_HIT_DISTANCE_INPUT, rtOutput.m_secondaryCombinedDiffuseRadiance.view(Resources::AccessType::Read), nullptr);
     ctx->bindResourceView(COMPOSITE_SECONDARY_COMBINED_SPECULAR_RADIANCE_HIT_DISTANCE_INPUT, rtOutput.m_secondaryCombinedSpecularRadiance.view(Resources::AccessType::Read), nullptr);
-
     const DxvkReSTIRGIRayQuery& restirGI = ctx->getCommonObjects()->metaReSTIRGIRayQuery();
     ctx->bindResourceView(COMPOSITE_BSDF_FACTOR_INPUT, rtOutput.m_bsdfFactor.view, nullptr);
     ctx->bindResourceView(COMPOSITE_BSDF_FACTOR2_INPUT, restirGI.getBsdfFactor2().view, nullptr);
@@ -412,6 +412,7 @@ namespace dxvk {
     compositeArgs.pixelHighlightReuseStrength = 1.0 / pixelHighlightReuseStrength();
     compositeArgs.enableRtxdi = RtxOptions::useRTXDI();
     compositeArgs.enableReSTIRGI = RtxOptions::useReSTIRGI();
+    compositeArgs.enableReSTIRFG = (RtxOptions::integrateIndirectMode() == IntegrateIndirectMode::ReSTIRFG);
     compositeArgs.volumeArgs = rtOutput.m_raytraceArgs.volumeArgs;
     compositeArgs.outputParticleLayer = ctx->useRayReconstruction() && rayReconstruction.useParticleBuffer();
     compositeArgs.outputSecondarySignalToParticleLayer = ctx->useRayReconstruction() && rayReconstruction.preprocessSecondarySignal();
