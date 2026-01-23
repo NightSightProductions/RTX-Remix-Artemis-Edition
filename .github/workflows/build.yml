@@ -2,9 +2,9 @@ name: Build
 
 on:
   push:
-    branches: [ main, 'release/**' ]
+    branches: [ SCP-RTX, 'release/**' ]
   pull_request:
-    branches: [ main, 'release/**' ]
+    branches: [ SCP-RTX, 'release/**' ]
 
 jobs:
   build-windows:
