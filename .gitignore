@@ -36,4 +36,6 @@
 /external
 **/_batch_output/**
 /public/bin/
-*.lognv-private/
+*.log
+nv-private/
+tests/rtx/dxvk_rt_testing/
