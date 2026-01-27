@@ -16,7 +16,6 @@ Practical examples of syntax:
 ```
 rtx.someIntScalar = 38
 rtx.someFloatScalar = 29.39
-rtx.someIntVector = 1, -2, 3
 rtx.someFloatVector = 1.0, -2.0, 3.0
 rtx.someBoolean = True
 # Note: Leading whitespace in a string is removed, allowing for nicer option formatting like this without messing up the string.
@@ -307,7 +306,7 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.graph.enable|bool|True|||Enable graph loading\.  If disabled, all graphs will be unloaded, losing any state\.|
 |rtx.graph.pauseGraphUpdates|bool|False|||Pause graph updating\.  If enabled, graphs logic will not be updated, but graph state will be retained\.|
 |rtx.graphicsPreset|int|5|||Overall rendering preset, higher presets result in higher image quality, lower presets result in better performance\.|
-|rtx.gui.backgroundAlpha|float|0.9|0|1|A value controlling the alpha of the GUI background\.|
+|rtx.gui.backgroundAlpha|float|1|0|1|A value controlling the alpha of the GUI background\.|
 |rtx.gui.compactGui|bool|False|||A setting to toggle between compact and spacious GUI modes\.|
 |rtx.gui.hudMessageAnimatedDotDurationMilliseconds|int|1000|||A duration in milliseconds between each dot in the animated dot sequence for HUD messages\. Must be greater than 0\.<br>These dots help indicate progress is happening to the user with a bit of animation which can be configured to animate at whatever speed is desired\.|
 |rtx.gui.largeUiMode|bool|False|||Toggles between Large and Regular GUI Scale Modes\.|
@@ -418,7 +417,6 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.neuralRadianceCache.enableAdaptiveTrainingDimensions|bool|True|||Enables adaptive training dimensions that scale based off pathtracer's execution behavior on a given scene\.|
 |rtx.neuralRadianceCache.enableCalculateTrainingLoss|bool|False|||Enables calculation of a training loss\. Imposes a performance penalty\.|
 |rtx.neuralRadianceCache.enableCustomNetworkConfig|bool|False|||Enables usage of a custom config "CustomNetworkConfig\.json" for NRC\.<br>The file needs to be present in the application's working directory\.|
-|rtx.neuralRadianceCache.enableDebugBuffers|bool|False|||Enables Debug Buffers which are needed for a subset of debug visualization modes\.|
 |rtx.neuralRadianceCache.enableDebugResolveMode|bool|False||||
 |rtx.neuralRadianceCache.enableNrcResolver|bool|False|||Enables NRC radiance resolve by NRC's resolver\. Disable to use Remix's resolver\.|
 |rtx.neuralRadianceCache.includeDirectLighting|bool|True||||
@@ -753,6 +751,7 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.terrainBaker.clearTerrainBeforeBaking|bool|False|||Performs a clear on the terrain texture before it is baked to in a frame\.|
 |rtx.terrainBaker.debugDisableBaking|bool|False|||Force disables rebaking every frame\. Used for debugging only\.|
 |rtx.terrainBaker.debugDisableBinding|bool|False|||Force disables binding of the baked terrain texture to the terrain meshes\. Used for debugging only\.|
+|rtx.terrainBaker.disableBackFaceCulling|bool|False|||Disables back\-face culling for baked terrain instances\. When enabled, all terrain will render as double\-sided\.|
 |rtx.terrainBaker.enableBaking|bool|True|||\[Experimental\] Enables runtime baking of blended terrains from top down \(i\.e\. in an opposite direction of "rtx\.zUp"\)\.<br>It bakes multiple blended albedo terrain textures into a single texture sampled during ray tracing\. The system requires "Terrain Textures" to contain hashes of the terrain textures to apply\.<br>Only use this system if the game renders terrain surfaces with multiple blended surfaces on top of each other \(i\.e\. sand mixed with dirt, grass, snow, etc\.\)\.<br>Requirement: the baked terrain surfaces must not be placed vertically in the game world\. Horizontal surfaces will have the best image quality\. Requires "rtx\.zUp" to be set properly\.|
 |rtx.terrainBaker.material.bakeReplacementMaterials|bool|True|||Enables baking of replacement materials when they are present\.|
 |rtx.terrainBaker.material.bakeSecondaryPBRTextures|bool|True|||Enables baking of secondary textures in replacement materials when they are present\.<br>Secondary textures are all PBR textures except for albedoOpacity\. So that includes normal, roughness, etc\.|
@@ -894,6 +893,7 @@ Tables below enumerate all the options and their defaults set by RTX Remix. Note
 |rtx.volumetrics.transmittanceColor|float3|0.999, 0.999, 0.999|||The color to use for calculating transmittance measured at a specific distance\.<br>Note that this color is assumed to be in sRGB space and gamma encoded as it will be converted to linear for use in volumetrics\.|
 |rtx.volumetrics.transmittanceMeasurementDistanceMeters|float|200|0||The distance the specified transmittance color was measured at\. Lower distances indicate a denser medium\.  The unit of measurement is meters, respects scene scale\.|
 |rtx.volumetrics.visibilityReuse|bool|True|||Determines whether to reuse visibility ray samples spatially across the reservoir\.<br>Results in slightly less noise with the volumetric froxel grid light samples at the cost of a ray per froxel cell each frame and should generally be enabled\.|
+|rtx.volumetrics.waterFogDensityThreshold|float|0.065|||The fog density threshold for determining when to use physical volumetrics vs fixed function fog\.<br>Values below this threshold will use physical volumetrics, while values above will fall back to fixed function fog\.<br>This threshold was created specifically for Portal RTX's underwater fixed function fog\.|
 |rtx.wboitDepthWeightTuning|float|2|||Allows for tuning the weighted blended OIT depth weight \- which can be used to fine tune blending for various circumstances\.  This control has a side effect, larger numbers here can adversely affect brightness of emissive blended materials\.|
 |rtx.wboitEnabled|bool|True|||Enables the new rendering mode for handling alpha blended objects\.  Changing this will trigger a shader recompile\.  The new mode improves rendering accuracy, especially in cases where there are many layers of transparent things being rendered\.|
 |rtx.wboitEnergyLossCompensation|float|4|||Multiplier for the coverage term in the weighted blended OIT imlementation \- allows for some configuration to recover energy loss from the technique\.  This is non physical, be careful overtuning |

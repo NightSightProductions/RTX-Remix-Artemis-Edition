@@ -59,7 +59,6 @@ namespace dxvk {
     Float,
     HashSet,     // Merges when present in multiple layers.
     HashVector,  // Does not merge when present in multiple layers. Use when order & number of elements is important.
-    IntVector,   // TODO[REMIX-4861] unused type, should be removed.
     Vector2,
     Vector3,
     Vector2i,
@@ -85,7 +84,6 @@ namespace dxvk {
     Vector2i* v2i;
     fast_unordered_set* hashSet;
     std::vector<XXH64_hash_t>* hashVector;
-    std::vector<int32_t>* intVector;
     VirtualKeys* virtualKeys;
     std::string* string;
     int64_t value;
@@ -372,7 +370,7 @@ namespace dxvk {
     std::string genericValueToString(ValueType valueType) const;
     std::string genericValueToString(const GenericValue& value) const;
     void copyValue(const GenericValue& source, GenericValue& target);
-    void resolveValue(GenericValue& value, const bool ignoreChangedOption);
+    bool resolveValue(GenericValue& value, const bool ignoreChangedOption);
     void addWeightedValue(const GenericValue& source, const float weight, GenericValue& target);
 
     void readValue(const Config& options, const std::string& fullName, GenericValue& value);
@@ -592,7 +590,8 @@ namespace dxvk {
     // This should be called at the very end of the frame in the dxvk-cs thread.
     // Before the first frame is rendered, it also needs to be called at least once during initialization.
     // It's currently called twice during init, due to multiple sections that set many Options then immediately use them.
-    static void applyPendingValues(DxvkDevice* device) {
+    // forceOnChange causes the onChange callback to be called even if the value has not changed 
+    static void applyPendingValues(DxvkDevice* device, bool forceOnChange) {
 
       constexpr static int32_t maxResolves = 4;
       int32_t numResolves = 0;
@@ -609,8 +608,10 @@ namespace dxvk {
         dirtyOptionsVector.reserve(dirtyOptions.size());
         {
           for (auto& rtxOption : dirtyOptions) {
-            rtxOption.second->resolveValue(rtxOption.second->resolvedValue, false);
-            dirtyOptionsVector.push_back(rtxOption.second);
+            const bool valueChanged = rtxOption.second->resolveValue(rtxOption.second->resolvedValue, false);
+            if (forceOnChange || valueChanged) {
+              dirtyOptionsVector.push_back(rtxOption.second);
+            }
           }
         }
         dirtyOptions.clear();
@@ -770,9 +771,6 @@ namespace dxvk {
       }
       if constexpr (std::is_same_v<T, std::vector<XXH64_hash_t>>) {
         return OptionType::HashVector;
-      }
-      if constexpr (std::is_same_v<T, std::vector<int32_t>>) {
-        return OptionType::IntVector;
       }
       if constexpr (std::is_same_v<T, Vector4>) {
         return OptionType::Vector4;
@@ -1075,7 +1073,7 @@ namespace dxvk {
 // Example usage, presuming "optionName" is the name of the option:
 // optionName(); // Get the current value of the option
 // optionName.set(value); // Set the value of the option
-// ImGUI::Checkbox("Option Name", &optionName); // Draw the option in the UI
+// RemixGui::Checkbox("Option Name", &optionName); // Draw the option in the UI
 #define RTX_OPTION_FULL(category, type, name, value, environment, flags, description, ...) \
   public: inline static RtxOption<type> name = RtxOption<type>::privateMacroFactory(category, #name, type(value), description, [](){ \
     RtxOptionArgs<type> args; \

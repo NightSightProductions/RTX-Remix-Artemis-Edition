@@ -40,9 +40,9 @@
 #include <rtx_shaders/nrc_resolve.h>
 
 namespace dxvk {
-  ImGui::ComboWithKey<NrcResolveMode> nrcDebugResolveModeCombo {
+  RemixGui::ComboWithKey<NrcResolveMode> nrcDebugResolveModeCombo {
   "NRC Debug Visualization Mode",
-  ImGui::ComboWithKey<NrcResolveMode>::ComboEntries { {
+  RemixGui::ComboWithKey<NrcResolveMode>::ComboEntries { {
       {NrcResolveMode::AddQueryResultToOutput, "Add Query Result To Output",
       "Takes the query result and adds it to the output buffer" },
 
@@ -94,9 +94,9 @@ namespace dxvk {
   };
 
 
-  ImGui::ComboWithKey<NeuralRadianceCache::QualityPreset> nrcQualityPresetCombo {
+  RemixGui::ComboWithKey<NeuralRadianceCache::QualityPreset> nrcQualityPresetCombo {
     "NRC Quality Preset",
-    ImGui::ComboWithKey<NeuralRadianceCache::QualityPreset>::ComboEntries { {
+    RemixGui::ComboWithKey<NeuralRadianceCache::QualityPreset>::ComboEntries { {
         {NeuralRadianceCache::QualityPreset::Ultra, "Ultra"},
         {NeuralRadianceCache::QualityPreset::High, "High"},
         {NeuralRadianceCache::QualityPreset::Medium, "Medium"}
@@ -136,9 +136,63 @@ namespace dxvk {
     targetNumTrainingIterations.setMaxValue(maxNumTrainingIterations());
   }
 
+  namespace {
+    bool nrcResolveModeRequiresDebugBuffer(NrcResolveMode resolveMode) {
+
+      switch (resolveMode) {
+      case NrcResolveMode::PrimaryVertexTrainingRadiance:
+      case NrcResolveMode::PrimaryVertexTrainingRadianceSmoothed:
+      case NrcResolveMode::SecondaryVertexTrainingRadiance:
+        [[fallthrough]];
+      case NrcResolveMode::SecondaryVertexTrainingRadianceSmoothed:
+        return true;
+      case NrcResolveMode::AddQueryResultToOutput:
+      case NrcResolveMode::TrainingBounceHeatMap:
+      case NrcResolveMode::TrainingBounceHeatMapSmoothed:
+      case NrcResolveMode::QueryIndex:
+      case NrcResolveMode::TrainingQueryIndex:
+      case NrcResolveMode::DirectCacheView:
+        [[fallthrough]];
+      case NrcResolveMode::ReplaceOutputWithQueryResult:
+        return false;
+      }
+      return false;
+    }
+
+    void onDebugResolveSettingsChanged(DxvkDevice* device) {
+
+      NeuralRadianceCache::NrcOptions::s_nrcDebugBufferIsRequired = NeuralRadianceCache::NrcOptions::enableDebugResolveMode() && nrcResolveModeRequiresDebugBuffer(NeuralRadianceCache::NrcOptions::debugResolveMode());
+
+      if (device == nullptr) {
+        return;
+      }
+
+      // WAR for the onChanged callbacks getting called even if the resolved value for an option hasn't changed. Without this, the debug view will
+      // get set to disabled on config load, eradicating any debug view that was set prior to config load (through environment settings, etc.)
+      if (NeuralRadianceCache::NrcOptions::enableDebugResolveMode() != NeuralRadianceCache::NrcOptions::s_nrcPrevDebugResolveIsEnabled) {
+        DebugView& debugView = device->getCommon()->metaDebugView();
+        if (NeuralRadianceCache::NrcOptions::enableDebugResolveMode()) {
+          debugView.setDebugViewIndex(DEBUG_VIEW_NRC_RESOLVE);
+        }
+        else {
+          debugView.setDebugViewIndex(DEBUG_VIEW_DISABLED);
+        }
+      }
+      NeuralRadianceCache::NrcOptions::s_nrcPrevDebugResolveIsEnabled = NeuralRadianceCache::NrcOptions::enableDebugResolveMode();
+    }
+  }
+
+  void NeuralRadianceCache::NrcOptions::onDebugResolveModeChanged(DxvkDevice* device) {
+    onDebugResolveSettingsChanged(device);
+  }
+
+  void NeuralRadianceCache::NrcOptions::onEnableDebugResolveModeChanged(DxvkDevice* device) {
+    onDebugResolveSettingsChanged(device);
+  }
+
+
   NeuralRadianceCache::NeuralRadianceCache(dxvk::DxvkDevice* device) : RtxPass(device) {
     m_nrcCtxSettings = std::make_unique<nrc::ContextSettings>();
-    m_delayedEnableDebugBuffers = NrcCtxOptions::enableDebugBuffers();
     m_delayedEnableCustomNetworkConfig = NrcCtxOptions::enableCustomNetworkConfig();
   }
 
@@ -147,7 +201,10 @@ namespace dxvk {
   // Initializes state and resources that can be created once on initialization and do not depend on runtime state
   // Returns true on success
   bool NeuralRadianceCache::initialize(dxvk::DxvkDevice& device) {
-    m_nrcCtx = new NrcContext(device);
+
+    NrcContext::Configuration nrcContextCfg;
+    nrcContextCfg.debugBufferIsRequired = NrcOptions::s_nrcDebugBufferIsRequired;
+    m_nrcCtx = new NrcContext(device, nrcContextCfg);
 
     if (m_nrcCtx->initialize() != nrc::Status::OK) {
       return false;
@@ -184,9 +241,6 @@ namespace dxvk {
       return;
     }
 
-    constexpr ImGuiTreeNodeFlags collapsingHeaderClosedFlags = ImGuiTreeNodeFlags_CollapsingHeader;
-    constexpr ImGuiTreeNodeFlags collapsingHeaderFlags = collapsingHeaderClosedFlags | ImGuiTreeNodeFlags_DefaultOpen;
-
     // Display number of training records info
     {
       const ImVec4 kWhite = ImVec4(1.f, 1.f, 1.f, 1.f);
@@ -218,95 +272,82 @@ namespace dxvk {
 
     nrcQualityPresetCombo.getKey(&NrcOptions::qualityPresetObject());
 
-    ImGui::Checkbox("Reset History", &NrcOptions::resetHistoryObject());
-    ImGui::Checkbox("Train Cache", &NrcOptions::trainCacheObject());
-    ImGui::Checkbox("Use Custom Network Config \"CustomNetworkConfig.json\"", &m_delayedEnableCustomNetworkConfig);
+    RemixGui::Checkbox("Reset History", &NrcOptions::resetHistoryObject());
+    RemixGui::Checkbox("Train Cache", &NrcOptions::trainCacheObject());
+    RemixGui::Checkbox("Use Custom Network Config \"CustomNetworkConfig.json\"", &m_delayedEnableCustomNetworkConfig);
 
-    if (ImGui::CollapsingHeader("Training", collapsingHeaderFlags)) {
+    if (RemixGui::CollapsingHeader("Training", ImGuiTreeNodeFlags_DefaultOpen)) {
       ImGui::Indent();
 
-      ImGui::Checkbox("Learn Irradiance", &NrcOptions::learnIrradianceObject());
-      ImGui::Checkbox("Include Direct Lighting", &NrcOptions::includeDirectLightingObject());
+      RemixGui::Checkbox("Learn Irradiance", &NrcOptions::learnIrradianceObject());
+      RemixGui::Checkbox("Include Direct Lighting", &NrcOptions::includeDirectLightingObject());
       
-      ImGui::DragInt("Max Number of Training Iterations", &NrcOptions::maxNumTrainingIterationsObject(), 1.f, 1, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
-      ImGui::DragInt("Target Number of Training Iterations", &NrcOptions::targetNumTrainingIterationsObject(), 1.f, 1, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
+      RemixGui::DragInt("Max Number of Training Iterations", &NrcOptions::maxNumTrainingIterationsObject(), 1.f, 1, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
+      RemixGui::DragInt("Target Number of Training Iterations", &NrcOptions::targetNumTrainingIterationsObject(), 1.f, 1, 16, "%d", ImGuiSliderFlags_AlwaysClamp);
 
-      ImGui::Checkbox("Adaptive Training Dimensions", &NrcOptions::enableAdaptiveTrainingDimensionsObject());
-      ImGui::DragFloat("Average Number of Vertices Per Path", &NrcOptions::averageTrainingBouncesPerPathObject(), 0.01f, 0.5f, 8.f, "%.1f");
-      ImGui::DragInt("Max Path Bounces", &NrcOptions::trainingMaxPathBouncesObject(), 0.1f, 0, 15, "%d", ImGuiSliderFlags_AlwaysClamp);
-      ImGui::DragInt("Max Path Bounces Bias for Quality Presets", &NrcOptions::trainingMaxPathBouncesBiasInQualityPresetsObject(), 0.1f, -15, 15, "%d", ImGuiSliderFlags_AlwaysClamp);
+      RemixGui::Checkbox("Adaptive Training Dimensions", &NrcOptions::enableAdaptiveTrainingDimensionsObject());
+      RemixGui::DragFloat("Average Number of Vertices Per Path", &NrcOptions::averageTrainingBouncesPerPathObject(), 0.01f, 0.5f, 8.f, "%.1f");
+      RemixGui::DragInt("Max Path Bounces", &NrcOptions::trainingMaxPathBouncesObject(), 0.1f, 0, 15, "%d", ImGuiSliderFlags_AlwaysClamp);
+      RemixGui::DragInt("Max Path Bounces Bias for Quality Presets", &NrcOptions::trainingMaxPathBouncesBiasInQualityPresetsObject(), 0.1f, -15, 15, "%d", ImGuiSliderFlags_AlwaysClamp);
 
-      ImGui::DragInt("Jitter Sequence Length", &NrcOptions::jitterSequenceLengthObject());
-      ImGui::Checkbox("Allow Russian Roulette Usage", &NrcOptions::allowRussianRouletteOnUpdateObject());
+      RemixGui::DragInt("Jitter Sequence Length", &NrcOptions::jitterSequenceLengthObject());
+      RemixGui::Checkbox("Allow Russian Roulette Usage", &NrcOptions::allowRussianRouletteOnUpdateObject());
 
       ImGui::Unindent();
     }
 
-    ImGui::Checkbox("Clear Nrc Buffers On Frame Start", &NrcOptions::clearBuffersOnFrameStartObject());
+    RemixGui::Checkbox("Clear Nrc Buffers On Frame Start", &NrcOptions::clearBuffersOnFrameStartObject());
 
-    if (ImGui::CollapsingHeader("Scene Bounds", collapsingHeaderFlags)) {
-      ImGui::DragFloat("Scene Axis Aligned Bounding Box's Width [m]", &NrcOptions::sceneBoundsWidthMetersObject(), 1.f, 0.f, 100000.f, "%f");
-      ImGui::Checkbox("Reset the scene bounds on a camera cut", &NrcOptions::resetSceneBoundsOnCameraCutObject());
+    if (RemixGui::CollapsingHeader("Scene Bounds", ImGuiTreeNodeFlags_DefaultOpen)) {
+      RemixGui::DragFloat("Scene Axis Aligned Bounding Box's Width [m]", &NrcOptions::sceneBoundsWidthMetersObject(), 1.f, 0.f, 100000.f, "%f");
+      RemixGui::Checkbox("Reset the scene bounds on a camera cut", &NrcOptions::resetSceneBoundsOnCameraCutObject());
       if (ImGui::Button("Reset the scene bounds")) {
         m_initSceneBounds = true;
       }
     }
 
-    if (ImGui::CollapsingHeader("Resolve", collapsingHeaderClosedFlags)) {
+    if (RemixGui::CollapsingHeader("Resolve")) {
       ImGui::Indent();
-      ImGui::Checkbox("NRC Resolver", &NrcOptions::enableNrcResolverObject());
-      ImGui::Checkbox("Add Path Traced Radiance", &NrcOptions::resolveAddPathTracedRadianceObject());
-      ImGui::Checkbox("Add Nrc Queried Radiance", &NrcOptions::resolveAddNrcQueriedRadianceObject());
+      RemixGui::Checkbox("NRC Resolver", &NrcOptions::enableNrcResolverObject());
+      RemixGui::Checkbox("Add Path Traced Radiance", &NrcOptions::resolveAddPathTracedRadianceObject());
+      RemixGui::Checkbox("Add Nrc Queried Radiance", &NrcOptions::resolveAddNrcQueriedRadianceObject());
+      RemixGui::Checkbox("Enable Debug Resolve Mode", &NrcOptions::enableDebugResolveModeObject());
 
-      ImGui::Checkbox("Enable Debug Resolve Mode", &NrcOptions::enableDebugResolveModeObject());
-      ImGui::Checkbox("Enable Debug Buffers ", &m_delayedEnableDebugBuffers);
-
-      const bool hasEnableDebugResolveModeChanged =
-        hasValueChanged(NrcOptions::enableDebugResolveMode(), m_prevEnableDebugResolveMode);
+      nrcDebugResolveModeCombo.getKey(&NrcOptions::debugResolveModeObject());
 
       DebugView& debugView = ctx.getCommonObjects()->metaDebugView();
-
-      // Update Debug View selection for NRC Resolve Mode
-      if (hasEnableDebugResolveModeChanged) {
-        uint32_t debugViewMode = NrcOptions::enableDebugResolveMode()
-          ? DEBUG_VIEW_NRC_RESOLVE
-          : DEBUG_VIEW_DISABLED;
-
-        debugView.setDebugViewIndex(debugViewMode);
-
-      } else if (debugView.getDebugViewIndex() != DEBUG_VIEW_NRC_RESOLVE) {
+      if (NrcOptions::enableDebugResolveMode() && debugView.getDebugViewIndex() != DEBUG_VIEW_NRC_RESOLVE) {
         // Disable debug resolve mode when debug view selection changes to another mode
-        NrcOptions::enableDebugResolveMode.setDeferred(false);
+        NrcOptions::enableDebugResolveMode.setImmediately(false);
 
         // Update previous state too so that it does not trigger any action next frame
-        m_prevEnableDebugResolveMode = NrcOptions::enableDebugResolveMode();
+        NrcOptions::s_nrcPrevDebugResolveIsEnabled = NrcOptions::enableDebugResolveMode();
       }
 
-      nrcDebugResolveModeCombo.getKey(&NrcCtxOptions::debugResolveModeObject());
       ImGui::Unindent();
     }
 
-    ImGui::DragFloat("Smallest Resolvable Feature Size [meters]", &NrcOptions::smallestResolvableFeatureSizeMetersObject(), 0.0001f, 0.f, 10.f, "%.4f");
+    RemixGui::DragFloat("Smallest Resolvable Feature Size [meters]", &NrcOptions::smallestResolvableFeatureSizeMetersObject(), 0.0001f, 0.f, 10.f, "%.4f");
     
-    ImGui::Checkbox("Skip Delta Vertices", &NrcOptions::skipDeltaVerticesObject());
+    RemixGui::Checkbox("Skip Delta Vertices", &NrcOptions::skipDeltaVerticesObject());
 
-    ImGui::DragFloat("Termination Heuristic Threshold", &NrcOptions::terminationHeuristicThresholdObject(), 0.001f, 0.f, 1.f, "%.3f");
-    ImGui::DragFloat("Training Termination Heuristic Threshold", &NrcOptions::trainingTerminationHeuristicThresholdObject(), 0.001f, 0.f, 1.f, "%.3f");
-    ImGui::DragFloat("Proportion Primary Segments To Train On", &NrcOptions::proportionPrimarySegmentsToTrainOnObject(), 0.001f, 0.f, 1.f, "%.3f");
-    ImGui::DragFloat("Proportion Tertiary Segments To Train On", &NrcOptions::proportionTertiaryPlusSegmentsToTrainOnObject(), 0.001f, 0.f, 1.f, "%.3f");
-    ImGui::DragFloat("Proportion Unbiased To Self Train On", &NrcOptions::proportionUnbiasedToSelfTrainObject(), 0.001f, 0.f, 1.f, "%.3f");
-    ImGui::DragFloat("Proportion Unbiased", &NrcOptions::proportionUnbiasedObject(), 0.001f, 0.f, 1.f, "%.3f");
-    ImGui::DragFloat("Self Training Attenuation", &NrcOptions::selfTrainingAttenuationObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Termination Heuristic Threshold", &NrcOptions::terminationHeuristicThresholdObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Training Termination Heuristic Threshold", &NrcOptions::trainingTerminationHeuristicThresholdObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Proportion Primary Segments To Train On", &NrcOptions::proportionPrimarySegmentsToTrainOnObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Proportion Tertiary Segments To Train On", &NrcOptions::proportionTertiaryPlusSegmentsToTrainOnObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Proportion Unbiased To Self Train On", &NrcOptions::proportionUnbiasedToSelfTrainObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Proportion Unbiased", &NrcOptions::proportionUnbiasedObject(), 0.001f, 0.f, 1.f, "%.3f");
+    RemixGui::DragFloat("Self Training Attenuation", &NrcOptions::selfTrainingAttenuationObject(), 0.001f, 0.f, 1.f, "%.3f");
 
-    ImGui::Checkbox("Calculate Training Loss", &NrcOptions::enableCalculateTrainingLossObject());
+    RemixGui::Checkbox("Calculate Training Loss", &NrcOptions::enableCalculateTrainingLossObject());
     if (!NrcOptions::enableCalculateTrainingLoss()) {
       ImGui::Text("Training Loss: ", m_trainingLoss);
     }
 
-    ImGui::DragFloat("Max Expected Average Radiance", &NrcOptions::maxExpectedAverageRadianceValueObject(), 1.f, 0.f, 64 * 1024.f, "%.1f");
-    ImGui::DragFloat("Luminance Clamp Multiplier (0: disabled)", &NrcOptions::luminanceClampMultiplierObject(), 0.1f, 0.f, 10000.f, "%.1f");
+    RemixGui::DragFloat("Max Expected Average Radiance", &NrcOptions::maxExpectedAverageRadianceValueObject(), 1.f, 0.f, 64 * 1024.f, "%.1f");
+    RemixGui::DragFloat("Luminance Clamp Multiplier (0: disabled)", &NrcOptions::luminanceClampMultiplierObject(), 0.1f, 0.f, 10000.f, "%.1f");
 
-    ImGui::DragInt("Number of Frames To Smooth Training Dimensions (0 ~ Disabled)", &NrcOptions::numFramesToSmoothOutTrainingDimensionsObject(), 1.f, 0, 1024, "%d", ImGuiSliderFlags_AlwaysClamp);
+    RemixGui::DragInt("Number of Frames To Smooth Training Dimensions (0 ~ Disabled)", &NrcOptions::numFramesToSmoothOutTrainingDimensionsObject(), 1.f, 0, 1024, "%d", ImGuiSliderFlags_AlwaysClamp);
 
     ImGui::Text("Training Dimension Width Active (Max): %u (%u)", m_activeTrainingDimensions.x, m_nrcCtxSettings->trainingDimensions.x);
     ImGui::Text("Training Dimension Height Active (Max): %u (%u)", m_activeTrainingDimensions.y, m_nrcCtxSettings->trainingDimensions.y);
@@ -448,7 +489,7 @@ namespace dxvk {
 
   bool NeuralRadianceCache::isUpdateResolveModeActive() const {
     if (NrcOptions::enableDebugResolveMode()) {
-      switch (NrcCtxOptions::debugResolveMode()) {
+      switch (NrcOptions::debugResolveMode()) {
         case NrcResolveMode::TrainingBounceHeatMap:
         case NrcResolveMode::TrainingBounceHeatMapSmoothed:
         case NrcResolveMode::PrimaryVertexTrainingRadiance:
@@ -533,8 +574,8 @@ namespace dxvk {
       return;
     }
 
-    const bool reinitializeNrcContext = 
-      m_delayedEnableDebugBuffers != NrcCtxOptions::enableDebugBuffers()
+    const bool reinitializeNrcContext =
+      m_nrcCtx->isDebugBufferRequired() != NrcOptions::s_nrcDebugBufferIsRequired
       || m_delayedEnableCustomNetworkConfig != NrcCtxOptions::enableCustomNetworkConfig()
       // [REMIX-3810] WAR to fully recreate NRC when resolution changes to avoid occasional corruption
       // when changing resolutions
@@ -543,10 +584,11 @@ namespace dxvk {
 
     if (reinitializeNrcContext) {
 
-      NrcCtxOptions::enableDebugBuffers.setDeferred(m_delayedEnableDebugBuffers);
       NrcCtxOptions::enableCustomNetworkConfig.setDeferred(m_delayedEnableCustomNetworkConfig);
 
-      m_nrcCtx = new NrcContext(*ctx->getDevice());
+      NrcContext::Configuration nrcContextCfg;
+      nrcContextCfg.debugBufferIsRequired = NrcOptions::s_nrcDebugBufferIsRequired;
+      m_nrcCtx = new NrcContext(*ctx->getDevice(), nrcContextCfg);
 
       if (m_nrcCtx->initialize() != nrc::Status::OK) {
         Logger::err(str::format("[RTX Neural Radiance Cache] Failed to initialize NRC context"));
@@ -668,7 +710,7 @@ namespace dxvk {
       nrcFrameSettings.skipDeltaVertices = NrcOptions::skipDeltaVertices();
       nrcFrameSettings.terminationHeuristicThreshold = NrcOptions::terminationHeuristicThreshold();
       nrcFrameSettings.trainingTerminationHeuristicThreshold = NrcOptions::trainingTerminationHeuristicThreshold();
-      nrcFrameSettings.resolveMode = NrcCtxOptions::debugResolveMode();
+      nrcFrameSettings.resolveMode = NrcOptions::enableDebugResolveMode() ? NrcOptions::debugResolveMode() : NrcResolveMode::AddQueryResultToOutput;
       nrcFrameSettings.trainTheCache = NrcOptions::trainCache();
 
       nrcFrameSettings.usedTrainingDimensions = m_activeTrainingDimensions;
@@ -721,7 +763,7 @@ namespace dxvk {
       m_nrcCtx->clearBuffer(*ctx, nrc::BufferIdx::QueryRadiance, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_WRITE_BIT);
       m_nrcCtx->clearBuffer(*ctx, nrc::BufferIdx::QueryRadianceParams, VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR, VK_ACCESS_SHADER_WRITE_BIT);
       // onFrameBegin() above already clears the counter resource
-      if (NrcCtxOptions::enableDebugBuffers()) {
+      if (m_nrcCtx->isDebugBufferRequired()) {
         m_nrcCtx->clearBuffer(*ctx, nrc::BufferIdx::DebugTrainingPathInfo, VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT, VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
       }
     }
@@ -973,7 +1015,7 @@ namespace dxvk {
       barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::QueryPathInfo, srcAccessMask, VK_ACCESS_SHADER_READ_BIT));
       barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::QueryRadiance, srcAccessMask, VK_ACCESS_SHADER_READ_BIT));
       barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::TrainingPathInfo, srcAccessMask, VK_ACCESS_SHADER_READ_BIT));
-      if (NrcCtxOptions::enableDebugBuffers()) {
+      if (m_nrcCtx->isDebugBufferRequired()) {
         barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::DebugTrainingPathInfo, srcAccessMask, VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_SHADER_READ_BIT));
       }
 
@@ -1010,10 +1052,10 @@ namespace dxvk {
       m_nrcCtxSettings->frameDimensions.y };
     pushArgs.addPathtracedRadiance = NrcOptions::resolveAddPathTracedRadiance();
     pushArgs.addNrcRadiance = NrcOptions::resolveAddNrcQueriedRadiance();
-    pushArgs.resolveMode = NrcCtxOptions::debugResolveMode();
+    pushArgs.resolveMode = NrcOptions::enableDebugResolveMode() ? NrcOptions::debugResolveMode() : NrcResolveMode::AddQueryResultToOutput;
     pushArgs.samplesPerPixel = m_nrcCtxSettings->samplesPerPixel;
     pushArgs.resolveModeAccumulationWeight = 0.f;
-    pushArgs.debugBuffersAreEnabled = NrcCtxOptions::enableDebugBuffers();
+    pushArgs.debugBuffersAreEnabled = NrcOptions::s_nrcDebugBufferIsRequired;
 
     // Calculate the smoothing factor when smoothed resolve mode is enabled
     if (pushArgs.resolveMode == NrcResolveMode::TrainingBounceHeatMapSmoothed ||
@@ -1090,7 +1132,7 @@ namespace dxvk {
         barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::QueryRadianceParams, srcAccessMask, destAccessMask));
         barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::QueryRadiance, srcAccessMask, destAccessMask));
         barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::Counter, srcAccessMask, destAccessMask));
-        if (NrcCtxOptions::enableDebugBuffers()) {
+        if (m_nrcCtx->isDebugBufferRequired()) {
           barriers.push_back(m_nrcCtx->createVkBufferMemoryBarrier(nrc::BufferIdx::DebugTrainingPathInfo, srcAccessMask, destAccessMask));
         }
 

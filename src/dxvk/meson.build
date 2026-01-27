@@ -370,6 +370,9 @@ dxvk_src = files([
 
   'rtx_render/rtx_constants.h',
 
+  'rtx_render/rtx_gui_widgets.cpp',
+  'rtx_render/rtx_gui_widgets.h',
+
   'platform/dxvk_win32_exts.cpp',
   
   'hud/dxvk_hud.cpp',
@@ -394,8 +397,7 @@ dxvk_src = files([
   'imgui/imgui.h',
   'imgui/imgui_demo.cpp',
   'imgui/imgui_draw.cpp',
-  'imgui/imgui_impl_vulkan.cpp',
-  'imgui/imgui_impl_vulkan.h',
+  'imgui/imgui_impl_dxvk.hpp',
   'imgui/imgui_impl_win32.cpp',
   'imgui/imgui_impl_win32.h',
   'imgui/imgui_internal.h',
@@ -471,7 +473,8 @@ rtx_shaders = custom_target(
 )
 
 dxvk_embedded_data_files = files([
-  '../../external/fonts/NVIDIASans/NVIDIASansMd.ttf',
+  '../../external/fonts/NVIDIASans/NVIDIASansRg.ttf',
+  '../../external/fonts/NVIDIASans/NVIDIASansBd.ttf',
   '../../external/fonts/RobotoMono/RobotoMonoRg.ttf'
 ])
 

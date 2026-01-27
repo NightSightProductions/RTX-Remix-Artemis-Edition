@@ -730,8 +730,15 @@ namespace dxvk {
 
       m_previousInjectRtxHadScene = true;
     } else {
-      getSceneManager().clear(this, m_previousInjectRtxHadScene);
-      m_previousInjectRtxHadScene = false;
+      // If raytracing is only disabled because we don't have shaders available, we don't want to clear the scene.
+      // This frequently happens for a single frame when a cached shader is being fetched, and causes the Logic 
+      // graph state to be reset - which is problematic since Logic graphs often trigger shader fetches.
+      // It might be safe to remove this clear entirely - it was added before we had any garbage collection
+      // in the scene manager, so it may not be needed anymore.
+      if (!isRaytracingEnabled || !isCameraValid) {
+        getSceneManager().clear(this, m_previousInjectRtxHadScene);
+        m_previousInjectRtxHadScene = false;
+      }
 
       getSceneManager().onFrameEndNoRTX();
     }
@@ -741,7 +748,7 @@ namespace dxvk {
 
     // apply changes to RtxOptions after the frame has ended
     RtxOptionManager::applyPendingValuesOptionLayers();
-    RtxOptionManager::applyPendingValues(m_device.ptr());
+    RtxOptionManager::applyPendingValues(m_device.ptr(), /* forceOnChange */ false);
 
     // Update stats
     updateMetrics(gpuIdleTimeMilliseconds);
