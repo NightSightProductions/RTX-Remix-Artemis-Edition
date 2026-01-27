@@ -190,7 +190,7 @@ namespace dxvk {
       } else if constexpr (std::is_same_v<T, SecretReplacement>) {
         return m_secretReplacements[hash].emplace_back(obj);
       } else {
-        static_assert(false, "Invalid type");
+        static_assert(!sizeof(T*), "Invalid type");
       }
     }
 
@@ -207,7 +207,7 @@ namespace dxvk {
       } else if constexpr (std::is_same_v<T, SecretReplacement>) {
         m_secretReplacements.erase(hash);
       } else {
-        static_assert(false, "Invalid type");
+        static_assert(!sizeof(T*), "Invalid type");
       }
     }
 

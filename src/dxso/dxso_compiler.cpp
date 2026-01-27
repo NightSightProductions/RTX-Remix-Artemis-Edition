@@ -3197,7 +3197,13 @@ void DxsoCompiler::emitControlFlowGenericLoop(
 
             shouldProj = m_module.opIEqual(m_module.defBoolType(), shouldProj, m_module.constu32(1));
 
-            albedoOpacity = m_module.opSelect(typeId, shouldProj, albedoOpacity, nonProjAlbedoOpacity);
+            // Convert scalar bool to bvec4 for valid OpSelect with vec4 result
+            uint32_t albedo_bool_t = m_module.defBoolType();
+            uint32_t albedo_bvec4_t = m_module.defVectorType(albedo_bool_t, 4);
+            std::array<uint32_t, 4> albedo_indices = { shouldProj, shouldProj, shouldProj, shouldProj };
+            uint32_t shouldProjVec = m_module.opCompositeConstruct(albedo_bvec4_t, albedo_indices.size(), albedo_indices.data());
+
+            albedoOpacity = m_module.opSelect(typeId, shouldProjVec, albedoOpacity, nonProjAlbedoOpacity);
           }
 
           return albedoOpacity;
@@ -3935,8 +3941,14 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_module.setDebugName(useCustom, "custom_vertex_transform_enabled");
       m_module.decorateSpecId(useCustom, getSpecId(D3D9SpecConstantId::CustomVertexTransformEnabled));
 
-      // Explicit select (result vec4, scalar bool condition)
-      const uint32_t chosenPos = m_module.opSelect(vec4TypeId, useCustom, projPosId, oldPos);
+      // Convert scalar bool to bvec4 for valid OpSelect with vec4 result
+      uint32_t bool_t = m_module.defBoolType();
+      uint32_t bvec4_t = m_module.defVectorType(bool_t, 4);
+      std::array<uint32_t, 4> indices = { useCustom, useCustom, useCustom, useCustom };
+      uint32_t useCustomVec = m_module.opCompositeConstruct(bvec4_t, indices.size(), indices.data());
+
+      // Explicit select (result vec4, bvec4 condition)
+      const uint32_t chosenPos = m_module.opSelect(vec4TypeId, useCustomVec, projPosId, oldPos);
       m_module.opStore(m_vs.oPos.id, chosenPos);
     }
 
@@ -3959,8 +3971,14 @@ void DxsoCompiler::emitControlFlowGenericLoop(
       m_module.setDebugName(jitterOn, "clip_space_jitter_enabled");
       m_module.decorateSpecId(jitterOn, getSpecId(D3D9SpecConstantId::ClipSpaceJitterEnabled));
 
-      // Explicit select
-      const uint32_t finalPos = m_module.opSelect(vec4TypeId, jitterOn, jittered, pos0);
+      // Convert scalar bool to bvec4 for valid OpSelect with vec4 result
+      uint32_t jitter_bool_t = m_module.defBoolType();
+      uint32_t jitter_bvec4_t = m_module.defVectorType(jitter_bool_t, 4);
+      std::array<uint32_t, 4> jitter_indices = { jitterOn, jitterOn, jitterOn, jitterOn };
+      uint32_t jitterOnVec = m_module.opCompositeConstruct(jitter_bvec4_t, jitter_indices.size(), jitter_indices.data());
+
+      // Explicit select (result vec4, bvec4 condition)
+      const uint32_t finalPos = m_module.opSelect(vec4TypeId, jitterOnVec, jittered, pos0);
       m_module.opStore(m_vs.oPos.id, finalPos);
     }
   }

@@ -61,6 +61,9 @@ namespace dxvk {
     // NV-DXVK start: opacity micromap
     VkPhysicalDeviceSynchronization2FeaturesKHR               khrSynchronization2;
     // NV-DXVK end
+
+    // RTX MegaGeo: Required for MegaGeometry shaders that use subgroup extended types
+    VkPhysicalDeviceShaderSubgroupExtendedTypesFeatures       extShaderSubgroupExtendedTypes;
   };
 
 }

@@ -343,7 +343,7 @@ namespace dxvk {
           DxvkDeviceFeatures  enabledFeatures) {
     DxvkDeviceExtensions devExtensions;
 
-    std::array<DxvkExt*, 43> devExtensionList = {{
+    std::array<DxvkExt*, 44> devExtensionList = {{
       &devExtensions.amdMemoryOverallocationBehaviour,
       &devExtensions.amdShaderFragmentMask,
       &devExtensions.ext4444Formats,
@@ -380,6 +380,7 @@ namespace dxvk {
       &devExtensions.khrPushDescriptor,
       &devExtensions.khrShaderInt8Float16Types,
       &devExtensions.nvRayTracingInvocationReorder,
+      &devExtensions.nvClusterAccelerationStructure,
       &devExtensions.khrSynchronization2,
       &devExtensions.extOpacityMicromap,
       &devExtensions.nvLowLatency,
@@ -470,6 +471,8 @@ namespace dxvk {
     // Enable RTX device features if supported
 
     enabledFeatures.core.features.shaderInt16 = m_deviceFeatures.core.features.shaderInt16;
+    // RTX Mega Geometry requires 64-bit integer support for GPU virtual addresses
+    enabledFeatures.core.features.shaderInt64 = m_deviceFeatures.core.features.shaderInt64;
     enabledFeatures.vulkan11Features.storageBuffer16BitAccess = m_deviceFeatures.vulkan11Features.storageBuffer16BitAccess;
     enabledFeatures.vulkan11Features.uniformAndStorageBuffer16BitAccess = m_deviceFeatures.vulkan11Features.uniformAndStorageBuffer16BitAccess;
     enabledFeatures.vulkan12Features.bufferDeviceAddress = m_deviceFeatures.vulkan12Features.bufferDeviceAddress;
@@ -494,6 +497,12 @@ namespace dxvk {
     enabledFeatures.vulkan12Features.storageBuffer8BitAccess = VK_TRUE;
     enabledFeatures.vulkan12Features.uniformAndStorageBuffer8BitAccess = VK_TRUE;
     enabledFeatures.vulkan12Features.timelineSemaphore = VK_TRUE;
+
+    // RTX MegaGeo: Enable features required by extensions to avoid validation errors
+    enabledFeatures.core.features.shaderImageGatherExtended = m_deviceFeatures.core.features.shaderImageGatherExtended;
+    enabledFeatures.vulkan12Features.shaderOutputViewportIndex = m_deviceFeatures.vulkan12Features.shaderOutputViewportIndex;
+    enabledFeatures.vulkan12Features.shaderOutputLayer = m_deviceFeatures.vulkan12Features.shaderOutputLayer;
+    enabledFeatures.vulkan12Features.shaderSubgroupExtendedTypes = m_deviceFeatures.vulkan12Features.shaderSubgroupExtendedTypes;
 
     // NV-DXVK start: RTXIO
 #ifdef WITH_RTXIO
@@ -613,6 +622,14 @@ namespace dxvk {
       enabledFeatures.khrSynchronization2.synchronization2 = VK_TRUE;
     }
     // NV-DXVK end
+
+    // RTX MegaGeo: Enable shader subgroup extended types (required for MegaGeometry shaders)
+    // This feature is promoted to Vulkan 1.2 core, but validation layers check for the extension-style structure
+    if (m_deviceFeatures.extShaderSubgroupExtendedTypes.shaderSubgroupExtendedTypes) {
+      enabledFeatures.extShaderSubgroupExtendedTypes.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
+      enabledFeatures.extShaderSubgroupExtendedTypes.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.extShaderSubgroupExtendedTypes);
+      enabledFeatures.extShaderSubgroupExtendedTypes.shaderSubgroupExtendedTypes = VK_TRUE;
+    }
 
     // NV-DXVK start: Moved logging to where it is on more recent DXVK to properly show enabled features, also added more information to be logged
     // (Still needs driver version from latest DXVK though at the time of writing this, but we can wait on that since it needs larger changes)
@@ -1129,6 +1146,11 @@ namespace dxvk {
       m_deviceFeatures.extShaderAtomicFloat.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_ATOMIC_FLOAT_FEATURES_EXT;
       m_deviceFeatures.extShaderAtomicFloat.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extShaderAtomicFloat);
     }
+
+    // RTX MegaGeo: Query shader subgroup extended types feature (promoted to Vulkan 1.2 core)
+    // This is required for MegaGeometry shaders that use subgroup operations with extended types
+    m_deviceFeatures.extShaderSubgroupExtendedTypes.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
+    m_deviceFeatures.extShaderSubgroupExtendedTypes.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extShaderSubgroupExtendedTypes);
 
     m_vki->vkGetPhysicalDeviceFeatures2(m_handle, &m_deviceFeatures.core);
   }

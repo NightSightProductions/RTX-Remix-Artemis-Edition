@@ -38,7 +38,7 @@
 using remixapi_MaterialHandle = struct remixapi_MaterialHandle_T*;
 using remixapi_MeshHandle = struct remixapi_MeshHandle_T*;
 
-namespace dxvk 
+namespace dxvk
 {
 class RtCamera;
 class RtInstance;
@@ -47,6 +47,7 @@ class GraphInstance;
 struct D3D9FixedFunctionVS;
 struct D3D9FixedFunctionPS;
 struct ReplacementInstance;
+class RtxMegaGeoBuilder;
 
 using RasterBuffer = GeometryBuffer<Raster>;
 using RaytraceBuffer = GeometryBuffer<Raytrace>;
@@ -258,6 +259,11 @@ struct RasterGeometry {
   RasterBuffer indexBuffer;
   RasterBuffer blendWeightBuffer;
   RasterBuffer blendIndicesBuffer;
+
+  // RTX Mega Geometry: Original vertex buffer from D3D9 (before vertex capture)
+  // When vertex capture is enabled, positionBuffer points to GPU-filled capture buffer.
+  // This field stores the original D3D9 vertex data for CPU-side access.
+  RasterBuffer originalPositionBuffer;
 
   AxisAlignedBoundingBox boundingBox;
   Future<AxisAlignedBoundingBox> futureBoundingBox;
@@ -715,16 +721,22 @@ struct PooledBlas : public RcObject {
 
 // Information about a geometry, such as vertex buffers, and possibly a static BLAS for that geometry
 struct BlasEntry {
+  // BLAS type - determines which pipeline is used for building
+  enum class Type {
+    TriangleBlas,  // Traditional triangle-based BLAS (standard rasterization)
+    ClusterBlas    // RTX Mega Geometry cluster-based BLAS (subdivision surfaces)
+  };
+
   // input contains legacy or replacements (the data can be on CPU or GPU)
   //  - Data on CPU is guaranteed to be alive during draw call's submission.
   //  - Data can be made alive on CPU for longer with an explicit ref hold on it
-  //  - For shader based games the data may contain various unsupported formats a game might deliver the data in. 
-  //    That is converted and optimized in RtxGeometryUtils::interleaveGeometry. 
+  //  - For shader based games the data may contain various unsupported formats a game might deliver the data in.
+  //    That is converted and optimized in RtxGeometryUtils::interleaveGeometry.
   //    Fixed function games always use supported buffer formats/encodings etc...
-  DrawCallState input; 
-  // modifiedGeometryData contains the same geometry as "input" but it (may) have been transformed (i.e.interleaved vertex data, 
+  DrawCallState input;
+  // modifiedGeometryData contains the same geometry as "input" but it (may) have been transformed (i.e.interleaved vertex data,
   // converted to optimal vertex formats [we prefer float32], will always be a triangle list and could be skinned)
-  // - Data is on GPU 
+  // - Data is on GPU
   // - Data is not directly mappable on CPU
   RaytraceGeometry modifiedGeometryData;
 
@@ -739,10 +751,15 @@ struct BlasEntry {
 
   using InstanceMap = SpatialMap<RtInstance>;
 
+  // Traditional triangle BLAS data
   Rc<PooledBlas> dynamicBlas = nullptr;
-
   std::vector<VkAccelerationStructureGeometryKHR> buildGeometries;
   std::vector<VkAccelerationStructureBuildRangeInfoKHR> buildRanges;
+
+  // RTX Mega Geometry cluster BLAS data (only used when type == ClusterBlas)
+  Type blasType = Type::TriangleBlas;
+  class RtxMegaGeoBuilder* megaGeoBuilder = nullptr;  // Weak pointer - owned by RtxContext
+  uint32_t megaGeoSurfaceId = 0;  // Surface ID within RtxMegaGeoBuilder
 
   BlasEntry() = default;
 
@@ -782,11 +799,20 @@ struct BlasEntry {
 
   void rebuildSpatialMap();
 
+  // Cluster BLAS helpers
+  bool isClusterBlas() const { return blasType == Type::ClusterBlas; }
+  bool isTriangleBlas() const { return blasType == Type::TriangleBlas; }
+
+  VkAccelerationStructureKHR getBlasHandle() const;
+  VkDeviceAddress getBlasAddress() const;
+  bool isBlasReady() const;
+
   void printDebugInfo(const char* name = "") const {
 #ifdef REMIX_DEVELOPMENT
     Logger::warn(str::format(
       "BlasEntry ", name, "\n",
       "  address: ", this, "\n",
+      "  blasType: ", (blasType == Type::ClusterBlas ? "ClusterBlas" : "TriangleBlas"), "\n",
       "  frameCreated: ", frameCreated, "\n",
       "  frameLastTouched: ", frameLastTouched, "\n",
       "  frameLastUpdated: ", frameLastUpdated, "\n",
@@ -796,7 +822,9 @@ struct BlasEntry {
       "  cachedMaterials: ", m_materials.size(), "\n",
       "  buildGeometries: ", buildGeometries.size(), "\n",
       "  buildRanges: ", buildRanges.size(), "\n",
-      "  dynamicBlas: ", (dynamicBlas != nullptr ? "valid" : "null")));
+      "  dynamicBlas: ", (dynamicBlas != nullptr ? "valid" : "null"), "\n",
+      "  clusterBlas: ", (isClusterBlas() && megaGeoBuilder ? "valid" : "null"), "\n",
+      "  megaGeoSurfaceId: ", (isClusterBlas() ? std::to_string(megaGeoSurfaceId) : "N/A")));
     
     // Print main material info
     Logger::warn("=== Main Material Info ===");

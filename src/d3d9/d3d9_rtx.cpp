@@ -125,7 +125,8 @@ namespace dxvk {
     info.access = VK_ACCESS_TRANSFER_READ_BIT;
     info.stages = VK_PIPELINE_STAGE_VERTEX_SHADER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_TRANSFER_BIT;
     info.size = size;
-    return DxvkBufferSlice(pDevice->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT, DxvkMemoryStats::Category::AppBuffer, "Vertex Capture Buffer"));
+    // Make buffer CPU-accessible for subdivision surface data extraction
+    return DxvkBufferSlice(pDevice->createBuffer(info, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT, DxvkMemoryStats::Category::AppBuffer, "Vertex Capture Buffer"));
   }
 
   void D3D9Rtx::prepareVertexCapture(const int vertexIndexOffset) {
@@ -156,6 +157,12 @@ namespace dxvk {
     const size_t vertexCaptureDataSize = align(geoData.vertexCount * stride, CACHE_LINE_SIZE);
 
     DxvkBufferSlice slice = allocVertexCaptureBuffer(m_parent->GetDXVKDevice().ptr(), vertexCaptureDataSize);
+
+    // RTX Mega Geometry: Save original position buffer before overwriting with capture buffer
+    // This allows CPU-side access to original vertex data for subdivision surface creation
+    if (geoData.positionBuffer.defined()) {
+      geoData.originalPositionBuffer = geoData.positionBuffer;
+    }
 
     geoData.positionBuffer = RasterBuffer(slice, 0, stride, VK_FORMAT_R32G32B32A32_SFLOAT);
     assert(geoData.positionBuffer.offset() % 4 == 0);
@@ -1116,7 +1123,9 @@ namespace dxvk {
       assert(ibo != nullptr);
 
       indices.ibo = ibo;
-      indices.indexBuffer = ibo->GetMappedSlice();
+      // RTX MegaGeo: Keep using MAPPING buffers for traditional rendering
+      // REAL buffers with STORAGE_BUFFER_BIT will be used by megageo separately
+      indices.indexBuffer = ibo->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_MAPPING>().getSliceHandle();
       indices.indexType = DecodeIndexType(ibo->Desc()->Format);
     }
 
@@ -1128,6 +1137,8 @@ namespace dxvk {
       if (vbo != nullptr) {
         vertices[i].stride = dx9Vbo.stride;
         vertices[i].offset = dx9Vbo.offset;
+        // RTX MegaGeo: Keep using MAPPING buffers for traditional rendering
+        // REAL buffers with STORAGE_BUFFER_BIT will be used by megageo separately
         vertices[i].buffer = vbo->GetBufferSlice<D3D9_COMMON_BUFFER_TYPE_MAPPING>();
         vertices[i].mappedSlice = vbo->GetMappedSlice();
         vertices[i].pVBO = vbo;

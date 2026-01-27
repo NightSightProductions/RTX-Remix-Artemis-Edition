@@ -232,10 +232,20 @@ def createSlangTask(inputFile, variantSpec):
     command1 = f'{args.slangc} -entry main -target spirv -zero-initialize -emit-spirv-directly -verbose-paths {includePaths} ' \
             + f'-depfile {depFile} {inputFile} -D__SLANG__ {variantDefines} ' \
             + f'-matrix-layout-column-major ' \
-            + f'-Wno-30081 '
+            + f'-Wno-30081 -Wno-30816 -Wno-41021 -Wno-39001 '
 
     # Force scalar block layout in shaders - buffers are required to be aligned as such by Neural Radiance Cache
     command1 += f'-fvk-use-scalar-layout '
+
+    # Only add register shifts for megageo shaders (to prevent conflicts in HLSL-only shaders)
+    # Most RTX Remix shaders use explicit [[vk::binding()]] annotations in Slang
+    if 'megageo' in inputFile.lower():
+        # Shift HLSL registers to non-overlapping Vulkan binding numbers
+        command1 += f'-fvk-t-shift 0 0 '  # Textures (t#) start at binding 0
+        command1 += f'-fvk-s-shift 100 0 '  # Samplers (s#) start at binding 100
+        command1 += f'-fvk-u-shift 200 0 '  # UAVs (u#) start at binding 200
+        command1 += f'-fvk-b-shift 300 0 '  # CBVs (b#) start at binding 300
+
 
     if generateSlangRepro:
       reproFile = os.path.join(args.output, variantName + ".slangRepro")

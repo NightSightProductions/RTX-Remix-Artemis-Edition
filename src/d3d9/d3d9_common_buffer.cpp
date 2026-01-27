@@ -98,11 +98,21 @@ namespace dxvk {
         info.stages |= VK_PIPELINE_STAGE_GEOMETRY_SHADER_BIT;
         info.access |= VK_ACCESS_SHADER_WRITE_BIT;
       }
+      // RTX MegaGeo: Always add storage buffer bit for compute shader access
+      info.usage  |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+      info.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      info.access |= VK_ACCESS_SHADER_READ_BIT;
+      Logger::warn(str::format("RTX MegaGeo: Creating VBO with usage=0x", std::hex, info.usage, std::dec, " pool=", m_desc.Pool));
     }
     else if (m_desc.Type == D3DRTYPE_INDEXBUFFER) {
       info.usage  |= VK_BUFFER_USAGE_INDEX_BUFFER_BIT;
       info.stages |= VK_PIPELINE_STAGE_VERTEX_INPUT_BIT;
       info.access |= VK_ACCESS_INDEX_READ_BIT;
+      // RTX MegaGeo: Add storage buffer bit for compute shader access
+      info.usage  |= VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+      info.stages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      info.access |= VK_ACCESS_SHADER_READ_BIT;
+      Logger::warn(str::format("RTX MegaGeo: Creating IBO with usage=0x", std::hex, info.usage, std::dec, " pool=", m_desc.Pool));
     }
 
     if (GetMapMode() == D3D9_COMMON_BUFFER_MAP_MODE_DIRECT) {

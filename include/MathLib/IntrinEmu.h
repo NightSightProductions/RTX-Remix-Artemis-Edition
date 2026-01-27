@@ -30,6 +30,11 @@ typedef __m128d v2d;
 typedef __m128 v4f;
 typedef __m128i v4i;
 
+// Helper for dependent false in static_assert for templates
+namespace detail {
+    template<auto V> inline constexpr bool dependent_false_v = false;
+}
+
 //======================================================================================================================
 //                                                      SSE4
 //======================================================================================================================
@@ -142,7 +147,7 @@ typedef __m128i v4i;
 
     template<int32_t imm> PLATFORM_INLINE __m128 emu_mm_round_ps(const __m128& x)
     {
-        DEBUG_StaticAssertMsg(false, "Unsupported rounding mode!");
+        DEBUG_StaticAssertMsg(detail::dependent_false_v<imm>, "Unsupported rounding mode!");
 
         return _mm_setzero_ps();
     }
@@ -179,7 +184,7 @@ typedef __m128i v4i;
 
     template<int32_t imm> PLATFORM_INLINE __m128d emu_mm_round_pd(const __m128d& x)
     {
-        DEBUG_StaticAssertMsg(false, "Unsupported rounding mode!");
+        DEBUG_StaticAssertMsg(detail::dependent_false_v<imm>, "Unsupported rounding mode!");
 
         return _mm_setzero_pd();
     }
@@ -218,7 +223,7 @@ typedef __m128i v4i;
 
     template<int32_t imm> PLATFORM_INLINE __m128 emu_mm_dp_ps(const __m128& x, const __m128& y)
     {
-        DEBUG_StaticAssertMsg(false, "Unsupported dp mode!");
+        DEBUG_StaticAssertMsg(detail::dependent_false_v<imm>, "Unsupported dp mode!");
 
         return _mm_setzero_ps();
     }

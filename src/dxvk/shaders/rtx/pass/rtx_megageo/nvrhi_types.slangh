@@ -1,0 +1,84 @@
+/*
+* Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+
+// NVRHI types for RTX Mega Geometry shaders (Slang compatibility)
+
+#ifndef NVRHI_TYPES_SLANGH
+#define NVRHI_TYPES_SLANGH
+
+// Prevent nvrhiHLSL.h from redefining these types
+#define NVRHI_TYPES_ALREADY_DEFINED
+
+// GPU virtual address (Vulkan device address)
+typedef uint64_t GpuVirtualAddress;
+
+// NVRHI cluster acceleration structure types
+namespace nvrhi {
+    // Make GpuVirtualAddress available in nvrhi namespace
+    typedef ::GpuVirtualAddress GpuVirtualAddress;
+
+namespace rt {
+namespace cluster {
+
+    // CLAS byte alignment requirement
+    static const uint32_t kClasByteAlignment = 128;
+
+    // GPU virtual address with stride - matches VkStridedDeviceAddressNV
+    // NOTE: Vulkan uses VkDeviceSize (8 bytes) for strideInBytes, not uint32_t!
+    struct GpuVirtualAddressAndStride {
+        GpuVirtualAddress startAddress;     // 8 bytes
+        uint64_t strideInBytes;             // 8 bytes (VkDeviceSize)
+    };
+
+    // Indirect instantiate template arguments - matches VkClusterAccelerationStructureInstantiateClusterInfoNV
+    // CRITICAL: Layout must exactly match the Vulkan structure (32 bytes total)
+    struct IndirectInstantiateTemplateArgs {
+        uint32_t clusterIdOffset;           // 4 bytes - Offset added to clusterId in template
+        uint32_t geometryIndexOffsetPacked; // 4 bytes - Lower 24 bits: geometryIndexOffset, Upper 8 bits: reserved (must be 0)
+        GpuVirtualAddress clusterTemplate;  // 8 bytes - Address of cluster template
+        GpuVirtualAddressAndStride vertexBuffer; // 16 bytes - Vertex buffer for instantiation
+    };
+
+    // Indirect BLAS from CLAS arguments
+    // Maps to VkClusterAccelerationStructureBuildClustersBottomLevelInfoNV in Vulkan
+    struct IndirectArgs {
+        uint32_t clusterCount;              // Number of CLASes (clusterReferencesCount in Vulkan)
+        uint32_t clusterReferencesStride;   // Stride between VkDeviceAddress elements in clusterAddresses array (must be 8)
+        GpuVirtualAddress clusterAddresses; // Address of CLAS address array (clusterReferences in Vulkan)
+    };
+
+} // namespace cluster
+
+    // Ray tracing instance descriptor (shader-friendly)
+    struct IndirectInstanceDesc {
+        float4 transform[3];
+        uint32_t instanceID : 24;
+        uint32_t instanceMask : 8;
+        uint32_t instanceContributionToHitGroupIndex : 24;
+        uint32_t flags : 8;
+        GpuVirtualAddress blasDeviceAddress;
+    };
+
+} // namespace rt
+} // namespace nvrhi
+
+#endif // NVRHI_TYPES_SLANGH

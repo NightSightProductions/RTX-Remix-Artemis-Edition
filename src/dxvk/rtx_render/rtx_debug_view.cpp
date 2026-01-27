@@ -329,6 +329,18 @@ namespace dxvk {
                                                   "  1: World Normal\n"
                                                   "  2: World Tangent\n"
                                                   "  3: World Bitangent" },
+
+        // RTX Mega Geometry Debug Views
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_NORMAL,          "MegaGeo: Color by Normal"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_TEXCOORD,        "MegaGeo: Color by Tex Coord"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_MATERIAL,        "MegaGeo: Color by Material"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_GEOMETRY_INDEX,  "MegaGeo: Color by Geometry Index"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_SURFACE_INDEX,   "MegaGeo: Color by Surface Index"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_CLUSTER_ID,      "MegaGeo: Color by Cluster ID"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_MICROTRI_ID,     "MegaGeo: Color by MicroTri ID"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_CLUSTER_UV,      "MegaGeo: Color by Cluster UV"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_MICROTRI_AREA,   "MegaGeo: Color by MicroTri Area"},
+        {DEBUG_VIEW_MEGAGEO_COLOR_BY_TOPOLOGY,        "MegaGeo: Color by Topology Quality"},
     } };
 
   // Note: this does a linear search through the debug view vector so do not use it in performance critical code

@@ -30,6 +30,10 @@
 #include "../spirv/spirv_code_buffer.h"
 #include "../spirv/spirv_compression.h"
 
+namespace dxvk {
+  class DxvkPipelineManager;
+}
+
 // Note: Define Shader Classes within an unnamed namespace to avoid violating One Definition Rule 
 //  where multiple Shader Classes with same names could be defined across different cpp causing
 //  definition aliasing.

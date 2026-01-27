@@ -1389,7 +1389,7 @@ namespace dxvk {
     static void serializeOptionLayer(const RtxOptionLayer& optionLayer, const bool saveToCurrentLayerConfigFile) {
       auto& optionLayerMap = RtxOptionImpl::getRtxOptionLayerMap();
       RtxOptionImpl::LayerKey rtxConfKey = {(uint32_t) RtxOptionLayer::SystemLayerPriority::RtxConf, "rtx.conf"};
-      auto& rtxConfIt = optionLayerMap.find(rtxConfKey);
+      auto rtxConfIt = optionLayerMap.find(rtxConfKey);
       Config newConfig;
       if (rtxConfIt == optionLayerMap.end()) {
         RtxOptionImpl::addRtxOptionLayer("rtx.conf", (uint32_t) RtxOptionLayer::SystemLayerPriority::RtxConf, true, 1.0f, 1.0f, &newConfig);

@@ -757,11 +757,130 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreate(
   }
 
 #if defined(RAY_TRACING_PRIMARY_RAY)
-  if (cb.debugView == DEBUG_VIEW_OPAQUE_ROUGHNESS_RESOLUTION_CHECKERS) 
+  if (cb.debugView == DEBUG_VIEW_OPAQUE_ROUGHNESS_RESOLUTION_CHECKERS)
   {
     storeColorOverlayedWithTextureResolutionCheckersInDebugView(roughness.xxx, opaqueSurfaceMaterial.roughnessTextureIndex, surfaceInteraction);
   }
-#endif  
+
+  // RTX Mega Geometry debug views
+  // Note: Some views require cluster acceleration structure integration
+  if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_NORMAL)
+  {
+    // Show interpolated shading normal (available for all geometry)
+    vec3 debugNormal = vec3(normal);
+    vec3 normalColor = debugNormal * 0.5 + 0.5; // Map from [-1,1] to [0,1]
+    storeInDebugView(getDispatchRaysIndex().xy, normalColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_TEXCOORD)
+  {
+    // Show texture coordinates
+    storeInDebugView(getDispatchRaysIndex().xy, vec3(frac(surfaceInteraction.textureCoordinates), 0.0));
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_MATERIAL)
+  {
+    // Hash object picking value (contains material/object info)
+    uint materialHash = surface.objectPickingValue;
+    materialHash = (materialHash ^ 61) ^ (materialHash >> 16);
+    materialHash = materialHash + (materialHash << 3);
+    materialHash = materialHash ^ (materialHash >> 4);
+    materialHash = materialHash * 0x27d4eb2d;
+    materialHash = materialHash ^ (materialHash >> 15);
+    vec3 matColor = vec3(
+      float((materialHash >> 0) & 0xFF) / 255.0,
+      float((materialHash >> 8) & 0xFF) / 255.0,
+      float((materialHash >> 16) & 0xFF) / 255.0
+    );
+    storeInDebugView(getDispatchRaysIndex().xy, matColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_GEOMETRY_INDEX)
+  {
+    // Hash object hash to color (represents geometry/mesh)
+    uint geomHash = surface.hashPacked;
+    geomHash = (geomHash ^ 61) ^ (geomHash >> 16);
+    geomHash = geomHash + (geomHash << 3);
+    geomHash = geomHash ^ (geomHash >> 4);
+    geomHash = geomHash * 0x27d4eb2d;
+    geomHash = geomHash ^ (geomHash >> 15);
+    vec3 geomColor = vec3(
+      float((geomHash >> 0) & 0xFF) / 255.0,
+      float((geomHash >> 8) & 0xFF) / 255.0,
+      float((geomHash >> 16) & 0xFF) / 255.0
+    );
+    storeInDebugView(getDispatchRaysIndex().xy, geomColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_SURFACE_INDEX)
+  {
+    // Use object picking value as surface identifier
+    uint surfaceHash = surface.objectPickingValue >> 16;  // Upper bits as surface ID
+    surfaceHash = (surfaceHash ^ 61) ^ (surfaceHash >> 8);
+    surfaceHash = surfaceHash + (surfaceHash << 3);
+    surfaceHash = surfaceHash * 0x9e3779b9;
+    vec3 surfaceColor = vec3(
+      float((surfaceHash >> 0) & 0xFF) / 255.0,
+      float((surfaceHash >> 8) & 0xFF) / 255.0,
+      float((surfaceHash >> 16) & 0xFF) / 255.0
+    );
+    storeInDebugView(getDispatchRaysIndex().xy, surfaceColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_CLUSTER_ID)
+  {
+    // Generate virtual cluster ID from geometry hash and triangle coordinates
+    uint clusterHash = surface.hashPacked;
+    // Add spatial variation based on world position to simulate clusters
+    clusterHash ^= uint(surfaceInteraction.position.x * 10.0);
+    clusterHash ^= uint(surfaceInteraction.position.y * 10.0) << 8;
+    clusterHash ^= uint(surfaceInteraction.position.z * 10.0) << 16;
+    clusterHash = clusterHash * 0x9e3779b9;
+    vec3 clusterColor = vec3(
+      float((clusterHash >> 0) & 0xFF) / 255.0,
+      float((clusterHash >> 8) & 0xFF) / 255.0,
+      float((clusterHash >> 16) & 0xFF) / 255.0
+    );
+    storeInDebugView(getDispatchRaysIndex().xy, clusterColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_MICROTRI_ID)
+  {
+    // Show primitive variation using triangle barycentric pattern
+    // Create a hash from world position that varies per-triangle
+    uint microTriHash = uint(surfaceInteraction.position.x * 100.0);
+    microTriHash = (microTriHash ^ uint(surfaceInteraction.position.y * 100.0)) * 0x9e3779b9;
+    microTriHash ^= uint(surfaceInteraction.position.z * 100.0);
+    vec3 microTriColor = vec3(
+      float((microTriHash >> 0) & 0xFF) / 255.0,
+      float((microTriHash >> 8) & 0xFF) / 255.0,
+      float((microTriHash >> 16) & 0xFF) / 255.0
+    );
+    storeInDebugView(getDispatchRaysIndex().xy, microTriColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_CLUSTER_UV)
+  {
+    // Show texture coordinates remapped to cluster-space [0,1]
+    // Use fractional part for within-cluster UV
+    vec2 clusterUV = frac(surfaceInteraction.textureCoordinates * 4.0);  // 4x4 virtual clusters
+    storeInDebugView(getDispatchRaysIndex().xy, vec3(clusterUV, 0.5));
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_MICROTRI_AREA)
+  {
+    // Visualize triangle area using screen-space derivatives
+    // Larger triangles = redder, smaller = bluer
+    float area = surfaceInteraction.triangleArea;
+    float logArea = log2(max(area, 0.0001));
+    float normalizedArea = saturate((logArea + 10.0) / 20.0);  // Map to [0,1]
+    vec3 areaColor = lerp(vec3(0.0, 0.0, 1.0), vec3(1.0, 0.0, 0.0), normalizedArea);
+    storeInDebugView(getDispatchRaysIndex().xy, areaColor);
+  }
+  else if (cb.debugView == DEBUG_VIEW_MEGAGEO_COLOR_BY_TOPOLOGY)
+  {
+    // Show topology quality based on triangle shape
+    // Use normal consistency as a proxy for topology quality
+    vec3 triNormal = vec3(surfaceInteraction.triangleNormal);
+    vec3 interpNormal = vec3(surfaceInteraction.interpolatedNormal);
+    float normalDot = dot(normalize(triNormal), normalize(interpNormal));
+    float quality = saturate(normalDot);  // 1.0 = good topology, 0.0 = bad
+    vec3 qualityColor = lerp(vec3(1.0, 0.0, 0.0), vec3(0.0, 1.0, 0.0), quality);
+    storeInDebugView(getDispatchRaysIndex().xy, qualityColor);
+  }
+#endif
   // Apply material modifiers
   roughness = saturate(roughness * cb.opaqueMaterialArgs.roughnessScale + cb.opaqueMaterialArgs.roughnessBias);
 

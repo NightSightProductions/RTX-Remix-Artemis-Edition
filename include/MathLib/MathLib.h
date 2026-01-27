@@ -122,6 +122,11 @@ namespace ml {
 // also it defines vXY types
 #include "IntrinEmu.h"
 
+// Helper for dependent false in static_assert for type templates
+namespace detail {
+    template<typename T> inline constexpr bool dependent_false_type_v = false;
+}
+
 //======================================================================================================================
 //                                                  Enums
 //======================================================================================================================
@@ -1385,7 +1390,7 @@ template<> PLATFORM_INLINE double3 Snap(const double3& x, const double3& step)
 
 template<eCmp cmp, class T> PLATFORM_INLINE bool All(const T&, const T&)
 {
-    DEBUG_StaticAssertMsg(false, "All::only vector types supported");
+    DEBUG_StaticAssertMsg(detail::dependent_false_type_v<T>, "All::only vector types supported");
 
     return false;
 }
@@ -1422,7 +1427,7 @@ template<eCmp cmp> PLATFORM_INLINE bool All(const double4& x, const double4& y)
 
 template<eCmp cmp, class T> PLATFORM_INLINE bool Any(const T&, const T&)
 {
-    DEBUG_StaticAssertMsg(false, "Any::only vector types supported");
+    DEBUG_StaticAssertMsg(detail::dependent_false_type_v<T>, "Any::only vector types supported");
 
     return false;
 }
@@ -2058,19 +2063,19 @@ template<> PLATFORM_INLINE double4 Exp(const double4& x)
 
 template<class T> PLATFORM_INLINE T Pi(const T& mul)
 {
-    DEBUG_StaticAssertMsg(false, "Pi::only floating point types are supported!");
+    DEBUG_StaticAssertMsg(detail::dependent_false_type_v<T>, "Pi::only floating point types are supported!");
     return mul;
 }
 
 template<class T> PLATFORM_INLINE T RadToDeg(const T& a)
 {
-    DEBUG_StaticAssertMsg(false, "RadToDeg::only floating point types are supported!");
+    DEBUG_StaticAssertMsg(detail::dependent_false_type_v<T>, "RadToDeg::only floating point types are supported!");
     return a;
 }
 
 template<class T> PLATFORM_INLINE T DegToRad(const T& a)
 {
-    DEBUG_StaticAssertMsg(false, "DegToRad::only floating point types are supported!");
+    DEBUG_StaticAssertMsg(detail::dependent_false_type_v<T>, "DegToRad::only floating point types are supported!");
     return a;
 }
 

@@ -33,6 +33,7 @@
 #include "rtx_terrain_baker.h"
 #include "rtx_texture_manager.h"
 #include "rtx_xess.h"
+#include "rtx_megageo/rtx_megageo_builder.h"
 
 #include <assert.h>
 
@@ -357,7 +358,17 @@ namespace dxvk {
 
     // Set to 1 if inspection of the GeometryData structures contents on CPU is desired
     #define DEBUG_GEOMETRY_MEMORY 0
-    constexpr VkMemoryPropertyFlags memoryProperty = DEBUG_GEOMETRY_MEMORY ? (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) : VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
+    // NOTE: Subdivision surfaces require CPU-accessible index buffers to extract quad topology
+    // Make buffers HOST_VISIBLE for potential subdivision surface candidates
+    // Be permissive: even if original indices aren't divisible by 6 (triangle strips),
+    // they might become quad-compatible after strip-to-list conversion
+    const bool isPotentialCandidate = (input.indexCount > 0 &&
+                                       input.vertexCount >= 16 && input.vertexCount <= 65536);
+    const bool needsCpuAccess = DEBUG_GEOMETRY_MEMORY || isPotentialCandidate;
+    // NOTE: Don't combine HOST_VISIBLE with DEVICE_LOCAL - causes alignment issues
+    const VkMemoryPropertyFlags memoryProperty = needsCpuAccess ?
+      (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) :
+      VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
 
     // Assume we won't need this, and update the value if required
     output.previousPositionBuffer = RaytraceBuffer();
@@ -534,6 +545,18 @@ namespace dxvk {
 
   void SceneManager::submitDrawState(Rc<DxvkContext> ctx, const DrawCallState& input, const MaterialData* overrideMaterialData) {
     ScopedCpuProfileZone();
+
+    // Process any completed async subdivision surfaces (once per frame)
+    static uint32_t lastFrameProcessed = 0;
+    uint32_t currentFrame = m_device->getCurrentFrameId();
+    if (currentFrame != lastFrameProcessed) {
+      lastFrameProcessed = currentFrame;
+      RtxMegaGeoBuilder* megaGeoBuilder = m_accelManager.getMegaGeoBuilder();
+      if (megaGeoBuilder) {
+        megaGeoBuilder->processCompletedSurfaces();
+      }
+    }
+
     if (m_bufferCache.getTotalCount() >= kBufferCacheLimit && m_bufferCache.getActiveCount() >= kBufferCacheLimit) {
       ONCE(Logger::info("[RTX-Compatibility-Info] This application is pushing more unique buffers than is currently supported - some objects may not raytrace."));
       return;
@@ -881,9 +904,18 @@ namespace dxvk {
   }
 
   SceneManager::ObjectCacheState SceneManager::onSceneObjectAdded(Rc<DxvkContext> ctx, const DrawCallState& drawCallState, BlasEntry* pBlas) {
+    // RTX Mega Geometry: Try to create subdivision surface BEFORE processGeometryInfo
+    // This is critical because processGeometryInfo queues GPU upload which makes the
+    // original buffer data inaccessible (isPendingGpuWrite becomes true)
+    if (tryCreateSubdivisionSurface(ctx, drawCallState, pBlas)) {
+      Logger::info(str::format("RTX MegaGeo: onSceneObjectAdded - subdivision surface created! pBlas=", (void*)pBlas,
+                               " isClusterBlas=", pBlas->isClusterBlas(),
+                               " hash=", std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
+    }
+
     // This is a new object.
     ObjectCacheState result = processGeometryInfo<true>(ctx, drawCallState, pBlas->modifiedGeometryData);
-    
+
     assert(result == ObjectCacheState::KBuildBVH);
 
     pBlas->frameLastUpdated = m_device->getCurrentFrameId();
@@ -1006,6 +1038,20 @@ namespace dxvk {
 
     // Note: The material data can be modified in instance manager
     RtInstance* instance = m_instanceManager.processSceneObject(m_cameraManager, m_rayPortalManager, *pBlas, drawCallState, renderMaterialData, existingInstance);
+
+    // RTX MegaGeo: Log instance-BLAS linking for ClusterBlas debugging
+    if (pBlas->isClusterBlas() && instance) {
+      static bool loggedLinkOnce = false;
+      if (!loggedLinkOnce) {
+        Logger::info(str::format("RTX MegaGeo: processDrawCallState - ClusterBlas instance created! pBlas=", (void*)pBlas,
+                                 " instance=", (void*)instance,
+                                 " instance->getBlas()=", (void*)instance->getBlas(),
+                                 " isClusterBlas=", instance->getBlas()->isClusterBlas(),
+                                 " isHidden=", instance->isHidden(),
+                                 " mask=", instance->getVkInstance().mask));
+        loggedLinkOnce = true;
+      }
+    }
 
     // Check if a light should be created for this Material
     if (instance && RtxOptions::shouldConvertToLight(drawCallState.getMaterialData().getHash())) {
@@ -1559,7 +1605,9 @@ namespace dxvk {
     m_lightManager.prepareSceneData(ctx, m_cameraManager);
 
     // Build the TLAS
+    Logger::info("RTX MegaGeo SceneManager: About to call buildTlas");
     m_accelManager.buildTlas(ctx);
+    Logger::info("RTX MegaGeo SceneManager: buildTlas returned, continuing with material updates");
 
     // Todo: These updates require a lot of temporary buffer allocations and memcopies, ideally we should memcpy directly into a mapped pointer provided by Vulkan,
     // but we have to create a buffer to pass to DXVK's updateBuffer for now.
@@ -1845,6 +1893,539 @@ namespace dxvk {
 
   void SceneManager::clearFrameMeshHashes() {
     m_currentFrameMeshHashes.clear();
+  }
+
+  // =========================================================================
+  // RTX Mega Geometry: Subdivision Surface Detection and Creation
+  // =========================================================================
+
+  bool SceneManager::isSubdivisionSurfaceCandidate(const RaytraceGeometry& convertedGeom, const DrawCallState& drawCallState) const {
+    // Use the CONVERTED geometry data (triangle strips already converted to triangle lists by processGeometryInfo)
+
+    static uint32_t logCounter = 0;
+    static uint32_t candidateCount = 0;
+    const bool shouldLog = (logCounter++ % 100) == 0; // Log every 100th call for testing
+
+    // Early rejection: Must have vertex and index data
+    // Note: We check indexCount > 0 instead of usesIndices() because the temporary geometry
+    // passed from tryCreateSubdivisionSurface doesn't have an actual index buffer set
+    if (convertedGeom.indexCount == 0 || convertedGeom.vertexCount == 0) {
+      if (shouldLog) {
+        Logger::info(str::format("RTX MegaGeo: Rejected - no indices (indexCount=", convertedGeom.indexCount, ", vertexCount=", convertedGeom.vertexCount, ")"));
+      }
+      return false;
+    }
+
+    // NOTE: No topology check needed! The converted geometry is ALWAYS triangle list
+    // because processGeometryInfo() already converted strips/fans to lists via generateTriangleList()
+
+    // Subdivision surfaces require quad topology
+    // In DX9/legacy games, quads are typically submitted as 2 triangles per quad
+    // Check if index count is divisible by 6 (2 triangles * 3 indices per quad)
+    if (convertedGeom.indexCount % 6 != 0) {
+      if (shouldLog) {
+        Logger::info(str::format("RTX MegaGeo: Rejected - indexCount not divisible by 6 (indexCount=", convertedGeom.indexCount, ")"));
+      }
+      return false;
+    }
+
+    const uint32_t potentialQuadCount = convertedGeom.indexCount / 6;
+
+    // Sanity check: Must have at least 1 quad
+    if (potentialQuadCount == 0) {
+      if (shouldLog) {
+        Logger::info("RTX MegaGeo: Rejected - zero quads");
+      }
+      return false;
+    }
+
+    // Check for USD replacement mesh with subdivision metadata
+    // NOTE: This would be extended when USD integration is complete
+    // For now, we check the AssetReplacer for subdivision scheme metadata
+    if (m_pReplacer) {
+      XXH64_hash_t meshHash = drawCallState.getHash(RtxOptions::geometryAssetHashRule());
+      // TODO: Query AssetReplacer for subdivision scheme attribute
+      // const AssetReplacement* replacement = m_pReplacer->getReplacementForHash(meshHash);
+      // if (replacement && replacement->hasSubdivisionScheme()) {
+      //   return true;
+      // }
+    }
+
+    // Check mesh hash allow-list (configuration-based detection)
+    // TODO: Add rtx.conf option for subdivision surface mesh hash allow-list
+    // Example: rtx.subdivisionSurface.meshHashes = "hash1,hash2,hash3"
+    // This would enable specific legacy meshes to use RTX MG tessellation
+    XXH64_hash_t meshHash = drawCallState.getHash(RtxOptions::geometryAssetHashRule());
+
+    // For now, enable subdivision surfaces for meshes that:
+    // 1. Have quad-compatible topology (indexCount % 6 == 0)
+    // 2. Have reasonable vertex counts (not too small, not too large)
+    // 3. Are tracked as replacement material (indicating they're important assets)
+    const bool hasReasonableComplexity = (convertedGeom.vertexCount >= 16 && convertedGeom.vertexCount <= 65536) &&
+                                         (potentialQuadCount >= 4 && potentialQuadCount <= 16384);
+
+    if (!hasReasonableComplexity) {
+      if (shouldLog) {
+        Logger::info(str::format("RTX MegaGeo: Rejected - unreasonable complexity (verts=", convertedGeom.vertexCount, ", quads=", potentialQuadCount, ")"));
+      }
+      return false;
+    }
+
+    // Check if this mesh hash is in the replacement material tracking
+    // (indicates it's a significant asset worth tessellating)
+    const bool isTrackedReplacementMesh = isReplacementMaterialHashUsedThisFrame(meshHash) ||
+                                           getMeshHashUsageCount(meshHash) > 0;
+
+    // Quad topology verification: Sample indices to verify quad structure
+    // This is a heuristic check - true verification would require reading all indices
+    if (convertedGeom.indexBuffer.defined()) {
+      // For now, accept as candidate if it passes all other checks
+      // Full quad topology verification would happen in tryCreateSubdivisionSurface
+
+      // TODO: Add heuristic verification by checking first few quads
+      // Read first 12 indices (2 quads worth) and verify they form quads:
+      // Quad pattern: [v0,v1,v2] [v0,v2,v3] where each pair shares edge v0-v2
+    }
+
+    // TEMPORARY: Accept all meshes with reasonable complexity for testing
+    // TODO: Re-enable conservative check once mega geometry is proven working
+    bool result = hasReasonableComplexity;  // Changed from isTrackedReplacementMesh
+
+    // TEMPORARY: Limit candidates to debug crash
+    const uint32_t kMaxCandidates = 1;
+    if (result && candidateCount >= kMaxCandidates) {
+      result = false;
+    }
+
+    if (result) {
+      candidateCount++;
+      Logger::info(str::format("RTX MegaGeo: CANDIDATE FOUND (#", candidateCount, ") - verts=", convertedGeom.vertexCount,
+                                ", quads=", potentialQuadCount,
+                                ", hash=", std::hex, meshHash,
+                                ", isTracked=", isTrackedReplacementMesh ? "YES" : "NO"));
+    } else if (shouldLog) {
+      Logger::info(str::format("RTX MegaGeo: Candidate check - verts=", convertedGeom.vertexCount,
+                                ", quads=", potentialQuadCount,
+                                ", hash=", std::hex, meshHash,
+                                ", isTracked=", isTrackedReplacementMesh ? "YES" : "NO"));
+    }
+
+    // Conservative approach: Only enable for tracked replacement meshes with quad topology
+    // This can be relaxed with additional configuration options
+    return result;
+  }
+
+  bool SceneManager::tryCreateSubdivisionSurface(
+    Rc<DxvkContext> ctx,
+    const DrawCallState& drawCallState,
+    BlasEntry* pBlas)
+  {
+    // Async subdivision surface creation - surfaces are created on a worker thread
+    // to prevent freezing the render thread during heavy OpenSubdiv processing
+    //
+    // IMPORTANT: This function is now called BEFORE processGeometryInfo to access
+    // the original vertex buffer data before GPU upload makes it inaccessible.
+    // We use the ORIGINAL geometry from drawCallState, not converted geometry.
+
+    ONCE(Logger::info("RTX Mega Geometry: tryCreateSubdivisionSurface called for first time"));
+    static uint32_t callCount = 0;
+    if ((callCount++ % 100) == 0) {
+      Logger::info(str::format("RTX Mega Geometry: tryCreateSubdivisionSurface call #", callCount));
+    }
+
+    // Use the ORIGINAL geometry from drawCallState (before GPU upload)
+    // This is called before processGeometryInfo so pBlas->modifiedGeometryData isn't ready yet
+    const RasterGeometry& originalGeom = drawCallState.getGeometryData();
+
+    // Create a temporary RaytraceGeometry for candidate check
+    // We need to estimate what the converted geometry would look like
+    RaytraceGeometry tempConvertedGeom;
+    tempConvertedGeom.vertexCount = originalGeom.vertexCount;
+    // Estimate converted index count: if triangle strip, it becomes triangle list
+    if (originalGeom.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP && originalGeom.indexCount >= 3) {
+      tempConvertedGeom.indexCount = (originalGeom.indexCount - 2) * 3;
+    } else {
+      tempConvertedGeom.indexCount = originalGeom.indexCount;
+    }
+    // Note: We don't copy the indexBuffer because the types are incompatible (RasterBuffer vs RaytraceBuffer)
+    // The candidate check uses indexCount > 0 instead of usesIndices()
+
+    // Only attempt subdivision surface creation if this mesh is a candidate
+    if (!isSubdivisionSurfaceCandidate(tempConvertedGeom, drawCallState)) {
+      return false;
+    }
+
+    // Cache by TOPOLOGY only (not vertex positions) for animated meshes!
+    // Topology = indices + geometry descriptor (no positions)
+    HashRule topologyRule = rules::TopologicalHash;
+    XXH64_hash_t topologyHash = drawCallState.getHash(topologyRule);
+    auto cacheIt = m_subdivisionSurfaceCache.find(topologyHash);
+
+    if (cacheIt != m_subdivisionSurfaceCache.end()) {
+      // Cache hit! Topology exists, just update control points for animated meshes
+      uint32_t cachedSurfaceId = cacheIt->second;
+
+      RtxMegaGeoBuilder* megaGeoBuilder = m_accelManager.getMegaGeoBuilder();
+      if (!megaGeoBuilder) {
+        Logger::err("RTX MegaGeo: Cache hit but builder is null!");
+        return false;
+      }
+
+      // Extract ONLY positions for animation update (cache hit path)
+      // Use original geometry - called before processGeometryInfo
+      const uint32_t vertexCount = originalGeom.vertexCount;
+      std::vector<Vector3> controlPoints;
+
+      // Use original position buffer via GeometryBufferData
+      GeometryBufferData bufferData(originalGeom);
+
+      if (bufferData.positionData == nullptr) {
+        Logger::err("RTX MegaGeo: Cache hit but position buffer not CPU-accessible");
+        return false;
+      }
+
+      controlPoints.resize(vertexCount);
+      for (uint32_t v = 0; v < vertexCount; ++v) {
+        controlPoints[v] = bufferData.getPosition(v);
+      }
+
+      // Debug: Log first vertex to verify data
+      if (vertexCount > 0) {
+        Logger::info(str::format("RTX MegaGeo: Cache hit v0=(", controlPoints[0].x, ",", controlPoints[0].y, ",", controlPoints[0].z, ")"));
+      }
+
+      // For topology cache hits, reuse the existing surface
+      // Topology hasn't changed, so we can use the cached surface directly
+      // TODO: In the future, implement proper animation support by updating only control point buffers
+      Logger::info(str::format("RTX MegaGeo: Cache hit, reusing surface ", cachedSurfaceId));
+
+      pBlas->blasType = BlasEntry::Type::ClusterBlas;
+      pBlas->megaGeoBuilder = megaGeoBuilder;
+      pBlas->megaGeoSurfaceId = cachedSurfaceId;
+      return true;
+    }
+
+    Logger::info(str::format("RTX MegaGeo: Cache miss for topology hash ", std::hex, topologyHash, ", creating new subdivision surface"));
+
+    // Get or initialize RtxMegaGeoBuilder from AccelManager
+    RtxMegaGeoBuilder* megaGeoBuilder = m_accelManager.getMegaGeoBuilder();
+    if (!megaGeoBuilder) {
+      Logger::info("RTX MegaGeo: Builder not initialized yet, initializing now...");
+      if (!m_accelManager.initializeMegaGeoBuilder(ctx)) {
+        Logger::err("RTX MegaGeo: Failed to initialize builder");
+        return false;
+      }
+      megaGeoBuilder = m_accelManager.getMegaGeoBuilder();
+      if (!megaGeoBuilder) {
+        Logger::err("RTX MegaGeo: Builder is still null after initialization");
+        return false;
+      }
+    }
+
+    // Extract VERTEX data from ORIGINAL RasterGeometry (CPU-accessible, only on cache miss!)
+    // originalGeom is already defined at the start of this function
+    GeometryBufferData bufferData(originalGeom);
+
+    // Allocate temporary storage for mesh data extraction
+    std::vector<Vector3> controlPoints;
+    std::vector<Vector2> texcoords;
+    std::vector<Vector3> normals;
+    std::vector<uint32_t> faceVertexIndices;
+    std::vector<uint32_t> faceVertexCounts;
+
+    // Use original vertex count (this is called before processGeometryInfo)
+    const uint32_t vertexCount = originalGeom.vertexCount;
+
+    // RTX Mega Geometry: Prefer originalPositionBuffer if available (contains D3D9 vertex data)
+    // When vertex capture is enabled, positionBuffer points to GPU-filled capture buffer (zeros until GPU runs)
+    // originalPositionBuffer contains the actual D3D9 vertex data we can read immediately
+    float* positionDataPtr = bufferData.positionData;
+    size_t positionStrideFloats = bufferData.positionStride;
+
+    if (originalGeom.originalPositionBuffer.defined()) {
+      void* origPtr = originalGeom.originalPositionBuffer.mapPtr(
+        (size_t)originalGeom.originalPositionBuffer.offsetFromSlice());
+      if (origPtr != nullptr) {
+        positionDataPtr = (float*)origPtr;
+        positionStrideFloats = originalGeom.originalPositionBuffer.stride() / sizeof(float);
+        Logger::info("RTX MegaGeo: Using originalPositionBuffer for vertex data");
+      }
+    }
+
+    if (positionDataPtr == nullptr) {
+      Logger::err("RTX MegaGeo: Position buffer not CPU-accessible, cannot create subdivision surface");
+      return false;
+    }
+
+    controlPoints.resize(vertexCount);
+    for (uint32_t v = 0; v < vertexCount; ++v) {
+      // Read position using the determined pointer and stride
+      const float* vertPtr = positionDataPtr + v * positionStrideFloats;
+      controlPoints[v] = Vector3(vertPtr[0], vertPtr[1], vertPtr[2]);
+    }
+
+    // Debug: Log first vertex position to verify data is valid
+    if (vertexCount > 0) {
+      Logger::info(str::format("RTX MegaGeo: v0=(", controlPoints[0].x, ",", controlPoints[0].y, ",", controlPoints[0].z, ")"));
+    }
+
+    // Extract texture coordinates from ORIGINAL buffer
+    if (bufferData.texcoordData != nullptr) {
+      texcoords.resize(vertexCount);
+      for (uint32_t v = 0; v < vertexCount; ++v) {
+        texcoords[v] = bufferData.getTexCoord(v);
+      }
+    }
+
+    // Extract normals from ORIGINAL buffer
+    if (bufferData.normalData != nullptr) {
+      normals.resize(originalGeom.vertexCount);
+      for (uint32_t v = 0; v < originalGeom.vertexCount; ++v) {
+        // Normals in RTX Remix are stored as packed floats
+        const float* normPtr = bufferData.normalData + v * bufferData.normalStride;
+        normals[v] = Vector3(normPtr[0], normPtr[1], normPtr[2]);
+      }
+    }
+
+    // Extract quad topology - copy index data to CPU for async processing
+    // We need to copy NOW before GPU upload completes asynchronously
+
+    Logger::info(str::format("RTX MegaGeo: Index counts - converted=", tempConvertedGeom.indexCount, ", original=", originalGeom.indexCount));
+    Logger::info(str::format("RTX MegaGeo: Vertex counts - converted=", tempConvertedGeom.vertexCount, ", original=", originalGeom.vertexCount));
+
+    const uint32_t numQuads = tempConvertedGeom.indexCount / 6;
+    if (numQuads == 0 || (tempConvertedGeom.indexCount % 6) != 0) {
+      Logger::warn(str::format("RTX MegaGeo: Converted index count ", tempConvertedGeom.indexCount, " not divisible by 6, not a quad mesh"));
+      return false;
+    }
+
+    // Copy indices from original buffer (CPU-accessible) to our own storage
+    // Original buffer contains the source data that was/will be uploaded to GPU
+    if (!bufferData.indexData) {
+      Logger::err("RTX MegaGeo: No CPU-accessible index data");
+      return false;
+    }
+
+    // Determine index type and size
+    const VkIndexType indexType = originalGeom.indexBuffer.indexType();
+    const bool is16Bit = (indexType == VK_INDEX_TYPE_UINT16);
+    const size_t indexStride = is16Bit ? 2 : 4;
+
+    // Convert triangle strips/fans to triangle lists on CPU
+    std::vector<uint32_t> convertedIndices;
+
+    if (originalGeom.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST) {
+      // Already triangle list, just copy
+      convertedIndices.reserve(originalGeom.indexCount);
+      if (is16Bit) {
+        const uint16_t* indices16 = (const uint16_t*)bufferData.indexData;
+        for (uint32_t i = 0; i < originalGeom.indexCount; ++i) {
+          convertedIndices.push_back(indices16[i]);
+        }
+      } else {
+        const uint32_t* indices32 = (const uint32_t*)bufferData.indexData;
+        convertedIndices.assign(indices32, indices32 + originalGeom.indexCount);
+      }
+    } else if (originalGeom.topology == VK_PRIMITIVE_TOPOLOGY_TRIANGLE_STRIP) {
+      // Convert triangle strip to list
+      // Strip with N vertices produces (N-2) triangles
+      const uint32_t numTriangles = (originalGeom.indexCount >= 3) ? (originalGeom.indexCount - 2) : 0;
+      convertedIndices.reserve(numTriangles * 3);
+
+      for (uint32_t i = 0; i < numTriangles; ++i) {
+        uint32_t i0, i1, i2;
+        if (is16Bit) {
+          const uint16_t* indices16 = (const uint16_t*)bufferData.indexData;
+          i0 = indices16[i];
+          i1 = indices16[i + 1];
+          i2 = indices16[i + 2];
+        } else {
+          const uint32_t* indices32 = (const uint32_t*)bufferData.indexData;
+          i0 = indices32[i];
+          i1 = indices32[i + 1];
+          i2 = indices32[i + 2];
+        }
+
+        // Alternate winding order for strips
+        if (i % 2 == 0) {
+          convertedIndices.push_back(i0);
+          convertedIndices.push_back(i1);
+          convertedIndices.push_back(i2);
+        } else {
+          convertedIndices.push_back(i0);
+          convertedIndices.push_back(i2);
+          convertedIndices.push_back(i1);
+        }
+      }
+      Logger::info(str::format("RTX MegaGeo: Converted triangle strip (", originalGeom.indexCount, " → ", convertedIndices.size(), " indices)"));
+    } else {
+      Logger::warn(str::format("RTX MegaGeo: Unsupported topology type ", (uint32_t)originalGeom.topology));
+      return false;
+    }
+
+    const void* indexBufferPtr = convertedIndices.data();
+    const uint32_t convertedIndexCount = convertedIndices.size();
+
+    // Re-check quad count with converted indices
+    const uint32_t finalNumQuads = convertedIndexCount / 6;
+    if (finalNumQuads == 0 || (convertedIndexCount % 6) != 0) {
+      Logger::warn(str::format("RTX MegaGeo: After conversion, index count ", convertedIndexCount, " not divisible by 6"));
+      return false;
+    }
+
+    Logger::info(str::format("RTX MegaGeo: Ready to process ", finalNumQuads, " potential quads"));
+
+    faceVertexIndices.reserve(finalNumQuads * 4);
+    faceVertexCounts.reserve(finalNumQuads); // Reserve space, but don't pre-size
+
+    // Log first few quads for debugging
+    uint32_t numQuadsToLog = std::min(finalNumQuads, 3u);
+    uint32_t validQuadCount = 0; // Track actual valid quads
+    uint32_t degenerateQuadCount = 0; // Track degenerate quads
+
+    // Indices are now always uint32_t after conversion
+    const uint32_t* indices32 = (const uint32_t*)indexBufferPtr;
+
+    for (uint32_t q = 0; q < finalNumQuads; ++q) {
+      const uint32_t baseIdx = q * 6; // Each quad = 2 triangles = 6 indices
+
+      // Read ALL 6 indices for this quad (2 triangles)
+      uint32_t tri1[3], tri2[3];
+      tri1[0] = indices32[baseIdx + 0];
+      tri1[1] = indices32[baseIdx + 1];
+      tri1[2] = indices32[baseIdx + 2];
+      tri2[0] = indices32[baseIdx + 3];
+      tri2[1] = indices32[baseIdx + 4];
+      tri2[2] = indices32[baseIdx + 5];
+
+      // Log first few quads to understand the pattern
+      if (q < numQuadsToLog) {
+        Logger::info(str::format("RTX MegaGeo: Quad ", q, " triangles: [",
+                                tri1[0], ",", tri1[1], ",", tri1[2], "] [",
+                                tri2[0], ",", tri2[1], ",", tri2[2], "]"));
+      }
+
+      // Detect quad pattern by finding shared vertices
+      // Common patterns:
+      // 1. [v0,v1,v2] [v0,v2,v3] - shares edge v0-v2
+      // 2. [v0,v1,v2] [v2,v3,v0] - shares edge v0-v2 (rotated)
+      // 3. [v0,v1,v2] [v1,v2,v3] - shares edge v1-v2
+      // 4. [v0,v1,v2] [v1,v3,v2] - shares edge v1-v2 (reversed)
+
+      uint32_t v0, v1, v2, v3;
+      bool validQuad = false;
+
+      // Pattern 1: [v0,v1,v2] [v0,v2,v3] - most common
+      if (tri1[0] == tri2[0] && tri1[2] == tri2[1]) {
+        v0 = tri1[0]; v1 = tri1[1]; v2 = tri1[2]; v3 = tri2[2];
+        validQuad = true;
+      }
+      // Pattern 2: [v0,v1,v2] [v2,v3,v0] - rotated
+      else if (tri1[2] == tri2[0] && tri1[0] == tri2[2]) {
+        v0 = tri1[0]; v1 = tri1[1]; v2 = tri1[2]; v3 = tri2[1];
+        validQuad = true;
+      }
+      // Pattern 3: [v0,v1,v2] [v1,v2,v3]
+      else if (tri1[1] == tri2[0] && tri1[2] == tri2[1]) {
+        v0 = tri1[0]; v1 = tri1[1]; v2 = tri1[2]; v3 = tri2[2];
+        validQuad = true;
+      }
+      // Pattern 4: [v0,v1,v2] [v1,v3,v2] - shares edge v1-v2 (same order)
+      else if (tri1[1] == tri2[0] && tri1[2] == tri2[2]) {
+        v0 = tri1[0]; v1 = tri1[1]; v2 = tri2[1]; v3 = tri1[2];
+        validQuad = true;
+      }
+
+      if (!validQuad) {
+        Logger::err(str::format("RTX MegaGeo: Cannot detect quad pattern at quad ", q,
+                                " - triangles don't share an edge properly"));
+        Logger::err(str::format("  Triangle 1: [", tri1[0], ",", tri1[1], ",", tri1[2], "]"));
+        Logger::err(str::format("  Triangle 2: [", tri2[0], ",", tri2[1], ",", tri2[2], "]"));
+        return false;
+      }
+
+      // Validate all 4 unique vertices
+      if (v0 >= vertexCount || v1 >= vertexCount || v2 >= vertexCount || v3 >= vertexCount) {
+        Logger::err(str::format("RTX MegaGeo: Invalid vertex indices in quad ", q,
+                                " - v0=", v0, " v1=", v1, " v2=", v2, " v3=", v3,
+                                " (vertexCount=", vertexCount, ")"));
+        return false;
+      }
+
+      // Check for degenerate quad (duplicate vertices)
+      if (v0 == v1 || v0 == v2 || v0 == v3 || v1 == v2 || v1 == v3 || v2 == v3) {
+        // Count and skip degenerate quads instead of logging each one
+        degenerateQuadCount++;
+        continue;
+      }
+
+      // Add quad vertices in CCW order: [v0, v1, v2, v3]
+      faceVertexIndices.push_back(v0);
+      faceVertexIndices.push_back(v1);
+      faceVertexIndices.push_back(v2);
+      faceVertexIndices.push_back(v3);
+      faceVertexCounts.push_back(4); // This face has 4 vertices
+      validQuadCount++;
+    }
+
+    // Check if we have any valid quads after filtering
+    if (validQuadCount == 0) {
+      Logger::err("RTX MegaGeo: No valid quads found after filtering degenerate faces");
+      return false;
+    }
+
+    Logger::info(str::format("RTX MegaGeo: Found ", validQuadCount, " valid quads out of ", numQuads, " total"));
+    if (degenerateQuadCount > 0) {
+      Logger::warn(str::format("RTX MegaGeo: Skipped ", degenerateQuadCount, " degenerate quads with duplicate vertices"));
+    }
+
+    // Populate SubdivisionSurfaceDesc
+    SubdivisionSurfaceDesc desc = {};
+
+    std::string debugName = str::format("SubdivSurface_", std::hex, topologyHash);
+    desc.debugName = debugName.c_str();
+
+    desc.numFaces = validQuadCount; // Use actual valid quad count, not potential count
+    desc.numVertices = vertexCount; // Use converted vertex count (matches converted indices)
+    desc.faceVertexCounts = faceVertexCounts.data();
+    desc.faceVertexIndices = faceVertexIndices.data();
+    desc.controlPoints = controlPoints.data();
+    desc.texcoords = texcoords.empty() ? nullptr : texcoords.data();
+    desc.normals = normals.empty() ? nullptr : normals.data();
+
+    // Material index - use 0 as placeholder
+    desc.materialIndex = 0;
+
+    // Set tessellation parameters
+    desc.isolationLevel = 2; // Subdivision level (0-4, higher = smoother)
+    desc.tessellationScale = 1.0f; // Adaptive tessellation multiplier
+
+    // Check for displacement mapping
+    desc.enableDisplacement = false; // RTX Remix doesn't expose displacement texture API yet
+    desc.displacementTextureIndex = 0;
+    desc.displacementScale = 0.0f;
+
+    Logger::info(str::format("RTX MegaGeo: Extracting subdivision surface - ",
+                             validQuadCount, " valid quads, ", vertexCount, " vertices"));
+
+    // Create subdivision surface in RtxMegaGeoBuilder
+    uint32_t surfaceId = 0;
+    if (!megaGeoBuilder->createSubdivisionSurface(desc, surfaceId)) {
+      Logger::err("RTX Mega Geometry: Failed to create subdivision surface");
+      return false;
+    }
+
+    // Mark BlasEntry as cluster-based BLAS
+    pBlas->blasType = BlasEntry::Type::ClusterBlas;
+    pBlas->megaGeoBuilder = megaGeoBuilder;
+    pBlas->megaGeoSurfaceId = surfaceId;
+
+    // Cache the subdivision surface ID by topology for future reuse
+    m_subdivisionSurfaceCache[topologyHash] = surfaceId;
+
+    Logger::info(str::format("RTX MegaGeo: Created subdivision surface with ID ", surfaceId,
+                             ", cached for topology hash ", std::hex, topologyHash));
+    return true;
   }
 
 }  // namespace nvvk

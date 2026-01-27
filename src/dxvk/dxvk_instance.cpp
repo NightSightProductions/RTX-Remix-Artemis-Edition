@@ -385,6 +385,9 @@ namespace dxvk {
   }
 
   DxvkInstance::DxvkInstance() {
+    // RTX MegaGeo: Disable NVIDIA present layer to prevent duplicate Vulkan12Features injection
+    _putenv_s("DISABLE_LAYER_NV_PRESENT_1", "1");
+
     Logger::info(str::format("Game: ", env::getExeName()));
     Logger::info(str::format("DXVK_Remix: ", DXVK_VERSION));
 

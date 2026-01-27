@@ -51,6 +51,8 @@
 #include "rtx/utility/gpu_printing.h"
 #include "rtx_nrd_settings.h"
 #include "rtx_scene_manager.h"
+#include "rtx_megageo/rtx_megageo_builder.h"
+#include "rtx_megageo/nvrhi_adapter/nvrhi_dxvk_buffer.h"
 
 #include "../d3d9/d3d9_state.h"
 #include "../d3d9/d3d9_spec_constants.h"
@@ -571,7 +573,7 @@ namespace dxvk {
 
       // Update all the GPU buffers needed to describe the scene
       getSceneManager().prepareSceneData(this, m_execBarriers);
-      
+
       // If we really don't have any RT to do, just bail early (could be UI/menus rendering)
       if (getSceneManager().getSurfaceBuffer() != nullptr) {
 
@@ -594,7 +596,7 @@ namespace dxvk {
 
         // Volumetric Lighting
         dispatchVolumetrics(rtOutput);
-        
+
         // Path Tracing
         dispatchPathTracing(rtOutput);
 
@@ -1338,6 +1340,23 @@ namespace dxvk {
     bindResourceView(BINDING_VALUE_NOISE_SAMPLER, valueNoiseLut, nullptr);
     bindResourceSampler(BINDING_VALUE_NOISE_SAMPLER, linearSampler);
     bindResourceBuffer(BINDING_SAMPLER_READBACK_BUFFER, DxvkBufferSlice(samplerFeedbackBuffer, 0, samplerFeedbackBuffer.ptr() ? samplerFeedbackBuffer->info().size : 0));
+
+    // Bind cluster shading data buffer for RTX Mega Geometry debug views
+    RtxMegaGeoBuilder* megaGeoBuilder = getSceneManager().getAccelManager().getMegaGeoBuilder();
+    if (megaGeoBuilder) {
+      nvrhi::BufferHandle clusterShadingDataBufferHandle = megaGeoBuilder->getClusterShadingDataBuffer();
+      if (clusterShadingDataBufferHandle) {
+        // Convert NVRHI buffer to Dxvk buffer
+        NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(clusterShadingDataBufferHandle.Get());
+        if (nvrhiBuffer) {
+          const Rc<DxvkBuffer>& clusterShadingDataBuffer = nvrhiBuffer->getDxvkBuffer();
+          if (clusterShadingDataBuffer.ptr()) {
+            bindResourceBuffer(BINDING_CLUSTER_SHADING_DATA_BUFFER,
+                             DxvkBufferSlice(clusterShadingDataBuffer, 0, clusterShadingDataBuffer->info().size));
+          }
+        }
+      }
+    }
   }
 
   void RtxContext::bindResourceView(const uint32_t slot, const Rc<DxvkImageView>& imageView, const Rc<DxvkBufferView>& bufferView)

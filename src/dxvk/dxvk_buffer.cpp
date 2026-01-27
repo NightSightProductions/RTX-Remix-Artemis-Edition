@@ -205,6 +205,11 @@ namespace dxvk {
     // required by the Vulkan spec (since raw device memory allocation will only gaurentee alignment in such cases even if custom
     // sub-allocating logic can handle greater alignments).
     memReq.memoryRequirements.alignment = std::lcm(memReq.memoryRequirements.alignment, m_info.requiredAlignmentOverride);
+
+    // RTX MegaGeo: Ensure alignment is at least as large as slice alignment for storage buffers
+    // This is critical for minStorageBufferOffsetAlignment (typically 16 bytes)
+    VkDeviceSize sliceAlignment = computeSliceAlignment();
+    memReq.memoryRequirements.alignment = std::max(memReq.memoryRequirements.alignment, sliceAlignment);
     // NV-DXVK end
 
     // xxxnsubtil: avoid bad interaction with RtxStagingDataAlloc
@@ -213,6 +218,13 @@ namespace dxvk {
     // dedicated memory is not strictly required
     if (!dedicatedRequirements.requiresDedicatedAllocation) {
       dedicatedRequirements.prefersDedicatedAllocation = VK_FALSE;
+    }
+
+    // RTX MegaGeo: Force dedicated allocations for storage buffers to ensure proper alignment
+    // Suballocation pools may not respect increased alignment requirements
+    // This must come AFTER the code above that disables dedicated allocation preferences
+    if (m_info.usage & VK_BUFFER_USAGE_STORAGE_BUFFER_BIT) {
+      dedicatedRequirements.prefersDedicatedAllocation = VK_TRUE;
     }
 
     // Use high memory priority for GPU-writable resources

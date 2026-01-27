@@ -28,6 +28,7 @@
 #include "rtx_light_manager.h"
 #include "graph/rtx_graph_instance.h"
 #include "dxvk_scoped_annotation.h"
+#include "rtx_megageo/rtx_megageo_builder.h"
 
 namespace dxvk {
 
@@ -574,6 +575,27 @@ namespace dxvk {
 
   void BlasEntry::rebuildSpatialMap() {
     m_spatialMap.rebuild(RtxOptions::uniqueObjectDistance() * 2.f);
+  }
+
+  VkAccelerationStructureKHR BlasEntry::getBlasHandle() const {
+    if (isClusterBlas() && megaGeoBuilder) {
+      return megaGeoBuilder->getSurfaceBlas(megaGeoSurfaceId);
+    }
+    return (dynamicBlas != nullptr) ? dynamicBlas->accelStructure->getAccelStructure() : VK_NULL_HANDLE;
+  }
+
+  VkDeviceAddress BlasEntry::getBlasAddress() const {
+    if (isClusterBlas() && megaGeoBuilder) {
+      return megaGeoBuilder->getSurfaceBlasAddress(megaGeoSurfaceId);
+    }
+    return (dynamicBlas != nullptr) ? dynamicBlas->accelStructure->getAccelDeviceAddress() : 0;
+  }
+
+  bool BlasEntry::isBlasReady() const {
+    if (isClusterBlas() && megaGeoBuilder) {
+      return megaGeoBuilder->isSurfaceReady(megaGeoSurfaceId);
+    }
+    return dynamicBlas != nullptr;
   }
 
 } // namespace dxvk

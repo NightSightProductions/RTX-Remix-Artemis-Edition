@@ -51,6 +51,8 @@
 #include "rtx_render/rtx_restir_gi_rayquery.h"
 #include "rtx_render/rtx_debug_view.h"
 #include "rtx_render/rtx_composite.h"
+#include "rtx_render/rtx_megageo/rtx_megageo_builder.h"
+#include "rtx_render/rtx_accel_manager.h"
 #include "dxvk_image.h"
 #include "../util/rc/util_rc_ptr.h"
 #include "../util/util_math.h"
@@ -4012,6 +4014,21 @@ namespace dxvk {
           ImGui::Unindent();
         }
       }
+      ImGui::Unindent();
+    }
+
+    if (ImGui::CollapsingHeader("RTX Mega Geometry", collapsingHeaderClosedFlags)) {
+      ImGui::Indent();
+
+      // Access MegaGeoBuilder via SceneManager -> AccelManager
+      RtxMegaGeoBuilder* megaGeoBuilder = common->getSceneManager().getAccelManager().getMegaGeoBuilder();
+      if (megaGeoBuilder) {
+        megaGeoBuilder->showImguiSettings();
+      } else {
+        ImGui::TextDisabled("RTX Mega Geometry not initialized");
+        ImGui::TextWrapped("(Mega Geometry will be initialized when subdivision surfaces are detected)");
+      }
+
       ImGui::Unindent();
     }
 

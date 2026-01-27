@@ -412,6 +412,13 @@ dxvk_src = files([
   'imgui/implot_items.cpp',
 ])
 
+# RTX Mega Geometry Integration
+subdir('rtx_render/rtx_megageo')
+# Note: rtx_mg_sources are compiled as rtx_mg_lib, linked via rtx_mg_dep
+# RTX MG shaders are now fully integrated into the RTX shader build system.
+# All 11 shaders (5 HIZ + 6 cluster builder) are automatically discovered and compiled
+# by the compile_shaders.py script from src/dxvk/shaders/rtx/pass/rtx_megageo/
+
 thread_dep = dependency('threads')
 
 nrd_include_dir = include_directories(join_paths('../../', 'external/nrd/Include'))
@@ -470,7 +477,7 @@ dxvk_embedded_data_files = files([
 
 dxvk_generated_embedded_files = embedding_compiler.process(dxvk_embedded_data_files)
 
-dxvk_deps = [ thread_dep, vkcommon_dep, dxvk_extradep, usd_dep, lssUsd_dep, nrc_dep, nrd_dep, dlss_dep, submodules_dep, xess_dep, tracy_dep, tracy_dep_dynamic, aftermath_dep, nvapi_dep, reflex_dep, usd_plugin_deps ]
+dxvk_deps = [ thread_dep, vkcommon_dep, dxvk_extradep, usd_dep, lssUsd_dep, nrc_dep, nrd_dep, dlss_dep, submodules_dep, xess_dep, tracy_dep, tracy_dep_dynamic, aftermath_dep, nvapi_dep, reflex_dep, usd_plugin_deps, rtx_mg_dep ]
 
 if enable_rtxio
   dxvk_deps += rtxio_dep

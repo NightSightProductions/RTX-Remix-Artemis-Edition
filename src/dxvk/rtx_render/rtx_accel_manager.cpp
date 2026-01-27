@@ -23,11 +23,22 @@
 #include <vector>
 #include <assert.h>
 
+// Disable verbose MegaGeo logging in hot path
+#define RTXMG_VERBOSE_LOGGING 1
+#if RTXMG_VERBOSE_LOGGING
+#define RTXMG_LOG(msg) Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
+
 #include "rtx.h"
 #include "rtx_context.h"
 #include "rtx_opacity_micromap_manager.h"
 #include "rtx_scene_manager.h"
+#include "rtx_resources.h"
 #include "rtx_accel_manager.h"
+#include "rtx_megageo/rtx_megageo_builder.h"
+#include "rtx_megageo/nvrhi_adapter/nvrhi_dxvk_buffer.h"
 
 #include "../d3d9/d3d9_state.h"
 #include "rtx_matrix_helpers.h"
@@ -54,6 +65,10 @@ namespace dxvk {
     //    // only allocated with a 64 byte alignment.
     //    // Note: This could use the value of m_scratchAlignment, but this is duplicated to avoid potential future initialization order issues.
     , m_scratchAlignment(device->properties().khrDeviceAccelerationStructureProperties.minAccelerationStructureScratchOffsetAlignment) {
+
+    // Initialize RTX Mega Geometry Builder (if VK_NV_cluster_acceleration_structure is supported)
+    // Note: Initialization is deferred - will be lazily created when first subdivision surface is encountered
+    // This avoids overhead when cluster BLAS is not used
   }
 
   void AccelManager::clear() {
@@ -426,6 +441,8 @@ namespace dxvk {
     for (auto& instances : m_mergedInstances) {
       instances.clear();
     }
+    // RTX Mega Geometry: Clear cluster instance patches from previous frame
+    m_clusterInstancePatches.clear();
 
     const uint32_t currentFrame = m_device->getCurrentFrameId();
 
@@ -445,7 +462,24 @@ namespace dxvk {
     // NOTE: Would like to use the BLAS Linked instances here, but that misses viewmodel and virtual instances
     std::unordered_map<BlasEntry*, std::vector<RtInstance*>> uniqueBlas;
 
+    // RTX Mega Geometry: Process completed surfaces BEFORE the instance loop
+    // This ensures surfaceId->instanceIndex mapping is populated before addBlas() is called
+    if (m_megaGeoBuilder != nullptr) {
+      m_megaGeoBuilder->processCompletedSurfaces();
+    }
+
     for (RtInstance* instance : instances) {
+      // RTX MegaGeo: Debug logging for ClusterBlas instances being skipped
+      if (instance && instance->getBlas() && instance->getBlas()->isClusterBlas()) {
+        static bool loggedSkipOnce = false;
+        if (!loggedSkipOnce) {
+          Logger::info(str::format("RTX MegaGeo mergeInstancesIntoBlas: ClusterBlas instance found! inst=", (void*)instance,
+                                   " isHidden=", instance->isHidden(),
+                                   " mask=", instance->getVkInstance().mask));
+          loggedSkipOnce = true;
+        }
+      }
+
       if (instance->isHidden()) {
         continue;
       }
@@ -481,6 +515,20 @@ namespace dxvk {
       // Cannot store BlasEntry* directly in the RtInstance because the entries are owned and potentially moved by the hash table.
       BlasEntry* blasEntry = instance->getBlas();
       assert(blasEntry);
+
+      // RTX Mega Geometry: Cluster-based BLASes are built separately via RtxMegaGeoBuilder
+      // They still need to be added to the TLAS, but skip the traditional BLAS building logic
+      if (blasEntry->isClusterBlas()) {
+        // Add directly to TLAS - the BLAS address will be patched on GPU later
+        if (instance->surface.instancesToObject == nullptr) {
+          addBlas(instance, blasEntry, nullptr);
+        } else {
+          for (auto& instanceToObject : *instance->surface.instancesToObject) {
+            addBlas(instance, blasEntry, &instanceToObject);
+          }
+        }
+        continue; // Skip traditional BLAS building (geometry fill, dynamic/merged decision, etc.)
+      }
 
       fillGeometryInfoFromBlasEntry(*blasEntry, *instance, opacityMicromapManager);
 
@@ -739,7 +787,40 @@ namespace dxvk {
   void AccelManager::addBlas(RtInstance* instance, BlasEntry* blasEntry, const Matrix4* instanceToObject) {
     // Create an instance for this BLAS
     VkAccelerationStructureInstanceKHR blasInstance = instance->getVkInstance();
-    blasInstance.accelerationStructureReference = blasEntry->dynamicBlas->accelerationStructureReference;
+
+    // RTX Mega Geometry: For cluster BLASes, the address will be patched on GPU
+    // Set to 0 here and record mapping for later GPU-side patching
+    bool isClusterBlas = blasEntry->isClusterBlas();
+    if (isClusterBlas) {
+      Logger::info(str::format("RTX MegaGeo AccelManager::addBlas: isClusterBlas=", isClusterBlas,
+                               " megaGeoBuilder=", (blasEntry->megaGeoBuilder ? "valid" : "NULL"),
+                               " surfaceId=", blasEntry->megaGeoSurfaceId));
+    }
+    if (isClusterBlas && blasEntry->megaGeoBuilder) {
+      // Set placeholder - will be patched by patchClusterBlasAddresses()
+      blasInstance.accelerationStructureReference = 0;
+
+      // Get the RTXMG instance index for this surface
+      uint32_t rtxmgIndex = blasEntry->megaGeoBuilder->getInstanceIndexForSurface(blasEntry->megaGeoSurfaceId);
+      if (rtxmgIndex != UINT32_MAX) {
+        // Determine which TLAS this will go into and calculate the instance index
+        Tlas::Type tlasType = (instance->usesUnorderedApproximations() && RtxOptions::enableSeparateUnorderedApproximations())
+                              ? Tlas::Unordered : Tlas::Opaque;
+        uint32_t remixIndex = static_cast<uint32_t>(m_mergedInstances[tlasType].size());
+
+        // Record the mapping for GPU-side patching
+        m_clusterInstancePatches.push_back({remixIndex, rtxmgIndex, tlasType});
+
+        ONCE(Logger::info(str::format("RTX MegaGeo AccelManager: Tracking cluster instance for GPU patching: ",
+                                      "remix=", remixIndex, " rtxmg=", rtxmgIndex, " tlas=", (int)tlasType)));
+      } else {
+        Logger::warn(str::format("RTX MegaGeo AccelManager: No RTXMG instance index for surface ", blasEntry->megaGeoSurfaceId));
+      }
+    } else {
+      // Traditional BLAS - use the address directly
+      blasInstance.accelerationStructureReference = blasEntry->getBlasAddress();
+    }
+
     blasInstance.instanceCustomIndex =
       (blasInstance.instanceCustomIndex & ~uint32_t(CUSTOM_INDEX_SURFACE_MASK)) |
       uint32_t(m_reorderedSurfaces.size()) & uint32_t(CUSTOM_INDEX_SURFACE_MASK);
@@ -984,6 +1065,50 @@ namespace dxvk {
         ctx->writeToBuffer(m_vkInstanceBuffer, offset, size, instances.data());
         offset += size;
       }
+    }
+
+    // RTX Mega Geometry: Patch cluster BLAS addresses directly on GPU
+    // This is done AFTER uploading instance data so we can patch in-place
+    if (!m_clusterInstancePatches.empty() && m_megaGeoBuilder != nullptr) {
+      Logger::info(str::format("RTX MegaGeo AccelManager: GPU-side patching ", m_clusterInstancePatches.size(), " cluster BLAS addresses"));
+
+      // Create NVRHI wrapper for the instance buffer
+      nvrhi::BufferDesc wrapperDesc;
+      wrapperDesc.byteSize = m_vkInstanceBuffer->info().size;
+      wrapperDesc.structStride = sizeof(VkAccelerationStructureInstanceKHR);
+      wrapperDesc.debugName = "InstanceBufferWrapper";
+      wrapperDesc.canHaveUAVs = true;
+
+      nvrhi::BufferHandle instanceBufferWrapper = new NvrhiDxvkBuffer(wrapperDesc, m_vkInstanceBuffer);
+
+      // Prepare mappings - need to account for TLAS offsets
+      // Opaque instances start at offset 0
+      // Unordered instances start after all Opaque instances
+      uint32_t opaqueCount = static_cast<uint32_t>(m_mergedInstances[Tlas::Opaque].size());
+
+      std::vector<RtxMegaGeoBuilder::InstancePatchMapping> mappings;
+      mappings.reserve(m_clusterInstancePatches.size());
+      for (const auto& patch : m_clusterInstancePatches) {
+        uint32_t globalIndex = patch.remixInstanceIndex;
+        if (patch.tlasType == Tlas::Unordered) {
+          globalIndex += opaqueCount; // Offset for unordered instances
+        }
+        mappings.push_back({globalIndex, patch.rtxmgInstanceIndex});
+      }
+
+      // Call GPU-side patching
+      RTXMG_LOG(str::format("RTX MegaGeo AccelManager: About to patch ", mappings.size(), " cluster BLAS addresses"));
+      m_megaGeoBuilder->patchClusterBlasAddressesGPU(instanceBufferWrapper.Get(), 0, mappings);
+      RTXMG_LOG("RTX MegaGeo AccelManager: patchClusterBlasAddressesGPU returned");
+
+      // Barrier to ensure patching completes before TLAS build
+      RTXMG_LOG("RTX MegaGeo AccelManager: Emitting barrier after patching");
+      ctx->emitMemoryBarrier(0,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+        VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+      RTXMG_LOG("RTX MegaGeo AccelManager: Barrier after patching emitted");
     }
 
     // Vk billboard buffer
@@ -1270,15 +1395,124 @@ namespace dxvk {
 
       ctx->getCommandList()->trackResource<DxvkAccess::Read>(m_scratchBuffer);
     }
+
+    // RTX Mega Geometry: Build cluster BLAS for subdivision surfaces
+    // Check if any instances use cluster BLAS before initializing
+    bool hasClusterBlas = false;
+    uint32_t clusterBlasCount = 0;
+    static uint32_t logCount = 0;
+    bool shouldLogThisFrame = (logCount < 200); // Log first 200 frames
+    logCount++;
+    for (const auto& inst : instances) {
+      if (inst && inst->getBlas()) {
+        BlasEntry* blas = inst->getBlas();
+        if (shouldLogThisFrame && blas->isClusterBlas()) {
+          Logger::info(str::format("RTX MegaGeo buildBlases: FOUND ClusterBlas! inst=", (void*)inst, " blas=", (void*)blas));
+        }
+        if (blas->isClusterBlas()) {
+          hasClusterBlas = true;
+          clusterBlasCount++;
+        }
+      }
+    }
+
+    static bool loggedOnce = false;
+    if (hasClusterBlas && !loggedOnce) {
+      Logger::info(str::format("RTX MegaGeo AccelManager: Found ", clusterBlasCount, " ClusterBlas instances"));
+      loggedOnce = true;
+    }
+
+    if (hasClusterBlas) {
+      // Lazy initialization of RtxMegaGeoBuilder
+      Rc<RtxContext> rtxCtx = dynamic_cast<RtxContext*>(ctx.ptr());
+      if (rtxCtx != nullptr && m_megaGeoBuilder == nullptr) {
+        Logger::info("RTX Mega Geometry: Initializing RtxMegaGeoBuilder in AccelManager");
+        m_megaGeoBuilder = new RtxMegaGeoBuilder(m_device, rtxCtx);
+        if (!m_megaGeoBuilder->initialize()) {
+          Logger::err("RTX Mega Geometry: Failed to initialize RtxMegaGeoBuilder");
+          m_megaGeoBuilder = nullptr;
+        } else {
+          Logger::info("RTX MegaGeo AccelManager: Builder initialized successfully");
+        }
+      }
+
+      if (m_megaGeoBuilder != nullptr) {
+        ScopedGpuProfileZone(ctx, "buildClusterBLAS");
+
+        // CRITICAL: Process completed async surfaces BEFORE building cluster BLAS
+        // This ensures worker threads have finished creating subdivision surfaces
+        // and they've been integrated into the scene
+        ONCE(Logger::info("RTX MegaGeo AccelManager: Processing completed surfaces before build"));
+        m_megaGeoBuilder->processCompletedSurfaces();
+
+        // Get camera for frustum culling
+        const RtCamera& camera = cameraManager.getCamera(CameraType::Main);
+
+        // Get depth buffer for HiZ culling from the raytracing output
+        Rc<DxvkImageView> depthBuffer = nullptr;
+        if (rtxCtx != nullptr && rtxCtx->getCommonObjects()->getResources().isResourceReady()) {
+          Resources::RaytracingOutput& rtOutput = rtxCtx->getCommonObjects()->getResources().getRaytracingOutput();
+          if (rtOutput.m_primaryDepth.view != nullptr) {
+            depthBuffer = rtOutput.m_primaryDepth.view;
+          }
+        }
+
+        // Build all cluster BLAS
+        if (rtxCtx != nullptr) {
+          ONCE(Logger::info("RTX MegaGeo AccelManager: Calling buildClusterBlas"));
+          m_megaGeoBuilder->buildClusterBlas(rtxCtx, depthBuffer, camera);
+          RTXMG_LOG("RTX MegaGeo AccelManager: buildClusterBlas returned");
+        } else {
+          Logger::warn("RTX Mega Geometry: Could not cast DxvkContext to RtxContext for cluster BLAS building");
+        }
+      } else {
+        ONCE(Logger::err("RTX MegaGeo AccelManager: Builder is null, cannot build cluster BLAS"));
+      }
+    } else {
+      static bool warned = false;
+      if (!warned && clusterBlasCount == 0 && instances.size() > 0) {
+        Logger::warn(str::format("RTX MegaGeo AccelManager: No ClusterBlas instances found (total instances: ", instances.size(), ")"));
+        warned = true;
+      }
+    }
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildBlases exiting after cluster BLAS section");
+  }
+
+  bool AccelManager::initializeMegaGeoBuilder(Rc<DxvkContext> ctx) {
+    // Early exit if already initialized
+    if (m_megaGeoBuilder != nullptr) {
+      return true;
+    }
+
+    Rc<RtxContext> rtxCtx = dynamic_cast<RtxContext*>(ctx.ptr());
+    if (rtxCtx == nullptr) {
+      Logger::err("RTX MegaGeo: Failed to cast DxvkContext to RtxContext for builder initialization");
+      return false;
+    }
+
+    Logger::info("RTX MegaGeo: Initializing RtxMegaGeoBuilder (on-demand from first candidate)");
+    m_megaGeoBuilder = new RtxMegaGeoBuilder(m_device, rtxCtx);
+    if (!m_megaGeoBuilder->initialize()) {
+      Logger::err("RTX MegaGeo: Failed to initialize RtxMegaGeoBuilder");
+      m_megaGeoBuilder = nullptr;
+      return false;
+    }
+
+    Logger::info("RTX MegaGeo: RtxMegaGeoBuilder initialized successfully");
+    return true;
   }
 
   void AccelManager::buildTlas(Rc<DxvkContext> ctx) {
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas entering");
     if (m_vkInstanceBuffer == nullptr) {
+      RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - no instance buffer, returning");
       return;
     }
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - have instance buffer");
 
     ScopedGpuProfileZone(ctx, "buildTLAS");
 
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - emitting memory barrier");
     // Two barriers in one:
     // Accel build bit - to protect from BLAS builds
     // Transfer bit - to protect from updateBuffer in prepareSceneData
@@ -1287,28 +1521,38 @@ namespace dxvk {
       VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_TRANSFER_WRITE_BIT,
       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
       VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - memory barrier done");
 
+    RTXMG_LOG(str::format("RTX MegaGeo AccelManager: buildTlas - tracking ", m_blasPool.size(), " BLASes"));
     for (auto&& blas : m_blasPool) {
       ctx->getCommandList()->trackResource<DxvkAccess::Read>(blas->accelStructure);
     }
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - BLAS tracking done");
 
     size_t totalScratchSize = 0;
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - building opaque TLAS");
     internalBuildTlas<Tlas::Opaque>(ctx, totalScratchSize);
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - building unordered TLAS");
     internalBuildTlas<Tlas::Unordered>(ctx, totalScratchSize);
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - TLAS builds complete");
 
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - emitting final barrier");
     ctx->emitMemoryBarrier(0,
       VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
       VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
-      VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+      VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
       VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - final barrier emitted");
 
     // Release the scratch memory so it can be reused by rest of the frame.
     m_scratchBuffer = nullptr;
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - scratch buffer released");
 
     OpacityMicromapManager* opacityMicromapManager = ctx->getCommonObjects()->getSceneManager().getOpacityMicromapManager();
     if (opacityMicromapManager) {
       opacityMicromapManager->onFinishedBuilding();
     }
+    RTXMG_LOG("RTX MegaGeo AccelManager: buildTlas - COMPLETE, returning from buildTlas");
   }
 
   template<Tlas::Type type>

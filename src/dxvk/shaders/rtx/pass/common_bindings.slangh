@@ -35,6 +35,7 @@
 #include "rtx/concept/light/light.h"
 #include "rtx/concept/billboard.h"
 #include "rtx/utility/gpu_printing.h"
+#include "rtx/pass/rtx_megageo/cluster_builder/cluster.h"
 
 // Note: Texture array may only be up to a size of 2^16
 layout(set = BINDING_SET_BINDLESS_TEXTURE2D, binding = 0)
@@ -112,5 +113,8 @@ RWStructuredBuffer<GpuPrintBufferElement> GpuPrintBuffer;
 layout(binding = BINDING_VALUE_NOISE_SAMPLER)
 Sampler3D<float4> ValueNoiseSampler;
 
-layout(binding = BINDING_SAMPLER_READBACK_BUFFER) 
+layout(binding = BINDING_SAMPLER_READBACK_BUFFER)
 RWStructuredBuffer<uint32_t> SamplerFeedbackBuffer;
+
+layout(binding = BINDING_CLUSTER_SHADING_DATA_BUFFER)
+StructuredBuffer<ClusterShadingData> clusterShadingData;

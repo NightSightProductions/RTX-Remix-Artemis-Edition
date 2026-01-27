@@ -614,6 +614,22 @@ vec4 loadInput(inout RNG randomState, ivec2 threadId)
 
     break;
   }
+  // RTX Mega Geometry Debug Views
+  // Note: These are implemented in the material evaluation shader during ray tracing
+  // (opaque_surface_material_interaction.slangh) where geometry and material data is available
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_NORMAL:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_TEXCOORD:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_MATERIAL:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_GEOMETRY_INDEX:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_SURFACE_INDEX:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_CLUSTER_ID:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_MICROTRI_ID:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_CLUSTER_UV:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_MICROTRI_AREA:
+  case DEBUG_VIEW_MEGAGEO_COLOR_BY_TOPOLOGY:
+    // Pass through - values written during ray tracing
+    value = DebugView[threadId];
+    break;
   default:
     value = DebugView[threadId];
     break;

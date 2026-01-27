@@ -32,13 +32,14 @@
 #include "../util/util_vector.h"
 #include "../util/util_matrix.h"
 
-namespace dxvk 
+namespace dxvk
 {
 class DxvkContext;
 class DxvkDevice;
 class ResourceCache;
 class CameraManager;
 class OpacityMicromapManager;
+class RtxMegaGeoBuilder;
 
 // AccelManager is responsible for maintaining the acceleration structures (BLAS and TLAS)
 class AccelManager : public CommonDeviceObject {
@@ -157,6 +158,18 @@ private:
   std::vector<VkAccelerationStructureInstanceKHR> m_mergedInstances[Tlas::Count];
   std::vector<Rc<PooledBlas>> m_blasPool;
 
+  // RTX Mega Geometry: Track cluster instances that need GPU-side BLAS address patching
+  // Each entry maps the instance index in m_mergedInstances to the RTXMG instance index in blasPtrsBuffer
+  struct ClusterInstancePatchInfo {
+    uint32_t remixInstanceIndex;   // Index in m_mergedInstances (offset by TLAS type)
+    uint32_t rtxmgInstanceIndex;   // Index in MegaGeoBuilder's blasPtrsBuffer
+    Tlas::Type tlasType;           // Which TLAS this instance belongs to
+  };
+  std::vector<ClusterInstancePatchInfo> m_clusterInstancePatches;
+
+  // Patch cluster BLAS addresses directly on GPU using a compute shader
+  void patchClusterBlasAddresses(Rc<DxvkContext> ctx);
+
   Rc<DxvkBuffer> m_vkInstanceBuffer; // Note: Holds Vulkan AS Instances, not RtInstances
   Rc<DxvkBuffer> m_surfaceBuffer;
   Rc<DxvkBuffer> m_surfaceMappingBuffer;
@@ -176,6 +189,16 @@ private:
 
   VkDeviceSize m_scratchAlignment;
   Rc<DxvkBuffer> m_scratchBuffer;
+
+  // RTX Mega Geometry builder for cluster-based subdivision surface BLAS
+  Rc<RtxMegaGeoBuilder> m_megaGeoBuilder;
+
+public:
+  // RTX Mega Geometry accessor
+  RtxMegaGeoBuilder* getMegaGeoBuilder() const { return m_megaGeoBuilder.ptr(); }
+
+  // RTX Mega Geometry: Initialize builder on-demand when first subdivision candidate is found
+  bool initializeMegaGeoBuilder(Rc<DxvkContext> ctx);
 };
 
 }  // namespace dxvk

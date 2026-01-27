@@ -435,7 +435,11 @@ DxvkMemory::DxvkMemory() { }
     // Keep small allocations together to avoid fragmenting
     // chunks for larger resources with lots of small gaps,
     // as well as resources with potentially weird lifetimes
-    if (req->size <= SmallAllocationThreshold) {
+    // CRITICAL: RTX AS buffers must NEVER be treated as small allocations, even if under threshold
+    // Small allocations get allocated from a separate pool with low GPU addresses (~218MB)
+    // which causes ray tracing crashes
+    const bool isRTAccelStruct = (category == DxvkMemoryStats::Category::RTXAccelerationStructure);
+    if (req->size <= SmallAllocationThreshold && !isRTAccelStruct) {
       hints.set(DxvkMemoryFlag::Small);
       hints.clr(DxvkMemoryFlag::GpuWritable, DxvkMemoryFlag::GpuReadable);
     }
@@ -518,16 +522,40 @@ DxvkMemory::DxvkMemory() { }
           DxvkMemoryStats::Category         category) {
     DxvkMemory result;
 
+    // CRITICAL: For RTX acceleration structures, we MUST avoid HVV (host-visible VRAM) heap
+    // because it causes low GPU addresses (~218MB) which lead to ray tracing crashes.
+    // HVV has BOTH DEVICE_LOCAL and HOST_VISIBLE flags. We need pure DEVICE_LOCAL only.
+    const bool isRTAccelStruct = (category == DxvkMemoryStats::Category::RTXAccelerationStructure);
+    const VkMemoryPropertyFlags hvvFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT;
+
+    if (isRTAccelStruct) {
+      Logger::info(str::format("DxvkMemoryAllocator: Allocating RTX AS buffer, size=", req->size,
+                               ", will skip HVV heap"));
+    }
+
     for (uint32_t i = 0; i < m_memProps.memoryTypeCount && !result; i++) {
       const bool supported = (req->memoryTypeBits & (1u << i)) != 0;
       const bool adequate  = (m_memTypes[i].memType.propertyFlags & flags) == flags;
-      
-      if (supported && adequate) {
+
+      // Skip HVV heap for RT acceleration structures
+      const bool isHvv = (m_memTypes[i].memType.propertyFlags & hvvFlags) == hvvFlags;
+      const bool skipHvv = isRTAccelStruct && isHvv;
+
+      if (isRTAccelStruct && isHvv && supported && adequate) {
+        Logger::info(str::format("DxvkMemoryAllocator: Skipping HVV heap (type ", i, ") for RTX AS"));
+      }
+
+      if (supported && adequate && !skipHvv) {
         result = this->tryAllocFromType(&m_memTypes[i],
                                         flags, req->size, req->alignment, hints, dedAllocInfo, category);
+        if (result && isRTAccelStruct) {
+          Logger::info(str::format("DxvkMemoryAllocator: RTX AS allocated from memory type ", i,
+                                   " flags=0x", std::hex, m_memTypes[i].memType.propertyFlags, std::dec,
+                                   " heap=", m_memTypes[i].heapId));
+        }
       }
     }
-    
+
     return result;
   }
   
