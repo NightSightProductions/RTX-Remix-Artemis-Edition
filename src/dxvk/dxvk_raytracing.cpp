@@ -120,24 +120,37 @@ namespace dxvk {
 
     Future<VkResult> finalize(const Rc<vk::DeviceFn>& vkd,
                                           VkDeferredOperationKHR deferredOp) {
+      Logger::info("DeferredOpFinalizer: Acquiring lock...");
       std::lock_guard<sync::Spinlock> lock(m_mutex);
+      Logger::info("DeferredOpFinalizer: Lock acquired");
 
       if (m_threadPool == nullptr) {
         uint32_t numCpuCores = dxvk::thread::hardware_concurrency();
-        m_threadPool = new ThreadPoolType(numCpuCores / 4, "dxvk-deferredop-finalizer");
+        uint32_t numThreads = std::max(1u, numCpuCores / 4);
+        Logger::info(str::format("DeferredOpFinalizer: Creating thread pool with ", numThreads, " threads (", numCpuCores, " cores)"));
+        m_threadPool = new ThreadPoolType(numThreads, "dxvk-deferredop-finalizer");
       }
 
       Future<VkResult> future;
+      uint32_t retryCount = 0;
+      Logger::info("DeferredOpFinalizer: Attempting to schedule deferred op join");
       do {
         future = m_threadPool->Schedule([vkd = vkd.ptr(), deferredOp]() -> VkResult {
-          return vkd->vkDeferredOperationJoinKHR(vkd->device(), deferredOp);
+          Logger::info("DeferredOpFinalizer: Worker thread starting vkDeferredOperationJoinKHR");
+          VkResult result = vkd->vkDeferredOperationJoinKHR(vkd->device(), deferredOp);
+          Logger::info(str::format("DeferredOpFinalizer: Worker thread vkDeferredOperationJoinKHR returned ", result));
+          return result;
         });
 
         if (future.valid()) {
+          Logger::info(str::format("DeferredOpFinalizer: Scheduled after ", retryCount, " retries"));
           break;
         }
 
-        ONCE(Logger::warn("Unable to schedule a deferred op finalizer. Retrying..."));
+        retryCount++;
+        if (retryCount % 1000 == 0) {
+          Logger::warn(str::format("DeferredOpFinalizer: Still waiting to schedule after ", retryCount, " retries"));
+        }
         std::this_thread::yield();
       } while (true);
 
@@ -155,7 +168,9 @@ namespace dxvk {
     : m_vkd(pipeMgr->m_device->vkd())
     , m_pipeMgr(pipeMgr)
     , m_shaders(shaders) {
+    Logger::info(str::format("DxvkRaytracingPipeline ctor: Calling createLayout for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
     createLayout();
+    Logger::info(str::format("DxvkRaytracingPipeline ctor: createLayout done for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
   }
 
   DxvkRaytracingPipeline::~DxvkRaytracingPipeline() {
@@ -167,13 +182,19 @@ namespace dxvk {
   void DxvkRaytracingPipeline::compilePipeline() {
     ScopedCpuProfileZone();
 
+    Logger::info(str::format("RT compilePipeline: Acquiring mutex for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
     std::lock_guard<dxvk::mutex> lock(m_mutex);
+    Logger::info(str::format("RT compilePipeline: Mutex acquired for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
 
     if (!m_isCompiled) {
+      Logger::info(str::format("RT compilePipeline: Not compiled, checking WAR4000939 for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       if (WAR4000939::shouldApply(m_pipeMgr->m_device)) {
+        Logger::info(str::format("RT compilePipeline: WAR4000939 applies, syncing OMM for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
         WAR4000939::syncWithOMMPipeline(m_shaders);
+        Logger::info(str::format("RT compilePipeline: WAR4000939 sync done for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       }
 
+      Logger::info(str::format("RT compilePipeline: Calling createPipeline for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       createPipeline();
       createShaderBindingTable();
       releaseTmpResources();
@@ -199,6 +220,7 @@ namespace dxvk {
 
   void DxvkRaytracingPipeline::createLayout() {
     ScopedCpuProfileZone();
+    Logger::info(str::format("createLayout: START for ", m_shaders.debugName ? m_shaders.debugName : "<no name>", " groups=", m_shaders.groups.size()));
 
     constexpr uint32_t maxShadersInGroup = 3;
     const size_t maxShaderModules = m_shaders.groups.size() * maxShadersInGroup;
@@ -227,7 +249,9 @@ namespace dxvk {
 
         size_t i = m_shaderModules.size();
 
+        Logger::info(str::format("createLayout: Creating shader module ", i, " stage=0x", std::hex, shader->stage()));
         m_shaderModules.push_back(shader->createShaderModule(m_vkd, slotMapping, DxvkShaderModuleCreateInfo()));
+        Logger::info(str::format("createLayout: Shader module ", i, " created"));
 
         m_stages.push_back(m_shaderModules[i].stageInfo(nullptr));
 
@@ -293,11 +317,14 @@ namespace dxvk {
     }
 
     // Create pipeline layout
+    Logger::info(str::format("createLayout: Shader groups processed, creating pipeline layout for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
     m_layout = new DxvkPipelineLayout(m_vkd, slotMapping, VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR, m_shaders.groups[0].generalShader->shaderOptions().extraLayouts);
+    Logger::info(str::format("createLayout: END for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
   }
 
   void DxvkRaytracingPipeline::createPipeline() {
-    Logger::debug(str::format("Compiling raytracing pipeline: ", m_shaders.debugName ? m_shaders.debugName : "<debug name missing>"));
+    Logger::info(str::format("RT Pipeline START: ", m_shaders.debugName ? m_shaders.debugName : "<no name>",
+                             " stages=", m_stages.size(), " groups=", m_shaderGroups.size()));
 
     assert(m_layout != nullptr);
 
@@ -311,43 +338,58 @@ namespace dxvk {
     rayPipelineInfo.layout = m_layout->pipelineLayout();
     rayPipelineInfo.basePipelineIndex = -1;
     rayPipelineInfo.flags = m_shaders.pipelineFlags;
-    
+
     auto& rtProperties = m_pipeMgr->m_device->properties().khrDeviceRayTracingPipelineProperties;
     THROW_IF_FALSE(rtProperties.maxRayRecursionDepth >= rayPipelineInfo.maxPipelineRayRecursionDepth);
 
     VkDeferredOperationKHR deferredOp = VK_NULL_HANDLE;
 
     if (useDeferredOperations()) {
+      Logger::info(str::format("RT Pipeline: Creating deferred op for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       VK_THROW_IF_FAILED(m_vkd->vkCreateDeferredOperationKHR(m_vkd->device(), VK_NULL_HANDLE, &deferredOp));
     }
 
+    Logger::info(str::format("RT Pipeline: Calling vkCreateRayTracingPipelinesKHR for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
     VkResult result = m_vkd->vkCreateRayTracingPipelinesKHR(m_vkd->device(), deferredOp, m_pipeMgr->m_cache->handle(),
                                                                1, &rayPipelineInfo, nullptr, &m_pipeline);
+    Logger::info(str::format("RT Pipeline: vkCreateRayTracingPipelinesKHR returned ", result, " for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
     VK_THROW_IF_FAILED(result);
 
     if (deferredOp == VK_NULL_HANDLE) {
+      Logger::info(str::format("RT Pipeline END (no deferred): ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       return;
     }
 
     if (result != VK_OPERATION_NOT_DEFERRED_KHR) {
       uint32_t numLaunches = m_vkd->vkGetDeferredOperationMaxConcurrencyKHR(m_vkd->device(), deferredOp);
+      Logger::info(str::format("RT Pipeline: Deferred with ", numLaunches, " launches for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
 
       std::vector<Future<VkResult>> joins;
+      Logger::info(str::format("RT Pipeline: Scheduling ", numLaunches - 1, " deferred ops for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       while (numLaunches > 1) {
+        Logger::info(str::format("RT Pipeline: Scheduling deferred op ", joins.size(), " for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
         joins.emplace_back(DxvkDeferredOpFinalizer::get().finalize(m_vkd, deferredOp));
+        Logger::info(str::format("RT Pipeline: Scheduled deferred op ", joins.size() - 1, ", valid=", joins.back().valid(), " for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
         --numLaunches;
       }
+      Logger::info(str::format("RT Pipeline: Created ", joins.size(), " finalize futures for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
 
+      Logger::info(str::format("RT Pipeline: Calling vkDeferredOperationJoinKHR for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       VK_THROW_IF_FAILED(m_vkd->vkDeferredOperationJoinKHR(m_vkd->device(), deferredOp));
+      Logger::info(str::format("RT Pipeline: vkDeferredOperationJoinKHR done for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
 
-      for (auto& f : joins) {
-        VK_THROW_IF_FAILED(f.get());
+      Logger::info(str::format("RT Pipeline: Waiting for ", joins.size(), " futures for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
+      for (size_t i = 0; i < joins.size(); i++) {
+        Logger::info(str::format("RT Pipeline: Waiting for future ", i, " for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
+        VK_THROW_IF_FAILED(joins[i].get());
+        Logger::info(str::format("RT Pipeline: Future ", i, " done for ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
       }
 
       VK_THROW_IF_FAILED(m_vkd->vkGetDeferredOperationResultKHR(m_vkd->device(), deferredOp));
     }
 
     m_vkd->vkDestroyDeferredOperationKHR(m_vkd->device(), deferredOp, VK_NULL_HANDLE);
+    Logger::info(str::format("RT Pipeline END: ", m_shaders.debugName ? m_shaders.debugName : "<no name>"));
   }
 
   // Each shader binding table is populated with shader records 

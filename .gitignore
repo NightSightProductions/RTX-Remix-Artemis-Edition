@@ -39,3 +39,4 @@
 *.log
 nv-private/
 tests/rtx/dxvk_rt_testing/
+/nv-private

@@ -1991,12 +1991,6 @@ namespace dxvk {
     // TODO: Re-enable conservative check once mega geometry is proven working
     bool result = hasReasonableComplexity;  // Changed from isTrackedReplacementMesh
 
-    // TEMPORARY: Limit candidates to debug crash
-    const uint32_t kMaxCandidates = 1;
-    if (result && candidateCount >= kMaxCandidates) {
-      result = false;
-    }
-
     if (result) {
       candidateCount++;
       Logger::info(str::format("RTX MegaGeo: CANDIDATE FOUND (#", candidateCount, ") - verts=", convertedGeom.vertexCount,

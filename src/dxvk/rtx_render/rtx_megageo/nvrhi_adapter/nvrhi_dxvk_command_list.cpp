@@ -20,7 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 // Enable verbose MegaGeo logging for debugging
-#define RTXMG_VERBOSE_LOGGING 1
+#define RTXMG_VERBOSE_LOGGING 0
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) dxvk::Logger::info(msg)
 #else
@@ -72,41 +72,43 @@ namespace dxvk {
     }
 
     // Vulkan requires vkCmdUpdateBuffer size to be a multiple of 4
-    // Also need to consider storage buffer alignment (16 bytes)
-    // Align size up to next multiple of 16 to be safe
-    size_t alignedSize = (size + 15) & ~15;
+    // Round UP to multiple of 4, but only write within buffer bounds
+    size_t bufferSize = nvrhiBuffer->getDesc().byteSize;
+    size_t maxWriteSize = (offset < bufferSize) ? (bufferSize - offset) : 0;
+
+    // Determine how much we can actually write
+    size_t writeSize = std::min(size, maxWriteSize);
+    // Align down to multiple of 4 (Vulkan requirement)
+    writeSize = writeSize & ~3;
+
+    if (writeSize == 0) {
+      // Nothing to write or buffer too small
+      if (size > 0) {
+        Logger::warn(str::format("RTX MegaGeo: writeBuffer - cannot write ", size, " bytes at offset ", offset,
+          " to buffer of size ", bufferSize));
+      }
+      return;
+    }
 
     // Vulkan limits vkCmdUpdateBuffer to 65536 bytes - split large updates into chunks
     constexpr size_t maxChunkSize = 65536;
 
-    if (alignedSize <= maxChunkSize) {
+    if (writeSize <= maxChunkSize) {
       // Small update - send as single chunk
-      // If size needed padding, create a temporary aligned buffer
-      if (alignedSize != size) {
-        std::vector<uint8_t> alignedData(alignedSize, 0);
-        std::memcpy(alignedData.data(), data, size);
-        m_context->updateBuffer(dxvkBuffer, offset, alignedSize, alignedData.data());
-      } else {
-        m_context->updateBuffer(dxvkBuffer, offset, size, data);
-      }
+      m_context->updateBuffer(dxvkBuffer, offset, writeSize, data);
     } else {
       // Large update - split into chunks
       const uint8_t* dataPtr = static_cast<const uint8_t*>(data);
-      size_t remaining = size;
+      size_t remaining = writeSize;
       uint64_t currentOffset = offset;
 
       while (remaining > 0) {
         size_t chunkSize = std::min(remaining, maxChunkSize);
-        // Align chunk size to 16 bytes
-        size_t alignedChunkSize = (chunkSize + 15) & ~15;
+        // Align chunk size down to 4 bytes for Vulkan
+        chunkSize = chunkSize & ~3;
+        if (chunkSize == 0) break;
 
-        if (alignedChunkSize != chunkSize) {
-          std::vector<uint8_t> alignedChunk(alignedChunkSize, 0);
-          std::memcpy(alignedChunk.data(), dataPtr, chunkSize);
-          m_context->updateBuffer(dxvkBuffer, currentOffset, alignedChunkSize, alignedChunk.data());
-        } else {
-          m_context->updateBuffer(dxvkBuffer, currentOffset, chunkSize, dataPtr);
-        }
+        m_context->updateBuffer(dxvkBuffer, currentOffset, chunkSize, dataPtr);
 
         dataPtr += chunkSize;
         currentOffset += chunkSize;

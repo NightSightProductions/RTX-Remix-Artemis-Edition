@@ -85,16 +85,22 @@ namespace dxvk {
     if (shaders.groups.empty())
       return nullptr;
 
+    Logger::info(str::format("createRaytracingPipeline: Acquiring mutex for ", shaders.debugName ? shaders.debugName : "<no name>"));
     std::lock_guard<dxvk::mutex> lock(m_mutex);
+    Logger::info(str::format("createRaytracingPipeline: Mutex acquired for ", shaders.debugName ? shaders.debugName : "<no name>"));
 
     auto pair = m_raytracingPipelines.find(shaders);
-    if (pair != m_raytracingPipelines.end())
+    if (pair != m_raytracingPipelines.end()) {
+      Logger::info(str::format("createRaytracingPipeline: Found existing pipeline for ", shaders.debugName ? shaders.debugName : "<no name>"));
       return &pair->second;
+    }
 
+    Logger::info(str::format("createRaytracingPipeline: Creating new pipeline for ", shaders.debugName ? shaders.debugName : "<no name>"));
     auto iter = m_raytracingPipelines.emplace(
       std::piecewise_construct,
       std::tuple(shaders),
       std::tuple(this, shaders));
+    Logger::info(str::format("createRaytracingPipeline: Pipeline created for ", shaders.debugName ? shaders.debugName : "<no name>"));
     return &iter.first->second;
   }
   

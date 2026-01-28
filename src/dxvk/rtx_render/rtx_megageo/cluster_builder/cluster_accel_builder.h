@@ -272,6 +272,8 @@ protected:
     nvrhi::ComputePipelineHandle m_fillClustersTexcoordsPSO;
 
     nvrhi::BindingLayoutHandle m_computeClusterTilingBL;
+    nvrhi::BindingLayoutHandle m_computeClusterTilingHizBL;  // Separate HiZ binding layout (space 1)
+    nvrhi::BindingSetHandle m_dummyHizBindingSet;           // Dummy HiZ binding set when zbuffer is null
     nvrhi::ComputePipelineHandle m_computeClusterTilingPSOs[ComputeClusterTilingPermutation::kCount];
 
     // Dummy HiZ textures for when HiZ culling is disabled

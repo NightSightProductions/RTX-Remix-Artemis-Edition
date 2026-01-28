@@ -25,7 +25,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Disable verbose MegaGeo logging for performance (set to 1 to enable)
-#define RTXMG_VERBOSE_LOGGING 1
+#define RTXMG_VERBOSE_LOGGING 0
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -1075,15 +1075,16 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     }
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - params filled, creating bindingSetDesc");
 
-    // Create binding layout manually with proper array specification for HiZ textures
-    // NOTE: VK_BINDING macro is not effective during HLSL compilation for RTX Remix,
-    // so all bindings end up in descriptor set 0. The HiZ textures (t0 in space1)
-    // become slot 17 after t0-t16.
+    // Create binding layouts - matching sample's 3 descriptor set structure:
+    // Set 0: Main bindings (SRVs, UAVs, samplers, constant buffer)
+    // Set 1: HiZ textures (space 1)
+    // Set 2: Bindless textures
     if (!m_computeClusterTilingBL)
     {
-        RTXMG_LOG("RTX MegaGeo: Creating binding layout with HiZ array at slot 17");
+        RTXMG_LOG("RTX MegaGeo: Creating main binding layout (set 0)");
         nvrhi::BindingLayoutDesc layoutDesc;
         layoutDesc.setVisibility(nvrhi::ShaderType::Compute)
+            .setRegisterSpace(0)
             .addItem(nvrhi::BindingLayoutItem::ConstantBuffer(0))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(0))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(1))
@@ -1102,8 +1103,6 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(14))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(15))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(16))
-            // HiZ array at slot 17 (HLSL shader compiles t_HiZBuffer[9] to binding 17)
-            .addItem(nvrhi::BindingLayoutItem::Texture_SRV(17).setSize(HIZ_MAX_LODS))
             .addItem(nvrhi::BindingLayoutItem::Sampler(0))
             .addItem(nvrhi::BindingLayoutItem::Sampler(1))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0))
@@ -1119,11 +1118,43 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         m_computeClusterTilingBL = m_device->createBindingLayout(layoutDesc);
         if (!m_computeClusterTilingBL)
         {
-            Logger::err("Failed to create binding layout for compute_cluster_tiling.hlsl");
+            Logger::err("Failed to create main binding layout for compute_cluster_tiling.hlsl");
         }
-        RTXMG_LOG("RTX MegaGeo: Binding layout created");
+        RTXMG_LOG("RTX MegaGeo: Main binding layout created");
     }
 
+    // Create HiZ binding layout (set 1, space 1) - matches sample's hiz binding
+    if (!m_computeClusterTilingHizBL)
+    {
+        RTXMG_LOG("RTX MegaGeo: Creating HiZ binding layout (set 1, space 1)");
+        nvrhi::BindingLayoutDesc hizLayoutDesc;
+        hizLayoutDesc.setVisibility(nvrhi::ShaderType::Compute)
+            .setRegisterSpace(1)
+            .setRegisterSpaceIsDescriptorSet(true)
+            .addItem(nvrhi::BindingLayoutItem::Texture_SRV(0).setSize(HIZ_MAX_LODS));
+
+        m_computeClusterTilingHizBL = m_device->createBindingLayout(hizLayoutDesc);
+        if (!m_computeClusterTilingHizBL)
+        {
+            Logger::err("Failed to create HiZ binding layout for compute_cluster_tiling.hlsl");
+        }
+        RTXMG_LOG("RTX MegaGeo: HiZ binding layout created");
+
+        // Create dummy HiZ binding set for when zbuffer is null
+        nvrhi::BindingSetDesc dummyHizSetDesc;
+        for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
+        {
+            dummyHizSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, m_dummyHiZTextures[i]).setArrayElement(i));
+        }
+        m_dummyHizBindingSet = m_device->createBindingSet(dummyHizSetDesc, m_computeClusterTilingHizBL);
+        if (!m_dummyHizBindingSet)
+        {
+            Logger::err("Failed to create dummy HiZ binding set");
+        }
+        RTXMG_LOG("RTX MegaGeo: Dummy HiZ binding set created");
+    }
+
+    // Main binding set (set 0) - no HiZ textures, they're in set 1
     auto bindingSetDesc = nvrhi::BindingSetDesc()
         .addItem(nvrhi::BindingSetItem::ConstantBuffer(0, m_computeClusterTilingParamsBuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, subdivisionSurface.m_positionsBuffer))
@@ -1142,36 +1173,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(13, subdivisionSurface.m_texcoordDeviceData.surfaceDescriptors))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(14, subdivisionSurface.m_texcoordDeviceData.controlPointIndices))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(15, subdivisionSurface.m_texcoordDeviceData.patchPointsOffsets))
-        .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(16, subdivisionSurface.m_texcoordsBuffer));
-
-    // Add HiZ textures at slot 17 (as an array with 9 elements)
-    if (m_tessellatorConfig.zbuffer)
-    {
-        RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - adding real HiZ textures at slot 17");
-        for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
-        {
-            nvrhi::ITexture* hizTex = m_tessellatorConfig.zbuffer->GetHierarchyTexture(i);
-            if (hizTex)
-            {
-                bindingSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(17, hizTex).setArrayElement(i));
-            }
-            else
-            {
-                bindingSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(17, m_dummyHiZTextures[i]).setArrayElement(i));
-            }
-        }
-    }
-    else
-    {
-        RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - zbuffer is null, binding dummy HiZ textures at slot 17");
-        for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
-        {
-            bindingSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(17, m_dummyHiZTextures[i]).setArrayElement(i));
-        }
-    }
-
-    // Continue with samplers and UAVs
-    bindingSetDesc
+        .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(16, subdivisionSurface.m_texcoordsBuffer))
         .addItem(nvrhi::BindingSetItem::Sampler(0, scene.GetDisplacementSampler()))
         .addItem(nvrhi::BindingSetItem::Sampler(1, m_commonPasses->m_LinearClampSampler)) // hiZ sampler
         // UAV bindings
@@ -1186,16 +1188,33 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(6, subdivisionSurface.m_vertexDeviceData.patchPoints))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(7, subdivisionSurface.m_texcoordDeviceData.patchPoints))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(8, m_debugBuffer));
-    RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - bindingSetDesc built, creating binding set");
+    RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - main bindingSetDesc built");
 
     nvrhi::BindingSetHandle bindingSet = m_device->createBindingSet(bindingSetDesc, m_computeClusterTilingBL);
     if (!bindingSet)
     {
-        Logger::err("Failed to create binding set for compute_cluster_tiling.hlsl");
+        Logger::err("Failed to create main binding set for compute_cluster_tiling.hlsl");
     }
-    RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - binding set created");
+    RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - main binding set created");
 
-    RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling - zbuffer ptr=", (void*)m_tessellatorConfig.zbuffer));
+    // HiZ binding set (set 1) - use real zbuffer if available, otherwise dummy
+    nvrhi::BindingSetHandle hizBindingSet;
+    if (m_tessellatorConfig.zbuffer)
+    {
+        RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating real HiZ binding set");
+        nvrhi::BindingSetDesc hizSetDesc;
+        for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
+        {
+            nvrhi::ITexture* hizTex = m_tessellatorConfig.zbuffer->GetHierarchyTexture(i);
+            hizSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(0, hizTex ? hizTex : m_dummyHiZTextures[i]).setArrayElement(i));
+        }
+        hizBindingSet = m_device->createBindingSet(hizSetDesc, m_computeClusterTilingHizBL);
+    }
+    else
+    {
+        RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - using dummy HiZ binding set");
+        hizBindingSet = m_dummyHizBindingSet;
+    }
 
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating shaderPermutation");
     ComputeClusterTilingPermutation shaderPermutation(subdivisionSurface.m_hasDisplacementMaterial,
@@ -1225,8 +1244,9 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 
                 auto computePipelineDesc = nvrhi::ComputePipelineDesc()
                     .setComputeShader(shader)
-                    .addBindingLayout(m_computeClusterTilingBL)
-                    .addBindingLayout(m_bindlessBL);  // Set 1: Bindless textures
+                    .addBindingLayout(m_computeClusterTilingBL)      // Set 0: Main bindings
+                    .addBindingLayout(m_computeClusterTilingHizBL)   // Set 1: HiZ textures (space 1)
+                    .addBindingLayout(m_bindlessBL);                 // Set 2: Bindless textures
                 RTXMG_LOG("RTX MegaGeo: GetComputeClusterTilingPSO - creating pipeline");
 
                 m_computeClusterTilingPSOs[shaderPermutation.index()] = m_device->createComputePipeline(computePipelineDesc);
@@ -1237,8 +1257,9 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating compute state");
     auto state = nvrhi::ComputeState()
-        .addBindingSet(bindingSet)           // Set 0: Main bindings (includes HiZ at slot 17)
-        .addBindingSet(m_descriptorTable);   // Set 1: Bindless textures
+        .addBindingSet(bindingSet)           // Set 0: Main bindings
+        .addBindingSet(hizBindingSet)        // Set 1: HiZ textures (space 1)
+        .addBindingSet(m_descriptorTable);   // Set 2: Bindless textures
     RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling - enableMonolithicClusterBuild=", m_tessellatorConfig.enableMonolithicClusterBuild));
 
     if (m_tessellatorConfig.enableMonolithicClusterBuild)
@@ -1499,13 +1520,12 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
         return;
     }
 
-    // NOTE: Do NOT call waitForIdle() here - it causes deadlock in RTX Remix's integrated context
-    // because commands haven't been submitted yet. Instead, we rely on DXVK's reference counting
-    // and the nvrhi BufferHandle's automatic lifetime management.
+    // Wait for idle to ensure resources are not in use (matching sample behavior)
+    m_device->waitForIdle();
 
     if (numInstancesChanged)
     {
-        // Release old buffers - DXVK's reference counting keeps them alive until GPU is done
+        // Release old buffers - GPU is idle so this is safe
         if (m_copyClusterOffsetParamsBuffer)
             m_copyClusterOffsetParamsBuffer = nullptr;
         m_clusterOffsetCountsBuffer.Release();
@@ -1667,20 +1687,16 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
 {
     m_tessellatorConfig = config;
 
-    // Process deferred destruction - release buffers that are old enough
-    RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel frame ", m_buildAccelFrameIndex,
-        " - deferred queue size: ", m_deferredDestructionQueue.size()));
-    ProcessDeferredDestruction(m_buildAccelFrameIndex);
-
     const auto& subdMeshes = scene.GetSubdMeshes();
     const auto& instances = scene.GetSubdMeshInstances();
 
     if (subdMeshes.empty() || instances.empty())
         return;
 
+    uint32_t totalSubdPatches = scene.TotalSubdPatchCount();
     RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel - instances=", instances.size(),
-        " subdMeshes=", subdMeshes.size(), " m_numInstances=", m_numInstances));
-    UpdateMemoryAllocations(accels, uint32_t(instances.size()), scene.TotalSubdPatchCount());
+        " subdMeshes=", subdMeshes.size(), " totalSubdPatches=", totalSubdPatches));
+    UpdateMemoryAllocations(accels, uint32_t(instances.size()), totalSubdPatches);
     RTXMG_LOG("RTX MegaGeo: BuildAccel - after UpdateMemoryAllocations");
 
     const uint32_t maxGeometryCountPerMesh = uint32_t(scene.GetSceneGraph()->GetMaxGeometryCountPerMesh());
@@ -1750,6 +1766,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
 
             uint32_t surfaceCount{ subd.SurfaceCount() };
             RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel - instance ", i, " surfaceCount=", surfaceCount));
+
 
             ComputeInstanceClusterTiling(accels, scene, i, surfaceOffset, surfaceCount, tessCounterRange, commandList);
             RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel - instance ", i, " ComputeInstanceClusterTiling complete"));
@@ -1833,11 +1850,29 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     stats::clusterAccelSamplers.buildClasTime.Stop();
     RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildStructuredCLASes complete");
 
-    RTXMG_LOG("RTX MegaGeo: BuildAccel - calling BuildBlasFromClas");
-    // Limit to m_numInstances to match buffer allocations
-    uint32_t blasInstanceCount = std::min(uint32_t(instances.size()), m_numInstances);
-    BuildBlasFromClas(accels, instances.data(), blasInstanceCount, commandList);
-    RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildBlasFromClas complete");
+    // Read tessellation counters synchronously to check if we have any clusters
+    auto currentCounterData = m_tessellationCountersBuffer.Download(commandList, false);
+    TessellationCounters currentTessCounts = currentCounterData[tessCounterIndex];
+
+    // Log counter values for debugging
+    Logger::info(str::format("RTX MegaGeo: BuildAccel - tessellation counters: clusters=", currentTessCounts.clusters,
+        " desiredClusters=", currentTessCounts.desiredClusters,
+        " desiredVertices=", currentTessCounts.desiredVertices,
+        " desiredTriangles=", currentTessCounts.desiredTriangles));
+
+    // Only build BLAS if we have valid clusters - building with 0 clusters can cause GPU crash
+    if (currentTessCounts.clusters > 0)
+    {
+        RTXMG_LOG("RTX MegaGeo: BuildAccel - calling BuildBlasFromClas");
+        // Limit to m_numInstances to match buffer allocations
+        uint32_t blasInstanceCount = std::min(uint32_t(instances.size()), m_numInstances);
+        BuildBlasFromClas(accels, instances.data(), blasInstanceCount, commandList);
+        RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildBlasFromClas complete");
+    }
+    else
+    {
+        Logger::warn("RTX MegaGeo: BuildAccel - skipping BuildBlasFromClas because cluster count is 0");
+    }
 
     // Async read of counters
     RTXMG_LOG("RTX MegaGeo: BuildAccel - downloading counters");

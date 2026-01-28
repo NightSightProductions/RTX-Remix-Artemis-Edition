@@ -1482,11 +1482,8 @@ namespace dxvk {
 
     // Developer Options
     static bool areValidationLayersEnabled() {
-#ifndef _DEBUG
+      // Always respect the config option, even in debug builds
       return enableValidationLayers();
-#else
-      return true;
-#endif
     }
 
     static bool getIsOpacityMicromapSupported() { return m_instance->opacityMicromap.isSupported; }

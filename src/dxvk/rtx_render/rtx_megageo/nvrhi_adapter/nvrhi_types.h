@@ -204,6 +204,7 @@ namespace nvrhi {
     const char* debugName = nullptr;
     uint32_t structStride = 0;
     Format format = Format::UNKNOWN;
+    CpuAccessMode cpuAccess = CpuAccessMode::None;  // CPU access mode for mapping
     bool isConstantBuffer = false;
     bool canHaveUAVs = false;
     bool canHaveTypedViews = false;

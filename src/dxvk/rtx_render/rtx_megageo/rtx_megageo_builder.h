@@ -33,6 +33,7 @@
 #include <condition_variable>
 #include <queue>
 #include <atomic>
+#include <string>
 
 // Include OpenSubdiv version to ensure OPENSUBDIV_VERSION macro is defined
 #include "osd_lite/opensubdiv/version.h"
@@ -427,10 +428,18 @@ namespace dxvk {
     // Subdivision surface management - uses actual SubdivisionSurface class
     struct RTXMGSubdivisionSurfaceEntry {
       std::unique_ptr<SubdivisionSurface> subdivSurface;
+      // Store only value-type data from descriptor (pointers become dangling after creation)
+      std::string debugName;
+      uint32_t numVertices = 0;
+      uint32_t numFaces = 0;
+      uint32_t isolationLevel = 2;
+      float tessellationScale = 1.0f;
       VkAccelerationStructureKHR blas = VK_NULL_HANDLE;
       VkDeviceAddress blasAddress = 0;
       bool isDirty = true;
       bool isReady = false;
+      bool m_hasDisplacementMaterial = false;
+      float displacementScale = 1.0f;
     };
 
     std::unordered_map<uint32_t, RTXMGSubdivisionSurfaceEntry> m_surfaces;

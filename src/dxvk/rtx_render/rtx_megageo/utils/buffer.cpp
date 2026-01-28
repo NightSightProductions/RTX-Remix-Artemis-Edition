@@ -49,11 +49,12 @@ nvrhi::BufferDesc GetGenericDesc(size_t nElements, uint32_t elementSize, const c
 
 nvrhi::BufferDesc GetReadbackDesc(const nvrhi::BufferDesc& desc)
 {
-    // Note: CPU access mode is handled during buffer mapping, not in descriptor
+    // CRITICAL: Must set cpuAccess to Read for the buffer to be mappable
     return nvrhi::BufferDesc{
         .byteSize = desc.byteSize,
         .debugName = "Readback Buffer",
         .format = desc.format,
+        .cpuAccess = nvrhi::CpuAccessMode::Read,
         .initialState = nvrhi::ResourceStates::CopyDest,
         .keepInitialState = true
     };
@@ -62,7 +63,15 @@ nvrhi::BufferDesc GetReadbackDesc(const nvrhi::BufferDesc& desc)
 void DownloadBuffer(nvrhi::IBuffer* src, void* dest, nvrhi::IBuffer* staging, bool async, nvrhi::ICommandList* commandList)
 {
     size_t numBytes = src->getDesc().byteSize;
-    RTXMG_LOG(dxvk::str::format("RTX MegaGeo: DownloadBuffer entry, numBytes=", numBytes));
+    size_t stagingBytes = staging->getDesc().byteSize;
+
+    // Validate buffer sizes to prevent heap corruption
+    if (stagingBytes < numBytes) {
+        dxvk::Logger::err(dxvk::str::format("RTX MegaGeo: DownloadBuffer ERROR - staging buffer too small! staging=", stagingBytes, " src=", numBytes));
+        return;
+    }
+
+    RTXMG_LOG(dxvk::str::format("RTX MegaGeo: DownloadBuffer entry, numBytes=", numBytes, " stagingBytes=", stagingBytes));
 
     RTXMG_LOG("RTX MegaGeo: DownloadBuffer - copyBuffer");
     commandList->copyBuffer(staging, 0, src, 0, numBytes);

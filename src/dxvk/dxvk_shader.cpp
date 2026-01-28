@@ -63,6 +63,7 @@ namespace dxvk {
     const SpirvCodeBuffer&      code)
   : m_vkd(vkd), m_stage() {
     ScopedCpuProfileZone();
+    Logger::info(str::format("DxvkShaderModule ctor: stage=0x", std::hex, shader->stage(), " codeSize=", std::dec, code.size()));
     m_stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
     m_stage.pNext = nullptr;
     m_stage.flags = 0;
@@ -77,8 +78,11 @@ namespace dxvk {
     info.flags    = 0;
     info.codeSize = code.size();
     info.pCode    = code.data();
-    
-    if (m_vkd->vkCreateShaderModule(m_vkd->device(), &info, nullptr, &m_stage.module) != VK_SUCCESS)
+
+    Logger::info(str::format("DxvkShaderModule ctor: Calling vkCreateShaderModule for stage=0x", std::hex, shader->stage()));
+    VkResult result = m_vkd->vkCreateShaderModule(m_vkd->device(), &info, nullptr, &m_stage.module);
+    Logger::info(str::format("DxvkShaderModule ctor: vkCreateShaderModule returned ", result, " for stage=0x", std::hex, shader->stage()));
+    if (result != VK_SUCCESS)
       throw DxvkError("DxvkComputePipeline::DxvkComputePipeline: Failed to create shader module");
   }
   
@@ -176,10 +180,13 @@ namespace dxvk {
     const Rc<vk::DeviceFn>&          vkd,
     const DxvkDescriptorSlotMapping& mapping,
     const DxvkShaderModuleCreateInfo& info) {
+    Logger::info(str::format("DxvkShader::createShaderModule: Decompressing SPIRV for stage=0x", std::hex, m_stage));
     SpirvCodeBuffer spirvCode = m_code.decompress();
     uint32_t* code = spirvCode.data();
-    
+    Logger::info(str::format("DxvkShader::createShaderModule: Decompressed, size=", spirvCode.size(), " bytes"));
+
     // Remap resource binding IDs
+    Logger::info(str::format("DxvkShader::createShaderModule: Remapping ", m_idOffsets.size(), " bindings"));
     for (uint32_t ofs : m_idOffsets) {
       if (code[ofs] < MaxNumResourceSlots)
         code[ofs] = mapping.getBindingId(code[ofs]);
@@ -189,11 +196,13 @@ namespace dxvk {
     // location 1, index 0 to location 0, index 1
     if (info.fsDualSrcBlend && m_o1IdxOffset && m_o1LocOffset)
       std::swap(code[m_o1IdxOffset], code[m_o1LocOffset]);
-    
+
     // Replace undefined input variables with zero
+    Logger::info(str::format("DxvkShader::createShaderModule: Processing undefined inputs"));
     for (uint32_t u : bit::BitMask(info.undefinedInputs))
       eliminateInput(spirvCode, u);
 
+    Logger::info(str::format("DxvkShader::createShaderModule: Calling DxvkShaderModule ctor"));
     return DxvkShaderModule(vkd, this, spirvCode);
   }
   

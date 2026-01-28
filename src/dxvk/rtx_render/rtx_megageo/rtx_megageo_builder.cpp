@@ -290,8 +290,16 @@ namespace dxvk {
 
     // Create placeholder entry
     RTXMGSubdivisionSurfaceEntry surface;
+    // Store only value-type data (raw pointers in desc become dangling after caller returns)
+    surface.debugName = desc.debugName ? desc.debugName : "";
+    surface.numVertices = desc.numVertices;
+    surface.numFaces = desc.numFaces;
+    surface.isolationLevel = desc.isolationLevel;
+    surface.tessellationScale = desc.tessellationScale;
     surface.isDirty = true;
     surface.isReady = false; // Will be set to true when worker completes
+    surface.m_hasDisplacementMaterial = desc.enableDisplacement;
+    surface.displacementScale = desc.displacementScale;
 
     // Store placeholder in map
     m_surfaces[surfaceId] = std::move(surface);
@@ -603,6 +611,7 @@ namespace dxvk {
             m_commandList.Get());
 
           m_commandList->close();
+          m_nvrhiDevice->executeCommandList(m_commandList.Get());
 
           // Add to RTXMGScene - get the actual index for meshID
           uint32_t meshIndex = static_cast<uint32_t>(m_scene->GetSubdMeshes().size());
@@ -922,12 +931,12 @@ namespace dxvk {
     // Per-surface statistics
     if (ImGui::TreeNode("Per-Surface Stats")) {
       for (const auto& [id, surface] : m_surfaces) {
-        std::string label = str::format("Surface ", id, ": ", surface.desc.debugName ? surface.desc.debugName : "unnamed");
+        std::string label = str::format("Surface ", id, ": ", surface.debugName.empty() ? "unnamed" : surface.debugName.c_str());
         if (ImGui::TreeNode(label.c_str())) {
-          ImGui::Text("Vertices: %u", surface.desc.numVertices);
-          ImGui::Text("Faces: %u", surface.desc.numFaces);
-          ImGui::Text("Isolation Level: %u", surface.desc.isolationLevel);
-          ImGui::Text("Tessellation Scale: %.2f", surface.desc.tessellationScale);
+          ImGui::Text("Vertices: %u", surface.numVertices);
+          ImGui::Text("Faces: %u", surface.numFaces);
+          ImGui::Text("Isolation Level: %u", surface.isolationLevel);
+          ImGui::Text("Tessellation Scale: %.2f", surface.tessellationScale);
           ImGui::Text("Status: %s", surface.isReady ? "Ready" : (surface.isDirty ? "Dirty" : "Building"));
           if (surface.m_hasDisplacementMaterial) {
             ImGui::Text("Displacement: Enabled (scale=%.2f)", surface.displacementScale);

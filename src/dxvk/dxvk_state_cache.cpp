@@ -19,6 +19,8 @@
 * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 * DEALINGS IN THE SOFTWARE.
 */
+#include <chrono>
+
 #include "dxvk_device.h"
 #include "dxvk_pipemanager.h"
 #include "dxvk_state_cache.h"
@@ -461,9 +463,11 @@ namespace dxvk {
 
     if (!item.rt.groups.empty()) {
       // Compile Ray Tracing Pipelines
-
+      Logger::info(str::format("RT Compile: Creating pipeline for hash=", std::hex, item.hash()));
       auto pipeline = m_pipeManager->createRaytracingPipeline(item.rt);
+      Logger::info(str::format("RT Compile: Pipeline created, calling compilePipeline for hash=", std::hex, item.hash()));
       pipeline->compilePipeline();
+      Logger::info(str::format("RT Compile: compilePipeline done for hash=", std::hex, item.hash()));
     } else if (item.cp.cs == nullptr) {
       // Compile Graphics Pipelines
 
@@ -1066,7 +1070,32 @@ namespace dxvk {
         m_workerQueue.pop();
       }
 
+      // NV-DXVK start: Add logging to diagnose stuck shaders
+      const char* pipelineType = "unknown";
+      if (!item.rt.groups.empty()) {
+        pipelineType = "raytracing";
+      } else if (item.cp.cs == nullptr) {
+        pipelineType = "graphics";
+      } else {
+        pipelineType = "compute";
+      }
+
+      auto startTime = std::chrono::high_resolution_clock::now();
+      Logger::info(str::format("Shader compilation START: type=", pipelineType,
+                               ", isRemix=", item.isRemixShader ? "true" : "false",
+                               ", hash=", std::hex, item.hash()));
+      // NV-DXVK end
+
       compilePipelines(item);
+
+      // NV-DXVK start: Log completion
+      auto endTime = std::chrono::high_resolution_clock::now();
+      auto durationMs = std::chrono::duration_cast<std::chrono::milliseconds>(endTime - startTime).count();
+      Logger::info(str::format("Shader compilation END: type=", pipelineType,
+                               ", isRemix=", item.isRemixShader ? "true" : "false",
+                               ", hash=", std::hex, item.hash(),
+                               ", duration=", std::dec, durationMs, "ms"));
+      // NV-DXVK end
 
 // NV-DXVK start
       if (item.isRemixShader) {

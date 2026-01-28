@@ -24,6 +24,7 @@
 #include "dxvk_device.h"
 #include "rtx_render/rtx_shader_manager.h"
 
+
 #include <rtx_shaders/gen_tri_list_index_buffer.h>
 #include <rtx_shaders/gpu_skinning.h>
 #include <rtx_shaders/view_model_correction.h>
@@ -46,6 +47,18 @@
 
 namespace dxvk {
   static constexpr uint32_t kMaxInterleavedComponents = 3 + 3 + 2 + 1;
+
+  // Vulkan requires storage buffer offsets to be aligned to minStorageBufferOffsetAlignment (typically 16 bytes)
+  static constexpr VkDeviceSize kStorageBufferAlignment = 16;
+
+  // Helper to calculate aligned offset and misalignment for storage buffer binding
+  static void getAlignedOffsetForStorageBuffer(const RasterBuffer& buffer,
+                                                VkDeviceSize& outAlignedOffset,
+                                                uint32_t& outMisalignment) {
+    VkDeviceSize sliceOffset = buffer.offset();
+    outAlignedOffset = sliceOffset & ~(kStorageBufferAlignment - 1);
+    outMisalignment = static_cast<uint32_t>(sliceOffset - outAlignedOffset);
+  }
 
   // Defined within an unnamed namespace to ensure unique definition across binary
   namespace {
@@ -820,10 +833,23 @@ namespace dxvk {
 
     bool mustUseGPU = input.positionBuffer.isPendingGpuWrite() || input.positionBuffer.mapPtr() == nullptr;
 
+    // Calculate aligned offsets for storage buffer binding (Vulkan requires 16-byte alignment)
+    // The misalignment bytes are added to the shader offset to compensate
+    VkDeviceSize positionAlignedOffset = 0;
+    uint32_t positionMisalign = 0;
+    getAlignedOffsetForStorageBuffer(input.positionBuffer, positionAlignedOffset, positionMisalign);
+
+    VkDeviceSize normalAlignedOffset = 0;
+    uint32_t normalMisalign = 0;
+    VkDeviceSize texcoordAlignedOffset = 0;
+    uint32_t texcoordMisalign = 0;
+    VkDeviceSize color0AlignedOffset = 0;
+    uint32_t color0Misalign = 0;
+
     // Interleave vertex data
     InterleaveGeometryArgs args;
-    assert(input.positionBuffer.offsetFromSlice() % 4 == 0);
-    args.positionOffset = input.positionBuffer.offsetFromSlice() / 4;
+    assert((input.positionBuffer.offsetFromSlice() + positionMisalign) % 4 == 0);
+    args.positionOffset = (input.positionBuffer.offsetFromSlice() + positionMisalign) / 4;
     args.positionStride = input.positionBuffer.stride() / 4;
     args.positionFormat = input.positionBuffer.vertexFormat();
     if (!interleaver::formatConversionFloatSupported(args.positionFormat)) {
@@ -833,8 +859,9 @@ namespace dxvk {
     args.hasNormals = input.normalBuffer.defined();
     if (args.hasNormals) {
       mustUseGPU |= input.normalBuffer.isPendingGpuWrite() || input.normalBuffer.mapPtr() == nullptr;
-      assert(input.normalBuffer.offsetFromSlice() % 4 == 0);
-      args.normalOffset = input.normalBuffer.offsetFromSlice() / 4;
+      getAlignedOffsetForStorageBuffer(input.normalBuffer, normalAlignedOffset, normalMisalign);
+      assert((input.normalBuffer.offsetFromSlice() + normalMisalign) % 4 == 0);
+      args.normalOffset = (input.normalBuffer.offsetFromSlice() + normalMisalign) / 4;
       args.normalStride = input.normalBuffer.stride() / 4;
       args.normalFormat = input.normalBuffer.vertexFormat();
       if (!interleaver::formatConversionFloatSupported(args.normalFormat)) {
@@ -844,8 +871,9 @@ namespace dxvk {
     args.hasTexcoord = input.texcoordBuffer.defined();
     if (args.hasTexcoord) {
       mustUseGPU |= input.texcoordBuffer.isPendingGpuWrite() || input.texcoordBuffer.mapPtr() == nullptr;
-      assert(input.texcoordBuffer.offsetFromSlice() % 4 == 0);
-      args.texcoordOffset = input.texcoordBuffer.offsetFromSlice() / 4;
+      getAlignedOffsetForStorageBuffer(input.texcoordBuffer, texcoordAlignedOffset, texcoordMisalign);
+      assert((input.texcoordBuffer.offsetFromSlice() + texcoordMisalign) % 4 == 0);
+      args.texcoordOffset = (input.texcoordBuffer.offsetFromSlice() + texcoordMisalign) / 4;
       args.texcoordStride = input.texcoordBuffer.stride() / 4;
       args.texcoordFormat = input.texcoordBuffer.vertexFormat();
       if (!interleaver::formatConversionFloatSupported(args.texcoordFormat)) {
@@ -855,8 +883,9 @@ namespace dxvk {
     args.hasColor0 = input.color0Buffer.defined();
     if (args.hasColor0) {
       mustUseGPU |= input.color0Buffer.isPendingGpuWrite() || input.color0Buffer.mapPtr() == nullptr;
-      assert(input.color0Buffer.offsetFromSlice() % 4 == 0);
-      args.color0Offset = input.color0Buffer.offsetFromSlice() / 4;
+      getAlignedOffsetForStorageBuffer(input.color0Buffer, color0AlignedOffset, color0Misalign);
+      assert((input.color0Buffer.offsetFromSlice() + color0Misalign) % 4 == 0);
+      args.color0Offset = (input.color0Buffer.offsetFromSlice() + color0Misalign) / 4;
       args.color0Stride = input.color0Buffer.stride() / 4;
       args.color0Format = input.color0Buffer.vertexFormat();
       if (!interleaver::formatConversionUintSupported(args.color0Format)) {
@@ -875,13 +904,19 @@ namespace dxvk {
     if (useGPU) {
       ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_OUTPUT, DxvkBufferSlice(output.buffer));
 
-      ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_POSITION_INPUT, input.positionBuffer);
+      // Use aligned slices for storage buffer binding (Vulkan minStorageBufferOffsetAlignment requirement)
+      // Create slices with aligned offsets and extended lengths to cover the original data
+      ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_POSITION_INPUT,
+        DxvkBufferSlice(input.positionBuffer.buffer(), positionAlignedOffset, input.positionBuffer.length() + positionMisalign));
       if (args.hasNormals)
-        ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_NORMAL_INPUT, input.normalBuffer);
+        ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_NORMAL_INPUT,
+          DxvkBufferSlice(input.normalBuffer.buffer(), normalAlignedOffset, input.normalBuffer.length() + normalMisalign));
       if (args.hasTexcoord)
-        ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_TEXCOORD_INPUT, input.texcoordBuffer);
+        ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_TEXCOORD_INPUT,
+          DxvkBufferSlice(input.texcoordBuffer.buffer(), texcoordAlignedOffset, input.texcoordBuffer.length() + texcoordMisalign));
       if (args.hasColor0)
-        ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_COLOR0_INPUT, input.color0Buffer);
+        ctx->bindResourceBuffer(INTERLEAVE_GEOMETRY_BINDING_COLOR0_INPUT,
+          DxvkBufferSlice(input.color0Buffer.buffer(), color0AlignedOffset, input.color0Buffer.length() + color0Misalign));
 
       ctx->setPushConstantBank(DxvkPushConstantBank::RTX);
 

@@ -111,9 +111,12 @@ namespace dxvk {
     // Determine memory type based on buffer purpose
     VkMemoryPropertyFlags memoryFlags;
 
-    // Readback buffers need HOST_VISIBLE memory so CPU can map and read them
-    // Detect by checking for CopyDest initial state (set by GetReadbackDesc)
-    if (desc.initialState == nvrhi::ResourceStates::CopyDest) {
+    // Readback/upload buffers need HOST_VISIBLE memory so CPU can map and read/write them
+    // Detect by checking cpuAccess mode or CopyDest initial state
+    if (desc.cpuAccess == nvrhi::CpuAccessMode::Read ||
+        desc.cpuAccess == nvrhi::CpuAccessMode::Write ||
+        desc.cpuAccess == nvrhi::CpuAccessMode::ReadWrite ||
+        desc.initialState == nvrhi::ResourceStates::CopyDest) {
       memoryFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     } else {
       // CRITICAL: For cluster template buffers that need device addresses for GPU ray tracing,
