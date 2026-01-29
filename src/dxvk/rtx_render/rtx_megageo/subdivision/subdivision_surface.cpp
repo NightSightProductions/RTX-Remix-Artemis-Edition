@@ -453,7 +453,6 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         throw;
     }
 
-    dxvk::Logger::info("SubdivSurface: Creating topology quality buffer");
     m_topologyQualityBuffer = CreateAndUploadBuffer<uint16_t>(
         topologyQuality, "topology quality", commandList);
 
@@ -462,24 +461,18 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
     //     nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_topologyQualityBuffer));
 
     // setup for texcoords - always create like the sample does
-    dxvk::Logger::info("SubdivSurface: Creating texcoord surface table");
     Tmr::LinearSurfaceTableFactory tableFactoryFvar;
     constexpr int const fvarChannel = 0;
     m_texcoord_surface_table =
         tableFactoryFvar.Create(*refiner, fvarChannel, m_surface_table.get());
 
-    dxvk::Logger::info("SubdivSurface: Calling InitDeviceData");
     InitDeviceData(commandList);
 
-    dxvk::Logger::info("SubdivSurface: Creating texcoords buffer");
     m_texcoordsBuffer =
         CreateAndUploadBuffer(m_shape->uvs, "base texcoords", commandList);
 
-    dxvk::Logger::info("SubdivSurface: Creating positions buffer");
     m_positionsBuffer = CreateAndUploadBuffer(m_shape->verts, "SubdPosedPositions", commandList);
     m_aabb = m_shape->aabb;
-
-    dxvk::Logger::info("SubdivSurface: Constructor complete");
 
     if (keyFrameShapes.size() > 0)
     {

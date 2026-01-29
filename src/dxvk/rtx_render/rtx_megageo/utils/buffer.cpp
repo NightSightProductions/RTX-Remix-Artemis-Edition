@@ -34,8 +34,12 @@
 nvrhi::BufferDesc GetGenericDesc(size_t nElements, uint32_t elementSize, const char* name, nvrhi::Format format)
 {
     nElements = std::max(1ull, nElements);
+    // Vulkan's vkCmdUpdateBuffer requires size to be a multiple of 4
+    // Round up buffer size to avoid alignment issues during writes
+    size_t byteSize = nElements * elementSize;
+    size_t alignedByteSize = (byteSize + 3) & ~3;  // Round up to multiple of 4
     return nvrhi::BufferDesc{
-        .byteSize = nElements * elementSize,
+        .byteSize = alignedByteSize,
         .debugName = name,
         .structStride = elementSize,
         .format = format,

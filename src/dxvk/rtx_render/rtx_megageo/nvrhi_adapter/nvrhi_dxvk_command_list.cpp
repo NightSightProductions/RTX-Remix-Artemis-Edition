@@ -65,6 +65,23 @@ namespace dxvk {
     NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(buffer);
     Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
 
+    size_t bufferSize = nvrhiBuffer->getDesc().byteSize;
+    const char* bufferName = nvrhiBuffer->getDesc().debugName ? nvrhiBuffer->getDesc().debugName : "unnamed";
+
+    // Reduced logging - only log buffer name and key sizes
+    RTXMG_LOG(str::format("RTX MegaGeo: writeBuffer - buffer='", bufferName,
+      "' size=", size, " bufferSize=", bufferSize));
+
+    // CRITICAL: Check for buffer overrun BEFORE any write
+    if (offset + size > bufferSize) {
+      Logger::err(str::format("RTX MegaGeo: BUFFER OVERRUN DETECTED! buffer='", bufferName,
+        "' trying to write ", size, " bytes at offset ", offset,
+        " but buffer is only ", bufferSize, " bytes!"));
+      // Don't write past buffer end - this causes heap corruption
+      size = (offset < bufferSize) ? (bufferSize - offset) : 0;
+      if (size == 0) return;
+    }
+
     // Cache data for small constant buffers (used for push constants)
     // Only cache if offset is 0 and size is <= 128 bytes
     if (offset == 0 && size <= 128) {
@@ -72,43 +89,60 @@ namespace dxvk {
     }
 
     // Vulkan requires vkCmdUpdateBuffer size to be a multiple of 4
-    // Round UP to multiple of 4, but only write within buffer bounds
-    size_t bufferSize = nvrhiBuffer->getDesc().byteSize;
-    size_t maxWriteSize = (offset < bufferSize) ? (bufferSize - offset) : 0;
+    // If size is not aligned, we need to pad with zeros
+    size_t alignedSize = (size + 3) & ~3;
+    size_t copySize = size;  // How many bytes to actually copy from source
 
-    // Determine how much we can actually write
-    size_t writeSize = std::min(size, maxWriteSize);
-    // Align down to multiple of 4 (Vulkan requirement)
-    writeSize = writeSize & ~3;
-
-    if (writeSize == 0) {
-      // Nothing to write or buffer too small
-      if (size > 0) {
-        Logger::warn(str::format("RTX MegaGeo: writeBuffer - cannot write ", size, " bytes at offset ", offset,
-          " to buffer of size ", bufferSize));
+    // But we can't write past buffer end, so clamp
+    if (offset + alignedSize > bufferSize) {
+      // Round down instead if rounding up would overflow
+      alignedSize = size & ~3;
+      copySize = alignedSize;  // CRITICAL: Only copy what fits in the aligned buffer!
+      if (alignedSize == 0 && size > 0) {
+        // Size is 1-3 bytes, can't align - skip this write
+        Logger::warn(str::format("RTX MegaGeo: writeBuffer - size ", size, " too small to align to 4 bytes"));
+        return;
       }
-      return;
     }
 
     // Vulkan limits vkCmdUpdateBuffer to 65536 bytes - split large updates into chunks
     constexpr size_t maxChunkSize = 65536;
 
-    if (writeSize <= maxChunkSize) {
+    RTXMG_LOG(str::format("RTX MegaGeo: writeBuffer - alignedSize=", alignedSize, " copySize=", copySize));
+
+    if (alignedSize <= maxChunkSize) {
       // Small update - send as single chunk
-      m_context->updateBuffer(dxvkBuffer, offset, writeSize, data);
+      if (alignedSize != size) {
+        // Need to pad - create temporary buffer
+        std::vector<uint8_t> alignedData(alignedSize, 0);
+        std::memcpy(alignedData.data(), data, copySize);  // Use copySize, not size!
+        m_context->updateBuffer(dxvkBuffer, offset, alignedSize, alignedData.data());
+      } else {
+        m_context->updateBuffer(dxvkBuffer, offset, size, data);
+      }
     } else {
       // Large update - split into chunks
       const uint8_t* dataPtr = static_cast<const uint8_t*>(data);
-      size_t remaining = writeSize;
+      size_t remaining = size;
       uint64_t currentOffset = offset;
 
       while (remaining > 0) {
         size_t chunkSize = std::min(remaining, maxChunkSize);
-        // Align chunk size down to 4 bytes for Vulkan
-        chunkSize = chunkSize & ~3;
-        if (chunkSize == 0) break;
+        size_t alignedChunkSize = (chunkSize + 3) & ~3;
 
-        m_context->updateBuffer(dxvkBuffer, currentOffset, chunkSize, dataPtr);
+        // Don't exceed buffer
+        if (currentOffset + alignedChunkSize > bufferSize) {
+          alignedChunkSize = chunkSize & ~3;
+        }
+        if (alignedChunkSize == 0) break;
+
+        if (alignedChunkSize != chunkSize) {
+          std::vector<uint8_t> alignedChunk(alignedChunkSize, 0);
+          std::memcpy(alignedChunk.data(), dataPtr, std::min(chunkSize, alignedChunkSize));
+          m_context->updateBuffer(dxvkBuffer, currentOffset, alignedChunkSize, alignedChunk.data());
+        } else {
+          m_context->updateBuffer(dxvkBuffer, currentOffset, chunkSize, dataPtr);
+        }
 
         dataPtr += chunkSize;
         currentOffset += chunkSize;
@@ -138,6 +172,21 @@ namespace dxvk {
   {
     NvrhiDxvkBuffer* nvrhiDst = static_cast<NvrhiDxvkBuffer*>(dst);
     NvrhiDxvkBuffer* nvrhiSrc = static_cast<NvrhiDxvkBuffer*>(src);
+
+    size_t dstSize = nvrhiDst->getDesc().byteSize;
+    size_t srcSize = nvrhiSrc->getDesc().byteSize;
+    const char* dstName = nvrhiDst->getDesc().debugName ? nvrhiDst->getDesc().debugName : "unnamed";
+    const char* srcName = nvrhiSrc->getDesc().debugName ? nvrhiSrc->getDesc().debugName : "unnamed";
+
+    // Check for buffer overruns
+    if (dstOffset + size > dstSize) {
+      Logger::err(str::format("RTX MegaGeo: copyBuffer DST OVERRUN! dst='", dstName,
+        "' dstOffset=", dstOffset, " size=", size, " dstSize=", dstSize));
+    }
+    if (srcOffset + size > srcSize) {
+      Logger::err(str::format("RTX MegaGeo: copyBuffer SRC OVERRUN! src='", srcName,
+        "' srcOffset=", srcOffset, " size=", size, " srcSize=", srcSize));
+    }
 
     Rc<DxvkBuffer> dxvkDst = nvrhiDst->getDxvkBuffer();
     Rc<DxvkBuffer> dxvkSrc = nvrhiSrc->getDxvkBuffer();

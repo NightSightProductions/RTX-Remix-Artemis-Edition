@@ -32,6 +32,11 @@
 #define RTXMG_LOG(msg) ((void)0)
 #endif
 
+// Helper to align buffer sizes to 4 bytes (required for Vulkan vkCmdUpdateBuffer)
+inline size_t alignBufferSize(size_t size) {
+    return (size + 3) & ~3;
+}
+
 // STL includes
 #include <algorithm>
 
@@ -378,8 +383,10 @@ static TemplateGrids GenerateTemplateGrids()
 
 nvrhi::BufferHandle ClusterAccelBuilder::GenerateStructuredClusterTemplateArgs(const TemplateGrids &grids, nvrhi::ICommandList* commandList)
 {
+    // Align buffer size to 4 bytes for Vulkan vkCmdUpdateBuffer compatibility
+    size_t indexDataSize = grids.indices.size() * sizeof(grids.indices[0]);
     nvrhi::BufferDesc indexBufferDesc = {
-        .byteSize = grids.indices.size() * sizeof(grids.indices[0]),
+        .byteSize = alignBufferSize(indexDataSize),
         .debugName = "ClusterTemplateIndices",
         .structStride = sizeof(grids.indices[0]),
         .isAccelStructBuildInput = true,
@@ -390,8 +397,8 @@ nvrhi::BufferHandle ClusterAccelBuilder::GenerateStructuredClusterTemplateArgs(c
     nvrhi::BufferHandle indexBuffer = CreateBuffer(indexBufferDesc, m_device.Get());
     if (grids.indices.size() > 0)
     {
-        // writeBuffer uploads data to indexBuffer
-        commandList->writeBuffer(indexBuffer, grids.indices.data(), grids.indices.size() * sizeof(grids.indices[0]));
+        // writeBuffer uploads data to indexBuffer (use original data size, buffer is aligned)
+        commandList->writeBuffer(indexBuffer, grids.indices.data(), indexDataSize);
     }
     // CRITICAL: Store in m_templateBuffers to keep alive - GPU addresses in cluster args reference this buffer
     m_templateBuffers.indexBuffer = indexBuffer;
