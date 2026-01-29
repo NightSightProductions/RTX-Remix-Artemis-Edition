@@ -588,7 +588,10 @@ namespace dxvk {
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-      m_context->dispatchIndirect(offset);
+      // Note: Pass 0 here because the buffer slice (argBufferSlice) was already created
+      // with the offset at line 527. DXVK's dispatchIndirect adds this offset to the bound
+      // buffer, so passing the offset again would double it.
+      m_context->dispatchIndirect(0);
     }
   }
 
@@ -798,10 +801,13 @@ namespace dxvk {
     VkImageLayout newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
 
     // Source state
-    if (static_cast<uint32_t>(stateBefore & nvrhi::ResourceStates::UnorderedAccess) != 0) {
+    if (stateBefore == nvrhi::ResourceStates::Common) {
+      oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;  // Common/Unknown means UNDEFINED in Vulkan
+    }
+    else if (static_cast<uint32_t>(stateBefore & nvrhi::ResourceStates::UnorderedAccess) != 0) {
       oldLayout = VK_IMAGE_LAYOUT_GENERAL;
     }
-    if (static_cast<uint32_t>(stateBefore & nvrhi::ResourceStates::ShaderResource) != 0) {
+    else if (static_cast<uint32_t>(stateBefore & nvrhi::ResourceStates::ShaderResource) != 0) {
       oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 

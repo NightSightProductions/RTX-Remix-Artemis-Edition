@@ -48,7 +48,9 @@ inline size_t alignBufferSize(size_t size) {
 #include "../nvrhi_adapter/nvrhi_dxvk_device.h"
 #include "../nvrhi_adapter/nvrhi_dxvk_command_list.h"
 #include "../nvrhi_adapter/nvrhi_dxvk_buffer.h"
+#include "../nvrhi_adapter/nvrhi_dxvk_texture.h"
 #include "../../rtx_shader_manager.h"
+#include "../../rtx_context.h"
 
 // RTX MG shader includes
 #include <rtx_shaders/copy_cluster_offset.h>
@@ -149,7 +151,7 @@ ClusterAccelBuilder::ClusterAccelBuilder(
     dummyHiZDesc.width = 1;
     dummyHiZDesc.height = 1;
     dummyHiZDesc.format = nvrhi::Format::R32_FLOAT;
-    dummyHiZDesc.isUAV = true;  // Enable UAV so we can clear to initialize layout
+    dummyHiZDesc.isUAV = false;  // No UAV needed - just valid bindings for shader
     dummyHiZDesc.initialState = nvrhi::ResourceStates::ShaderResource;
     dummyHiZDesc.keepInitialState = true;
 
@@ -909,15 +911,25 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             .addBindingSet(m_descriptorTable)  // Bindless descriptor table for displacement textures
             .setIndirectParams(m_fillClustersDispatchIndirectBuffer);
 
+        // Pre-compute buffer bounds for all dispatch checks
+        uint32_t fillBufferSize = static_cast<uint32_t>(m_fillClustersDispatchIndirectBuffer.GetBytes());
+        uint32_t fillElementSize = static_cast<uint32_t>(m_fillClustersDispatchIndirectBuffer.GetElementBytes());
+
         if (m_tessellatorConfig.enableMonolithicClusterBuild)
         {
             RTXMG_LOG("RTX MegaGeo: FillInstanceClusters - monolithic mode");
             FillClustersPermutation shaderPermutation = { subd.m_hasDisplacementMaterial, m_tessellatorConfig.enableVertexNormals, ShaderPermutationSurfaceType::All };
             state.setPipeline(GetFillClustersPSO(shaderPermutation));
             commandList->setComputeState(state);
-            uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType::Limit) * uint32_t(m_fillClustersDispatchIndirectBuffer.GetElementBytes());
-            RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - dispatchIndirect offset=", dispatchIndirectArgsOffset));
-            commandList->dispatchIndirect(dispatchIndirectArgsOffset);
+            uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType::Limit) * fillElementSize;
+            RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - monolithic dispatchIndirect offset=", dispatchIndirectArgsOffset,
+                " bufferSize=", fillBufferSize, " instanceIndex=", instanceIndex));
+            if (dispatchIndirectArgsOffset + fillElementSize > fillBufferSize) {
+                Logger::err(str::format("RTX MegaGeo: BUFFER OVERFLOW DETECTED! monolithic offset=", dispatchIndirectArgsOffset,
+                    " + elementSize=", fillElementSize, " > bufferSize=", fillBufferSize, " instanceIndex=", instanceIndex));
+            } else {
+                commandList->dispatchIndirect(dispatchIndirectArgsOffset);
+            }
         }
         else
         {
@@ -928,9 +940,14 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
                 RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - GetFillClustersPSO permutation ", i));
                 state.setPipeline(GetFillClustersPSO(shaderPermutation));
                 commandList->setComputeState(state);
-                uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType(i)) * uint32_t(m_fillClustersDispatchIndirectBuffer.GetElementBytes());
-                RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - dispatchIndirect i=", i, " offset=", dispatchIndirectArgsOffset));
-                commandList->dispatchIndirect(dispatchIndirectArgsOffset);
+                uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType(i)) * fillElementSize;
+                RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - permutation dispatchIndirect i=", i, " offset=", dispatchIndirectArgsOffset));
+                if (dispatchIndirectArgsOffset + fillElementSize > fillBufferSize) {
+                    Logger::err(str::format("RTX MegaGeo: BUFFER OVERFLOW DETECTED! permutation i=", i, " offset=", dispatchIndirectArgsOffset,
+                        " + elementSize=", fillElementSize, " > bufferSize=", fillBufferSize, " instanceIndex=", instanceIndex));
+                } else {
+                    commandList->dispatchIndirect(dispatchIndirectArgsOffset);
+                }
             }
         }
 
@@ -938,7 +955,17 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
         state.setPipeline(m_fillClustersTexcoordsPSO);
         commandList->setComputeState(state);
         uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType::AllTypes) * uint32_t(m_fillClustersDispatchIndirectBuffer.GetElementBytes());
-        RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - texcoords dispatchIndirect offset=", dispatchIndirectArgsOffset));
+        uint32_t bufferSize = static_cast<uint32_t>(m_fillClustersDispatchIndirectBuffer.GetBytes());
+        uint32_t elementSize = static_cast<uint32_t>(m_fillClustersDispatchIndirectBuffer.GetElementBytes());
+        RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - texcoords dispatchIndirect offset=", dispatchIndirectArgsOffset,
+            " bufferSize=", bufferSize, " instanceIndex=", instanceIndex, " m_numInstances=", m_numInstances));
+        // Bounds check: ensure offset + element size <= buffer size
+        if (dispatchIndirectArgsOffset + elementSize > bufferSize) {
+            Logger::err(str::format("RTX MegaGeo: BUFFER OVERFLOW DETECTED! texcoords dispatchIndirect offset=", dispatchIndirectArgsOffset,
+                " + elementSize=", elementSize, " = ", dispatchIndirectArgsOffset + elementSize,
+                " > bufferSize=", bufferSize, " instanceIndex=", instanceIndex, " m_numInstances=", m_numInstances));
+            continue; // Skip this dispatch to avoid crash
+        }
         commandList->dispatchIndirect(dispatchIndirectArgsOffset);
         RTXMG_LOG("RTX MegaGeo: FillInstanceClusters - instance complete");
 
@@ -1357,6 +1384,11 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             CopyClusterOffset(instanceIndex, dispatchType, tessCounterRange, commandList);
             RTXMG_LOG("RTX MegaGeo: Loop - CopyClusterOffset complete");
         }
+        // Also copy to AllTypes slot so FillBlasFromClasArgs can read from it
+        // (FillBlasFromClasArgs reads from ClusterDispatchType::All for all instances)
+        RTXMG_LOG("RTX MegaGeo: Loop - CopyClusterOffset for AllTypes");
+        CopyClusterOffset(instanceIndex, ClusterDispatchType::AllTypes, tessCounterRange, commandList);
+        RTXMG_LOG("RTX MegaGeo: Loop - CopyClusterOffset for AllTypes complete");
         RTXMG_LOG("RTX MegaGeo: Loop mode - loop complete");
     }
 
@@ -1381,6 +1413,14 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 void ClusterAccelBuilder::CopyClusterOffset(uint32_t instanceIndex,
     ClusterDispatchType dispatchType, const nvrhi::BufferRange& tessCounterRange, nvrhi::ICommandList* commandList)
 {
+    // Bounds check: CopyClusterOffset shader writes to m_fillClustersDispatchIndirectBuffer at indices
+    // based on instanceIndex. Prevent out-of-bounds writes by checking instanceIndex.
+    if (instanceIndex >= m_numInstances) {
+        Logger::err(str::format("RTX MegaGeo: CopyClusterOffset - instanceIndex ", instanceIndex,
+            " >= m_numInstances ", m_numInstances, ", skipping to prevent buffer overflow"));
+        return;
+    }
+
     nvrhi::utils::ScopedMarker marker(commandList, "ClusterAccelBuilder::CopyClusterOffset");
     CopyClusterOffsetParams params;
     params.instanceIndex = instanceIndex;
@@ -1738,25 +1778,44 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     commandList->clearBufferUInt(m_blasFromClasIndirectArgsBuffer.Get(), 0);
     RTXMG_LOG("RTX MegaGeo: BuildAccel - after clearBufferUInt");
 
-    // Initialize dummy HiZ textures on first use - this transitions them from UNDEFINED layout
-    if (!m_dummyHiZTexturesInitialized)
+    // Transition dummy HiZ textures to ShaderResource on first use only
+    // Use RtxContext's initImage to initialize the textures from UNDEFINED to their stable layout
+    if (!m_tessellatorConfig.zbuffer && !m_dummyHiZTexturesInitialized)
     {
-        RTXMG_LOG("RTX MegaGeo: BuildAccel - initializing dummy HiZ textures");
-        nvrhi::Color clearColor = { 1.0f, 1.0f, 1.0f, 1.0f }; // Far depth (1.0)
+        RTXMG_LOG("RTX MegaGeo: Initializing dummy HiZ textures via initImage");
+
+        VkImageSubresourceRange subresourceRange = {
+            VK_IMAGE_ASPECT_COLOR_BIT,
+            0, VK_REMAINING_MIP_LEVELS,
+            0, VK_REMAINING_ARRAY_LAYERS
+        };
+
         for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
         {
             if (m_dummyHiZTextures[i])
             {
-                commandList->clearTextureFloat(m_dummyHiZTextures[i].Get(), nvrhi::AllSubresources, clearColor);
-                // Transition back to ShaderResource state after clearing
-                // The clear leaves the texture in GENERAL/UAV layout, but we need ShaderResource
-                commandList->textureBarrier(m_dummyHiZTextures[i].Get(),
-                    nvrhi::ResourceStates::UnorderedAccess,
-                    nvrhi::ResourceStates::ShaderResource);
+                // Get the underlying DxvkImage from our NVRHI texture
+                NvrhiDxvkTexture* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(m_dummyHiZTextures[i].Get());
+                const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+
+                // Use initImage to transition from UNDEFINED to the image's stable layout
+                // This is DXVK's standard way to initialize newly created images
+                m_rtxContext->initImage(
+                    dxvkImage,
+                    subresourceRange,
+                    VK_IMAGE_LAYOUT_UNDEFINED);
+
+                RTXMG_LOG(str::format("RTX MegaGeo: Initialized DummyHiZ_Level_", i, " via initImage"));
             }
         }
+
+        // Force the command list to be flushed so the init barriers are executed
+        // This ensures the images are in the correct layout before any subsequent use
+        m_rtxContext->flushCommandList();
+        RTXMG_LOG("RTX MegaGeo: Flushed command list after dummy HiZ initialization");
+
         m_dummyHiZTexturesInitialized = true;
-        RTXMG_LOG("RTX MegaGeo: BuildAccel - dummy HiZ textures initialized");
+        RTXMG_LOG("RTX MegaGeo: Dummy HiZ texture initialization complete");
     }
 
     {

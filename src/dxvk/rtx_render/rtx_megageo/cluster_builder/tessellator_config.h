@@ -84,7 +84,7 @@ struct TessellatorConfig
     bool  enableHiZVisibility = true;
     bool  enableBackfaceVisibility = true;
     bool  enableLogging = false; // enable debug logging for tessellator build
-    bool  enableMonolithicClusterBuild = false;
+    bool  enableMonolithicClusterBuild = true;  // Must use monolithic - only one shader permutation is pre-compiled
     bool  enableVertexNormals = false; // enable vertex normal computation
 
     uint2            viewportSize = { 0u, 0u };

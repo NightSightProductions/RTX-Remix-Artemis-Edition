@@ -188,6 +188,7 @@ namespace dxvk {
       dxvkInfo.layout = VK_IMAGE_LAYOUT_GENERAL;
     } else {
       // Non-UAV images use SHADER_READ_ONLY for sampled access
+      // This is the "stable" layout DXVK will use for layout tracking
       dxvkInfo.layout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
     }
 
