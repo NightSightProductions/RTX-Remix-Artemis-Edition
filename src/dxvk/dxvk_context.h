@@ -1258,6 +1258,11 @@ namespace dxvk {
       return m_rc[slot];
     }
 
+    // Get the current compute descriptor set (for MegaGeo HiZ array binding)
+    VkDescriptorSet getComputeDescriptorSet() const {
+      return m_cpSet;
+    }
+
   protected:  
     
     Rc<DxvkDevice>          m_device;

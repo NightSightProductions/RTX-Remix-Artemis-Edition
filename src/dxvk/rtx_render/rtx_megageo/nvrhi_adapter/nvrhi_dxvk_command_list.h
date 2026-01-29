@@ -22,9 +22,13 @@
 #pragma once
 
 #include <memory>
+#include <vector>
 #include "nvrhi_types.h"
 #include "nvrhi_dxvk_device.h"
 #include "nvrhi_scratch_manager.h"
+
+// HiZ constants
+#include "../hiz/hiz_buffer_constants.h"
 
 namespace dxvk {
 
@@ -41,6 +45,15 @@ namespace dxvk {
       , m_context(context)
       , m_scratchManager(std::make_unique<ScratchManager>(device->getDxvkDevice().ptr(), kDefaultScratchChunkSize))
     {
+    }
+
+    ~NvrhiDxvkCommandList() {
+      // Clean up HiZ pipeline layout if created
+      if (m_hiZPipelineLayout != VK_NULL_HANDLE) {
+        VkDevice vkDevice = m_device->getVkDevice();
+        vkDestroyPipelineLayout(vkDevice, m_hiZPipelineLayout, nullptr);
+        m_hiZPipelineLayout = VK_NULL_HANDLE;
+      }
     }
 
     // ICommandList interface - Lifecycle
@@ -86,6 +99,11 @@ namespace dxvk {
       nvrhi::ResourceStates stateBefore,
       nvrhi::ResourceStates stateAfter);
 
+    void textureBarrier(
+      nvrhi::ITexture* texture,
+      nvrhi::ResourceStates stateBefore,
+      nvrhi::ResourceStates stateAfter);
+
     void globalBarrier(
       nvrhi::ResourceStates stateBefore,
       nvrhi::ResourceStates stateAfter);
@@ -111,7 +129,15 @@ namespace dxvk {
     nvrhi::ComputeState m_computeState;
     std::unique_ptr<ScratchManager> m_scratchManager;
 
+    // HiZ descriptor set binding for compute_cluster_tiling shader
+    // This handles VK_BINDING(0, 1) Texture2D<float> t_HiZBuffer[HIZ_MAX_LODS]: register(t0, space1)
+    bool m_hasHiZBinding = false;
+    VkDescriptorSetLayout m_hiZDescriptorSetLayout = VK_NULL_HANDLE;
+    VkPipelineLayout m_hiZPipelineLayout = VK_NULL_HANDLE;
+    Rc<DxvkImageView> m_hiZImageViews[HIZ_MAX_LODS] = {};
+
     void bindComputeResources(const nvrhi::ComputeState& state);
+    void bindHiZDescriptorSet(VkPipelineLayout pipelineLayout);  // Binds HiZ descriptor set before dispatch
     void translateClusterOperation(
       const nvrhi::rt::cluster::OperationDesc& nvrhiDesc,
       VkClusterAccelerationStructureCommandsInfoNV& vkCmds);

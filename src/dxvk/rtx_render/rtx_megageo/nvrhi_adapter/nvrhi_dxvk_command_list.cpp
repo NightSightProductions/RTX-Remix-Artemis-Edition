@@ -20,7 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 // Enable verbose MegaGeo logging for debugging
-#define RTXMG_VERBOSE_LOGGING 0
+#define RTXMG_VERBOSE_LOGGING 1
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) dxvk::Logger::info(msg)
 #else
@@ -33,7 +33,9 @@
 #include "nvrhi_dxvk_pipeline.h"
 #include "nvrhi_dxvk_sampler.h"
 #include "../../../util/log/log.h"
+#include "../../rtx_context.h"  // For RtxContext::commitComputeStateForMegaGeo
 #include <algorithm>
+#include <array>
 
 namespace dxvk {
 
@@ -53,6 +55,14 @@ namespace dxvk {
     // DXVK ensures GPU is done with previous frame's work
     RTXMG_LOG("RTX MegaGeo: clearState - calling resetWritePointers");
     m_scratchManager->resetWritePointers();
+
+    // Clear HiZ binding state
+    m_hasHiZBinding = false;
+    for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
+      m_hiZImageViews[i] = nullptr;
+    }
+    // Note: Keep m_hiZDescriptorSetLayout and m_hiZPipelineLayout cached for reuse
+
     RTXMG_LOG("RTX MegaGeo: clearState - done");
   }
 
@@ -62,8 +72,24 @@ namespace dxvk {
     size_t size,
     uint64_t offset)
   {
+    if (!buffer) {
+      Logger::err("RTX MegaGeo: writeBuffer - null buffer");
+      return;
+    }
+
+    // Verify this is an NvrhiDxvkBuffer before casting
+    nvrhi::Object nativeObj = buffer->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+    if (nativeObj.pointer == nullptr) {
+      Logger::err("RTX MegaGeo: writeBuffer - buffer is not a VK_Buffer (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(buffer);
     Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
+    if (dxvkBuffer == nullptr) {
+      Logger::err("RTX MegaGeo: writeBuffer - null DxvkBuffer");
+      return;
+    }
 
     size_t bufferSize = nvrhiBuffer->getDesc().byteSize;
     const char* bufferName = nvrhiBuffer->getDesc().debugName ? nvrhiBuffer->getDesc().debugName : "unnamed";
@@ -155,8 +181,23 @@ namespace dxvk {
     nvrhi::IBuffer* buffer,
     uint32_t value)
   {
+    if (!buffer) {
+      Logger::err("RTX MegaGeo: clearBufferUInt - null buffer");
+      return;
+    }
+
+    nvrhi::Object nativeObj = buffer->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+    if (nativeObj.pointer == nullptr) {
+      Logger::err("RTX MegaGeo: clearBufferUInt - buffer is not a VK_Buffer (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(buffer);
     Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
+    if (dxvkBuffer == nullptr) {
+      Logger::err("RTX MegaGeo: clearBufferUInt - null DxvkBuffer");
+      return;
+    }
 
     // Clear buffer with uint32 value
     const nvrhi::BufferDesc& desc = nvrhiBuffer->getDesc();
@@ -170,8 +211,25 @@ namespace dxvk {
     uint64_t srcOffset,
     uint64_t size)
   {
+    if (!dst || !src) {
+      Logger::err("RTX MegaGeo: copyBuffer - null buffer");
+      return;
+    }
+
+    nvrhi::Object dstNative = dst->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+    nvrhi::Object srcNative = src->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+    if (dstNative.pointer == nullptr || srcNative.pointer == nullptr) {
+      Logger::err("RTX MegaGeo: copyBuffer - buffer is not a VK_Buffer (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkBuffer* nvrhiDst = static_cast<NvrhiDxvkBuffer*>(dst);
     NvrhiDxvkBuffer* nvrhiSrc = static_cast<NvrhiDxvkBuffer*>(src);
+
+    if (nvrhiDst->getDxvkBuffer() == nullptr || nvrhiSrc->getDxvkBuffer() == nullptr) {
+      Logger::err("RTX MegaGeo: copyBuffer - null DxvkBuffer");
+      return;
+    }
 
     size_t dstSize = nvrhiDst->getDesc().byteSize;
     size_t srcSize = nvrhiSrc->getDesc().byteSize;
@@ -195,8 +253,28 @@ namespace dxvk {
   }
 
   void NvrhiDxvkCommandList::copyTexture(nvrhi::ITexture* dst, nvrhi::ITexture* src) {
+    if (!dst || !src) {
+      Logger::warn("RTX MegaGeo: copyTexture - null texture");
+      return;
+    }
+
+    // CRITICAL: Verify textures are NvrhiDxvkTextures before casting
+    nvrhi::Object dstNative = dst->getNativeObject(nvrhi::ObjectType::VK_Image);
+    nvrhi::Object srcNative = src->getNativeObject(nvrhi::ObjectType::VK_Image);
+    if (dstNative.pointer == nullptr || srcNative.pointer == nullptr) {
+      Logger::warn("RTX MegaGeo: copyTexture - texture is not a VK_Image (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkTexture* dstTex = static_cast<NvrhiDxvkTexture*>(dst);
     NvrhiDxvkTexture* srcTex = static_cast<NvrhiDxvkTexture*>(src);
+
+    const Rc<DxvkImage>& dstImage = dstTex->getDxvkImage();
+    const Rc<DxvkImage>& srcImage = srcTex->getDxvkImage();
+    if (dstImage == nullptr || srcImage == nullptr) {
+      Logger::warn("RTX MegaGeo: copyTexture - null DxvkImage, skipping");
+      return;
+    }
 
     const auto& dstDesc = dstTex->getDesc();
     const auto& srcDesc = srcTex->getDesc();
@@ -221,13 +299,27 @@ namespace dxvk {
     const nvrhi::TextureSubresourceSet& subresources,
     const nvrhi::Color& clearColor)
   {
+    if (!texture) {
+      RTXMG_LOG("RTX MegaGeo: clearTextureFloat - null texture");
+      return;
+    }
+
+    // CRITICAL: Verify this is actually an NvrhiDxvkTexture before casting
+    // Textures from external sources (like zbuffer->GetHierarchyTexture) may be
+    // different types, and static_cast would reinterpret memory incorrectly
+    nvrhi::Object nativeObj = texture->getNativeObject(nvrhi::ObjectType::VK_Image);
+    if (nativeObj.pointer == nullptr) {
+      Logger::warn("RTX MegaGeo: clearTextureFloat - texture is not a VK_Image (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkTexture* tex = static_cast<NvrhiDxvkTexture*>(texture);
 
-    VkClearColorValue vkClearColor;
-    vkClearColor.float32[0] = clearColor.r;
-    vkClearColor.float32[1] = clearColor.g;
-    vkClearColor.float32[2] = clearColor.b;
-    vkClearColor.float32[3] = clearColor.a;
+    const Rc<DxvkImage>& dxvkImage = tex->getDxvkImage();
+    if (dxvkImage == nullptr) {
+      RTXMG_LOG("RTX MegaGeo: clearTextureFloat - null DxvkImage");
+      return;
+    }
 
     VkImageSubresourceRange range;
     range.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
@@ -238,8 +330,22 @@ namespace dxvk {
     range.layerCount = (subresources.numArraySlices == nvrhi::TextureSubresourceSet::AllArraySlices) ?
                        VK_REMAINING_ARRAY_LAYERS : subresources.numArraySlices;
 
+    // First transition image to GENERAL layout (from UNDEFINED if needed)
+    // This is required before vkCmdClearColorImage
+    m_context->transformImage(
+      dxvkImage,
+      range,
+      VK_IMAGE_LAYOUT_UNDEFINED,  // oldLayout - assume undefined on first clear
+      VK_IMAGE_LAYOUT_GENERAL);   // newLayout - required for clear
+
+    VkClearColorValue vkClearColor;
+    vkClearColor.float32[0] = clearColor.r;
+    vkClearColor.float32[1] = clearColor.g;
+    vkClearColor.float32[2] = clearColor.b;
+    vkClearColor.float32[3] = clearColor.a;
+
     m_context->clearColorImage(
-      tex->getDxvkImage(),
+      dxvkImage,
       vkClearColor,
       range);
   }
@@ -249,25 +355,241 @@ namespace dxvk {
     bindComputeResources(state);
   }
 
-  void NvrhiDxvkCommandList::dispatch(uint32_t x, uint32_t y, uint32_t z) {
-    // Ensure all prior writes are visible to this shader read
-    m_context->emitMemoryBarrier(0,
-      VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+  void NvrhiDxvkCommandList::bindHiZDescriptorSet(VkPipelineLayout pipelineLayout) {
+    if (!m_hasHiZBinding || m_hiZDescriptorSetLayout == VK_NULL_HANDLE) {
+      return;
+    }
 
-    m_context->dispatch(x, y, z);
+    if (pipelineLayout == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: bindHiZDescriptorSet - null pipeline layout");
+      return;
+    }
+
+    VkDevice vkDevice = m_device->getVkDevice();
+    if (vkDevice == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: bindHiZDescriptorSet - null VkDevice");
+      return;
+    }
+
+    // Allocate descriptor set from DxvkContext's pool
+    VkDescriptorSet hiZDescriptorSet = m_context->allocateDescriptorSet(m_hiZDescriptorSetLayout, "HiZ");
+    if (hiZDescriptorSet == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: Failed to allocate HiZ descriptor set");
+      return;
+    }
+
+    // Write image descriptors for HiZ textures
+    std::array<VkDescriptorImageInfo, HIZ_MAX_LODS> imageInfos;
+    std::array<VkWriteDescriptorSet, HIZ_MAX_LODS> writes;
+
+    for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
+      imageInfos[i] = {};
+      imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      if (m_hiZImageViews[i] != nullptr) {
+        imageInfos[i].imageView = m_hiZImageViews[i]->handle();
+      } else {
+        // Use first valid view as fallback for missing levels
+        for (uint32_t j = 0; j < HIZ_MAX_LODS; ++j) {
+          if (m_hiZImageViews[j] != nullptr) {
+            imageInfos[i].imageView = m_hiZImageViews[j]->handle();
+            break;
+          }
+        }
+      }
+
+      writes[i] = {};
+      writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      writes[i].dstSet = hiZDescriptorSet;
+      writes[i].dstBinding = 0;  // All textures at binding 0, different array elements
+      writes[i].dstArrayElement = i;
+      writes[i].descriptorCount = 1;
+      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+      writes[i].pImageInfo = &imageInfos[i];
+    }
+
+    m_device->getDxvkDevice()->vkd()->vkUpdateDescriptorSets(vkDevice, HIZ_MAX_LODS, writes.data(), 0, nullptr);
+    RTXMG_LOG("RTX MegaGeo: Updated HiZ descriptor set with texture views");
+
+    // Bind the HiZ descriptor set at set index 1 using the actual shader's pipeline layout
+    VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
+    m_device->getDxvkDevice()->vkd()->vkCmdBindDescriptorSets(
+      cmdBuffer,
+      VK_PIPELINE_BIND_POINT_COMPUTE,
+      pipelineLayout,
+      1,  // firstSet = 1 (we're binding set 1 only)
+      1,  // descriptorSetCount = 1
+      &hiZDescriptorSet,
+      0,  // dynamicOffsetCount
+      nullptr);
+
+    RTXMG_LOG("RTX MegaGeo: Bound HiZ descriptor set at set index 1");
+
+    // Reset HiZ binding state
+    m_hasHiZBinding = false;
+  }
+
+  void NvrhiDxvkCommandList::dispatch(uint32_t x, uint32_t y, uint32_t z) {
+    // For shaders with HiZ binding, we need special handling:
+    // 1. Bypass DXVK's RTX bindless binding (sets 1, 2, 3)
+    // 2. After DXVK allocates the descriptor set, update binding 17 as an ARRAY
+    //    (DXVK's bindResourceView doesn't support arrays, so we do it manually)
+    if (m_hasHiZBinding) {
+      // Commit compute state without the problematic bindless set bindings
+      // This binds the pipeline and set 0 resources via DXVK's flat model
+      RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
+      if (!rtxContext->commitComputeStateForMegaGeo()) {
+        Logger::err("RTX MegaGeo: Failed to commit compute state for MegaGeo dispatch");
+        return;
+      }
+
+      // Now emit barrier AFTER state is committed (so resources are properly tracked)
+      m_context->emitMemoryBarrier(0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+      // Get the descriptor set that DXVK just allocated and bound
+      VkDescriptorSet cpSet = m_context->getComputeDescriptorSet();
+      if (cpSet != VK_NULL_HANDLE) {
+        // Update binding 17 with HiZ texture array (elements 0-8)
+        // The shader expects: Texture2D<float> t_HiZBuffer[HIZ_MAX_LODS] at binding 17
+        std::array<VkDescriptorImageInfo, HIZ_MAX_LODS> imageInfos;
+        VkWriteDescriptorSet write = {};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = cpSet;
+        write.dstBinding = 17;  // HiZ textures are at binding 17 in DXVK's flat model
+        write.dstArrayElement = 0;
+        write.descriptorCount = HIZ_MAX_LODS;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        write.pImageInfo = imageInfos.data();
+
+        // Fill image infos for all HiZ levels
+        for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
+          imageInfos[i] = {};
+          imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          if (m_hiZImageViews[i] != nullptr) {
+            imageInfos[i].imageView = m_hiZImageViews[i]->handle();
+          } else {
+            // Use first valid view as fallback for missing levels
+            for (uint32_t j = 0; j < HIZ_MAX_LODS; ++j) {
+              if (m_hiZImageViews[j] != nullptr) {
+                imageInfos[i].imageView = m_hiZImageViews[j]->handle();
+                break;
+              }
+            }
+          }
+        }
+
+        VkDevice vkDevice = m_device->getVkDevice();
+        m_device->getDxvkDevice()->vkd()->vkUpdateDescriptorSets(vkDevice, 1, &write, 0, nullptr);
+        RTXMG_LOG(str::format("RTX MegaGeo: Updated HiZ array at binding 17 (", HIZ_MAX_LODS, " elements)"));
+      } else {
+        Logger::warn("RTX MegaGeo: dispatch - compute descriptor set is null, HiZ binding may fail");
+      }
+
+      // Call vkCmdDispatch directly
+      VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
+      m_device->getDxvkDevice()->vkd()->vkCmdDispatch(cmdBuffer, x, y, z);
+      RTXMG_LOG(str::format("RTX MegaGeo: dispatch(", x, ", ", y, ", ", z, ") with HiZ array binding"));
+    } else {
+      // Normal dispatch path through DXVK
+      // Ensure all prior writes are visible to this shader read
+      m_context->emitMemoryBarrier(0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      m_context->dispatch(x, y, z);
+    }
   }
 
   void NvrhiDxvkCommandList::dispatchIndirect(nvrhi::IBuffer* buffer, uint64_t offset) {
+    if (!buffer) {
+      Logger::err("RTX MegaGeo: dispatchIndirect - null buffer");
+      return;
+    }
+
+    nvrhi::Object nativeObj = buffer->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+    if (nativeObj.pointer == nullptr) {
+      Logger::err("RTX MegaGeo: dispatchIndirect - buffer is not a VK_Buffer (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(buffer);
     Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
+    if (dxvkBuffer == nullptr) {
+      Logger::err("RTX MegaGeo: dispatchIndirect - null DxvkBuffer");
+      return;
+    }
 
     // Bind indirect argument buffer
     DxvkBufferSlice argBufferSlice(dxvkBuffer, offset, sizeof(VkDispatchIndirectCommand));
     m_context->bindDrawBuffers(argBufferSlice, DxvkBufferSlice());
-    m_context->dispatchIndirect(offset);
+
+    // For shaders with HiZ binding, bypass DXVK's normal dispatch path
+    if (m_hasHiZBinding) {
+      RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
+      if (!rtxContext->commitComputeStateForMegaGeo()) {
+        Logger::err("RTX MegaGeo: Failed to commit compute state for MegaGeo dispatchIndirect");
+        return;
+      }
+
+      // Emit barrier AFTER state is committed
+      m_context->emitMemoryBarrier(0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+
+      // Get the descriptor set that DXVK just allocated and bound
+      VkDescriptorSet cpSet = m_context->getComputeDescriptorSet();
+      if (cpSet != VK_NULL_HANDLE) {
+        // Update binding 17 with HiZ texture array (elements 0-8)
+        std::array<VkDescriptorImageInfo, HIZ_MAX_LODS> imageInfos;
+        VkWriteDescriptorSet write = {};
+        write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+        write.dstSet = cpSet;
+        write.dstBinding = 17;
+        write.dstArrayElement = 0;
+        write.descriptorCount = HIZ_MAX_LODS;
+        write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+        write.pImageInfo = imageInfos.data();
+
+        for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
+          imageInfos[i] = {};
+          imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+          if (m_hiZImageViews[i] != nullptr) {
+            imageInfos[i].imageView = m_hiZImageViews[i]->handle();
+          } else {
+            for (uint32_t j = 0; j < HIZ_MAX_LODS; ++j) {
+              if (m_hiZImageViews[j] != nullptr) {
+                imageInfos[i].imageView = m_hiZImageViews[j]->handle();
+                break;
+              }
+            }
+          }
+        }
+
+        VkDevice vkDevice = m_device->getVkDevice();
+        m_device->getDxvkDevice()->vkd()->vkUpdateDescriptorSets(vkDevice, 1, &write, 0, nullptr);
+        RTXMG_LOG("RTX MegaGeo: Updated HiZ array at binding 17 for dispatchIndirect");
+      }
+
+      // Call vkCmdDispatchIndirect directly
+      VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
+      auto bufferSlice = argBufferSlice.getSliceHandle(0, sizeof(VkDispatchIndirectCommand));
+      m_device->getDxvkDevice()->vkd()->vkCmdDispatchIndirect(cmdBuffer, bufferSlice.handle, bufferSlice.offset);
+      RTXMG_LOG("RTX MegaGeo: dispatchIndirect with HiZ array binding");
+    } else {
+      // Ensure all prior writes are visible to this shader read
+      m_context->emitMemoryBarrier(0,
+        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
+        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
+        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      m_context->dispatchIndirect(offset);
+    }
   }
 
   void NvrhiDxvkCommandList::dispatchIndirect(uint64_t offset) {
@@ -388,8 +710,23 @@ namespace dxvk {
     nvrhi::ResourceStates stateBefore,
     nvrhi::ResourceStates stateAfter)
   {
+    if (!buffer) {
+      Logger::warn("RTX MegaGeo: bufferBarrier - null buffer, skipping");
+      return;
+    }
+
+    nvrhi::Object nativeObj = buffer->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+    if (nativeObj.pointer == nullptr) {
+      Logger::warn("RTX MegaGeo: bufferBarrier - buffer is not a VK_Buffer (incompatible type), skipping");
+      return;
+    }
+
     NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(buffer);
     Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
+    if (dxvkBuffer == nullptr) {
+      Logger::warn("RTX MegaGeo: bufferBarrier - null DxvkBuffer, skipping");
+      return;
+    }
 
     // Translate NVRHI resource states to Vulkan stages/access
     DxvkAccessFlags srcAccess(0);
@@ -431,6 +768,67 @@ namespace dxvk {
     m_context->emitMemoryBarrier(0, srcStages, srcAccess.raw(), dstStages, dstAccess.raw());
   }
 
+  void NvrhiDxvkCommandList::textureBarrier(
+    nvrhi::ITexture* texture,
+    nvrhi::ResourceStates stateBefore,
+    nvrhi::ResourceStates stateAfter)
+  {
+    if (!texture) {
+      RTXMG_LOG("RTX MegaGeo: textureBarrier - null texture, skipping");
+      return;
+    }
+
+    // CRITICAL: Verify this is an NvrhiDxvkTexture before casting
+    nvrhi::Object nativeObj = texture->getNativeObject(nvrhi::ObjectType::VK_Image);
+    if (nativeObj.pointer == nullptr) {
+      Logger::warn("RTX MegaGeo: textureBarrier - texture is not a VK_Image (incompatible type), skipping");
+      return;
+    }
+
+    NvrhiDxvkTexture* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(texture);
+
+    const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+    if (dxvkImage == nullptr) {
+      RTXMG_LOG("RTX MegaGeo: textureBarrier - null DxvkImage, skipping");
+      return;
+    }
+
+    // Determine Vulkan image layouts based on resource states
+    VkImageLayout oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+    VkImageLayout newLayout = VK_IMAGE_LAYOUT_UNDEFINED;
+
+    // Source state
+    if (static_cast<uint32_t>(stateBefore & nvrhi::ResourceStates::UnorderedAccess) != 0) {
+      oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (static_cast<uint32_t>(stateBefore & nvrhi::ResourceStates::ShaderResource) != 0) {
+      oldLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    // Destination state
+    if (static_cast<uint32_t>(stateAfter & nvrhi::ResourceStates::UnorderedAccess) != 0) {
+      newLayout = VK_IMAGE_LAYOUT_GENERAL;
+    }
+    if (static_cast<uint32_t>(stateAfter & nvrhi::ResourceStates::ShaderResource) != 0) {
+      newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+    }
+
+    RTXMG_LOG(str::format("RTX MegaGeo: textureBarrier - transitioning from ", oldLayout, " to ", newLayout));
+
+    // Emit image layout transition through DXVK context
+    VkImageSubresourceRange subresourceRange = {
+      VK_IMAGE_ASPECT_COLOR_BIT,
+      0, VK_REMAINING_MIP_LEVELS,
+      0, VK_REMAINING_ARRAY_LAYERS
+    };
+
+    m_context->transformImage(
+      dxvkImage,
+      subresourceRange,
+      oldLayout,
+      newLayout);
+  }
+
   void NvrhiDxvkCommandList::globalBarrier(
     nvrhi::ResourceStates stateBefore,
     nvrhi::ResourceStates stateAfter)
@@ -445,6 +843,12 @@ namespace dxvk {
   }
 
   void NvrhiDxvkCommandList::bindComputeResources(const nvrhi::ComputeState& state) {
+    // Reset HiZ binding state for this new shader - only set true if we actually bind HiZ textures
+    // NOTE: Do NOT clear m_hiZImageViews here - the views may still be referenced by in-flight
+    // descriptor sets. The Rc<> ref counting will keep them alive, and they'll be overwritten
+    // when new HiZ textures are bound.
+    m_hasHiZBinding = false;
+
     // Bind the compute shader from the pipeline
     if (state.pipeline) {
       auto* computePipeline = static_cast<NvrhiDxvkComputePipeline*>(state.pipeline.Get());
@@ -507,7 +911,8 @@ namespace dxvk {
 
           case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV:
             // UAVs: u register -> slot 200-299
-            dxvkSlot = 200 + item.slot;
+            // Handle both conventions: if slot < 200, add offset; if >= 200, use as-is (pre-offset)
+            dxvkSlot = (item.slot >= 200) ? item.slot : (200 + item.slot);
             if (item.resourceHandle) {
               auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
               Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
@@ -533,7 +938,8 @@ namespace dxvk {
 
           case nvrhi::BindingSetItem::Type::ConstantBuffer:
             // Constant buffers: Use push constants if data is cached, otherwise bind as uniform buffer
-            dxvkSlot = 300 + item.slot;
+            // Handle both conventions: if slot < 300, add offset; if >= 300, use as-is (pre-offset)
+            dxvkSlot = (item.slot >= 300) ? item.slot : (300 + item.slot);
             if (item.resourceHandle) {
               auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
 
@@ -562,7 +968,8 @@ namespace dxvk {
 
           case nvrhi::BindingSetItem::Type::Sampler:
             // Samplers: s register -> slot 100-199
-            dxvkSlot = 100 + item.slot;
+            // Handle both conventions: if slot < 100, add offset; if >= 100, use as-is (pre-offset)
+            dxvkSlot = (item.slot >= 100) ? item.slot : (100 + item.slot);
             if (item.resourceHandle) {
               auto* nvrhiSampler = static_cast<NvrhiDxvkSampler*>(item.resourceHandle);
               Rc<DxvkSampler> dxvkSampler = nvrhiSampler->getDxvkSampler();
@@ -572,30 +979,167 @@ namespace dxvk {
             break;
 
           case nvrhi::BindingSetItem::Type::Texture_SRV:
-            // Texture SRVs: t register -> slot 0-99 (same as buffer SRVs)
-            // For array elements, add the array index to the base slot
+            // Bind textures in DXVK's flat slot model
+            // For HiZ textures (binding set 1), they need special handling because the shader
+            // expects them as an ARRAY at binding 17 (9 elements), not separate bindings 17-25.
+            // DXVK's bindResourceView() doesn't support arrays, so we store the views and
+            // update the descriptor set manually in dispatch() after commitComputeState().
             {
-              uint32_t effectiveSlot = dxvkSlot + item.arrayElement;
+              auto* bindingLayout = nvrhiBindingSet->getLayout();
+              auto* nvrhiLayout = static_cast<NvrhiDxvkBindingLayout*>(bindingLayout);
+              bool isHiZBinding = nvrhiLayout && nvrhiLayout->getDesc().registerSpaceIsDescriptorSet;
+
+              if (isHiZBinding) {
+                // HiZ textures: DON'T use DXVK's bindResourceView() because it doesn't support arrays.
+                // The shader expects binding 17 with array count 9, not separate bindings.
+                // Store the image views and update the descriptor set array in dispatch().
+                RTXMG_LOG(str::format("RTX MegaGeo: storing HiZ Texture_SRV array[", item.arrayElement, "]"));
+
+                if (item.resourceHandle) {
+                  nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+                  if (nativeObj.pointer == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: HiZ Texture_SRV array[", item.arrayElement,
+                      "] - resource is not a VK_Image (incompatible texture), skipping"));
+                    break;
+                  }
+
+                  auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
+                  const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+                  if (dxvkImage == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: HiZ Texture_SRV array[", item.arrayElement,
+                      "] - null DxvkImage, skipping"));
+                    break;
+                  }
+
+                  // Create image view for HiZ texture
+                  DxvkImageViewCreateInfo viewInfo;
+                  viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
+                  viewInfo.format = dxvkImage->info().format;
+                  viewInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+                  // HiZ uses depth aspect since it's a depth buffer hierarchy
+                  VkFormat fmt = dxvkImage->info().format;
+                  if (fmt == VK_FORMAT_D32_SFLOAT || fmt == VK_FORMAT_D16_UNORM ||
+                      fmt == VK_FORMAT_D24_UNORM_S8_UINT || fmt == VK_FORMAT_D32_SFLOAT_S8_UINT ||
+                      fmt == VK_FORMAT_R32_SFLOAT) {
+                    // Depth or R32 format - use appropriate aspect
+                    viewInfo.aspect = (fmt == VK_FORMAT_R32_SFLOAT) ? VK_IMAGE_ASPECT_COLOR_BIT : VK_IMAGE_ASPECT_DEPTH_BIT;
+                  } else {
+                    viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                  }
+                  viewInfo.minLevel = 0;
+                  viewInfo.numLevels = dxvkImage->info().mipLevels;
+                  viewInfo.minLayer = 0;
+                  viewInfo.numLayers = 1;
+
+                  Rc<DxvkImageView> imageView = m_device->getDxvkDevice()->createImageView(dxvkImage, viewInfo);
+                  RTXMG_LOG(str::format("RTX MegaGeo: created HiZ image view for array[", item.arrayElement,
+                    "] format=", (uint32_t)fmt, " aspect=", (uint32_t)viewInfo.aspect));
+
+                  // Track both the image AND the image view to keep them alive until command buffer execution completes
+                  // CRITICAL: The image view must be tracked, not just the image, otherwise the VkImageView
+                  // can be destroyed while still referenced by pending commands
+                  m_context->getCommandList()->trackResource<DxvkAccess::Read>(dxvkImage);
+                  m_context->getCommandList()->trackResource<DxvkAccess::Read>(imageView);
+
+                  // Store in m_hiZImageViews for array update in dispatch()
+                  if (item.arrayElement < HIZ_MAX_LODS) {
+                    m_hiZImageViews[item.arrayElement] = imageView;
+                    m_hasHiZBinding = true;
+                  }
+                } else {
+                  Logger::err(str::format("RTX MegaGeo: HiZ Texture_SRV array[", item.arrayElement, "] has NULL resourceHandle!"));
+                }
+              } else {
+                // Regular textures: use space offset calculation
+                uint32_t spaceOffset = bindingSetIndex * 50;  // 50 slots per space
+                uint32_t effectiveSlot = dxvkSlot + item.arrayElement + spaceOffset;
+                if (item.resourceHandle) {
+                  nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+                  if (nativeObj.pointer == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: Texture_SRV slot=", effectiveSlot,
+                      " - resource is not a VK_Image (incompatible texture), skipping bind"));
+                    break;
+                  }
+
+                  auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
+                  const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+                  if (dxvkImage == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: Texture_SRV slot=", effectiveSlot,
+                      " - null DxvkImage, skipping bind"));
+                    break;
+                  }
+
+                  DxvkImageViewCreateInfo viewInfo;
+                  viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
+                  viewInfo.format = dxvkImage->info().format;
+                  viewInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+                  viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                  viewInfo.minLevel = 0;
+                  viewInfo.numLevels = dxvkImage->info().mipLevels;
+                  viewInfo.minLayer = 0;
+                  viewInfo.numLayers = 1;
+
+                  Rc<DxvkImageView> imageView = m_device->getDxvkDevice()->createImageView(dxvkImage, viewInfo);
+                  RTXMG_LOG(str::format("RTX MegaGeo: bind Texture_SRV slot=", effectiveSlot, " (t", item.slot, " array=", item.arrayElement, ")"));
+                  m_context->bindResourceView(effectiveSlot, imageView, nullptr);
+                } else {
+                  Logger::err(str::format("RTX MegaGeo: Texture_SRV slot=", effectiveSlot, " has NULL resourceHandle!"));
+                }
+              }
+            }
+            break;
+
+          case nvrhi::BindingSetItem::Type::Texture_UAV:
+            // Texture UAVs: u register -> slot 200-299 (same as buffer UAVs)
+            // Handle both conventions: if slot < 200, add offset; if >= 200, use as-is (pre-offset)
+            {
+              uint32_t effectiveSlot = (item.slot >= 200) ? (item.slot + item.arrayElement) : (200 + item.slot + item.arrayElement);
               if (item.resourceHandle) {
+                // Try to get native object to verify this is actually a texture
+                nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+                if (nativeObj.pointer == nullptr) {
+                  // Not a texture - might be a buffer passed incorrectly, skip binding
+                  Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
+                    " - resource is not a VK_Image, skipping bind"));
+                  break;
+                }
+
                 auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
                 const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+                if (dxvkImage == nullptr) {
+                  Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
+                    " - null DxvkImage, skipping bind"));
+                  break;
+                }
 
-                // Create image view for shader resource
+                // Verify the image supports storage usage
+                VkImageUsageFlags imageUsage = dxvkImage->info().usage;
+                if (!(imageUsage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+                  Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
+                    " - image doesn't have STORAGE_BIT, skipping bind"));
+                  break;
+                }
+
+                // Create image view for UAV (storage image)
                 DxvkImageViewCreateInfo viewInfo;
                 viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
                 viewInfo.format = dxvkImage->info().format;
-                viewInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+                viewInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
                 viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
                 viewInfo.minLevel = 0;
-                viewInfo.numLevels = dxvkImage->info().mipLevels;
+                viewInfo.numLevels = 1;  // UAVs typically bind single mip level
                 viewInfo.minLayer = 0;
                 viewInfo.numLayers = 1;
 
                 Rc<DxvkImageView> imageView = m_device->getDxvkDevice()->createImageView(dxvkImage, viewInfo);
-                RTXMG_LOG(str::format("RTX MegaGeo: bind Texture_SRV slot=", effectiveSlot, " (t", item.slot, " array=", item.arrayElement, ")"));
-                m_context->bindResourceView(effectiveSlot, imageView, nullptr);
+                if (imageView != nullptr) {
+                  RTXMG_LOG(str::format("RTX MegaGeo: bind Texture_UAV slot=", effectiveSlot, " (u", item.slot, " array=", item.arrayElement, ")"));
+                  m_context->bindResourceView(effectiveSlot, imageView, nullptr);
+                } else {
+                  Logger::err(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot, " - failed to create image view"));
+                }
               } else {
-                Logger::err(str::format("RTX MegaGeo: Texture_SRV slot=", effectiveSlot, " has NULL resourceHandle!"));
+                Logger::err(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot, " has NULL resourceHandle!"));
               }
             }
             break;

@@ -426,6 +426,17 @@ namespace dxvk {
     m_tessellationCamera.SetFar(zFar);
     RTXMG_LOG(str::format("RTX MegaGeo: Camera setup - eye=(", cameraPos.x, ",", cameraPos.y, ",", cameraPos.z, ") fovY=", fovY, " aspect=", aspectRatio));
 
+    // CRITICAL: Initialize cluster templates BEFORE binding any image views (like HiZ)
+    // The sync Downloads in template initialization close/reopen the command list
+    // which destroys any bound resources. Must happen before updateHiZBuffer!
+    {
+      uint32_t maxGeometryCountPerMesh = m_scene ?
+          static_cast<uint32_t>(m_scene->GetSceneGraph()->GetMaxGeometryCountPerMesh()) : 1;
+      RTXMG_LOG(str::format("RTX MegaGeo: buildClusterBlas - Ensuring templates initialized, maxGeoPerMesh=", maxGeometryCountPerMesh));
+      m_clusterBuilder->EnsureTemplatesInitialized(maxGeometryCountPerMesh, m_commandList.Get());
+      RTXMG_LOG("RTX MegaGeo: buildClusterBlas - Templates initialized");
+    }
+
     // Update HIZ buffer from depth buffer (if provided)
     // Skip first 2 frames - depth buffer isn't rendered to yet and has UNDEFINED layout
     RTXMG_LOG("RTX MegaGeo: buildClusterBlas - About to update HiZ buffer");

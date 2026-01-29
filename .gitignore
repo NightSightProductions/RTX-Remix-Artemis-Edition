@@ -40,3 +40,4 @@
 nv-private/
 tests/rtx/dxvk_rt_testing/
 /nv-private
+nv-private/hdremix/bin/debug/d3d9.dll

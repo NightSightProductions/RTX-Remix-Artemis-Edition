@@ -1469,10 +1469,10 @@ namespace dxvk {
         ONCE(Logger::err("RTX MegaGeo AccelManager: Builder is null, cannot build cluster BLAS"));
       }
     } else {
-      static bool warned = false;
-      if (!warned && clusterBlasCount == 0 && instances.size() > 0) {
-        Logger::warn(str::format("RTX MegaGeo AccelManager: No ClusterBlas instances found (total instances: ", instances.size(), ")"));
-        warned = true;
+      static bool infoLogged = false;
+      if (!infoLogged && clusterBlasCount == 0 && instances.size() > 0) {
+        Logger::info(str::format("RTX MegaGeo AccelManager: Using standard BLAS for all ", instances.size(), " instances (no MegaGeometry candidates)"));
+        infoLogged = true;
       }
     }
     RTXMG_LOG("RTX MegaGeo AccelManager: buildBlases exiting after cluster BLAS section");

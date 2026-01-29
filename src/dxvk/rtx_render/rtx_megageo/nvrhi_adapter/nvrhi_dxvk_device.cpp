@@ -337,8 +337,74 @@ namespace dxvk {
   nvrhi::BindingLayoutHandle NvrhiDxvkDevice::createBindingLayout(
     const nvrhi::BindingLayoutDesc& desc)
   {
-    // Create and return a binding layout wrapper that stores the description
-    return new NvrhiDxvkBindingLayout(desc);
+    Logger::info(str::format("RTX MegaGeo: createBindingLayout space=", desc.registerSpace,
+      " registerSpaceIsDescriptorSet=", desc.registerSpaceIsDescriptorSet ? "true" : "false",
+      " bindings=", desc.bindings.size()));
+
+    // Create binding layout wrapper
+    auto* layout = new NvrhiDxvkBindingLayout(desc);
+
+    // If this layout uses registerSpaceIsDescriptorSet, create an actual VkDescriptorSetLayout
+    // This is needed for HiZ textures which use Vulkan descriptor set 1
+    if (desc.registerSpaceIsDescriptorSet) {
+      Logger::info(str::format("RTX MegaGeo: Creating VkDescriptorSetLayout for space ", desc.registerSpace));
+
+      std::vector<VkDescriptorSetLayoutBinding> bindings;
+
+      for (const auto& item : desc.bindings) {
+        VkDescriptorSetLayoutBinding binding = {};
+        binding.binding = item.slot;  // HLSL register -> Vulkan binding
+        binding.descriptorCount = item.size > 0 ? item.size : 1;
+        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;  // Compute shaders only for now
+
+        switch (item.resourceType) {
+          case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_SRV:
+          case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_SRV:
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            break;
+          case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_UAV:
+          case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_UAV:
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+            break;
+          case nvrhi::BindingLayoutItem::ResourceType::Texture_SRV:
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            break;
+          case nvrhi::BindingLayoutItem::ResourceType::Texture_UAV:
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            break;
+          case nvrhi::BindingLayoutItem::ResourceType::Sampler:
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+            break;
+          case nvrhi::BindingLayoutItem::ResourceType::ConstantBuffer:
+            binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+            break;
+          default:
+            Logger::warn(str::format("RTX MegaGeo: Unknown binding type ", (int)item.resourceType, " in registerSpaceIsDescriptorSet layout"));
+            continue;
+        }
+
+        bindings.push_back(binding);
+        Logger::info(str::format("RTX MegaGeo:   binding=", binding.binding, " type=", binding.descriptorType, " count=", binding.descriptorCount));
+      }
+
+      if (!bindings.empty()) {
+        VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+        layoutInfo.pBindings = bindings.data();
+
+        VkDescriptorSetLayout vkLayout = VK_NULL_HANDLE;
+        VkResult result = vkCreateDescriptorSetLayout(m_vkDevice, &layoutInfo, nullptr, &vkLayout);
+        if (result == VK_SUCCESS && vkLayout != VK_NULL_HANDLE) {
+          layout->setVkDescriptorSetLayout(vkLayout, m_vkDevice);
+          Logger::info(str::format("RTX MegaGeo: Created VkDescriptorSetLayout ", (void*)vkLayout, " for space ", desc.registerSpace));
+        } else {
+          Logger::err(str::format("RTX MegaGeo: Failed to create VkDescriptorSetLayout, result=", (int)result));
+        }
+      }
+    }
+
+    return layout;
   }
 
   nvrhi::BindlessLayoutHandle NvrhiDxvkDevice::createBindlessLayout(

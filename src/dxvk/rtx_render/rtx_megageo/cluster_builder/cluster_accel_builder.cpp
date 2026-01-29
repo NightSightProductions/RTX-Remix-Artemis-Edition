@@ -25,7 +25,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Disable verbose MegaGeo logging for performance (set to 1 to enable)
-#define RTXMG_VERBOSE_LOGGING 0
+#define RTXMG_VERBOSE_LOGGING 1
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -39,6 +39,7 @@ inline size_t alignBufferSize(size_t size) {
 
 // STL includes
 #include <algorithm>
+#include <limits>
 
 // RTX Remix includes
 #include "../../../util/log/log.h"
@@ -970,9 +971,6 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     using namespace dxvk;
     RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling entry, instanceIndex=", instanceIndex, " surfaceOffset=", surfaceOffset, " surfaceCount=", surfaceCount));
 
-    // Clear debug buffer for fresh shader debug output
-    commandList->clearBufferUInt(m_debugBuffer.Get(), 0);
-
     const auto& subdMeshes = scene.GetSubdMeshes();
     const auto& instance = scene.GetSubdMeshInstances()[instanceIndex];
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - got instance");
@@ -1130,10 +1128,10 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         RTXMG_LOG("RTX MegaGeo: Main binding layout created");
     }
 
-    // Create HiZ binding layout (set 1, space 1) - matches sample's hiz binding
+    // Create HiZ binding layout (set 1) - shader expects HiZ at binding 0, set 1
     if (!m_computeClusterTilingHizBL)
     {
-        RTXMG_LOG("RTX MegaGeo: Creating HiZ binding layout (set 1, space 1)");
+        RTXMG_LOG("RTX MegaGeo: Creating HiZ binding layout (set 1)");
         nvrhi::BindingLayoutDesc hizLayoutDesc;
         hizLayoutDesc.setVisibility(nvrhi::ShaderType::Compute)
             .setRegisterSpace(1)
@@ -1204,11 +1202,37 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     }
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - main binding set created");
 
-    // HiZ binding set (set 1) - use real zbuffer if available, otherwise dummy
+    // HiZ binding set (set 1) - use real zbuffer textures if available
     nvrhi::BindingSetHandle hizBindingSet;
-    if (m_tessellatorConfig.zbuffer)
+    if (m_tessellatorConfig.zbuffer && m_tessellatorConfig.enableHiZVisibility)
     {
         RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating real HiZ binding set");
+
+        // Initialize HiZ textures on first use by transitioning layout and clearing
+        if (!m_hizInitialized)
+        {
+            RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - initializing HiZ textures (first use)");
+
+            // Get underlying DxvkContext for layout transitions
+            dxvk::NvrhiDxvkCommandList* dxvkCmdList = static_cast<dxvk::NvrhiDxvkCommandList*>(commandList);
+
+            nvrhi::Color clearColor(std::numeric_limits<float>::max());
+
+            // Clear each HiZ texture - this will transition from UNDEFINED layout
+            for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
+            {
+                nvrhi::ITexture* hizTex = m_tessellatorConfig.zbuffer->GetHierarchyTexture(i);
+                if (hizTex)
+                {
+                    RTXMG_LOG(str::format("RTX MegaGeo: Clearing HiZ texture level ", i));
+                    commandList->clearTextureFloat(hizTex, nvrhi::AllSubresources, clearColor);
+                }
+            }
+            m_hizInitialized = true;
+            RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - HiZ textures initialized");
+        }
+
+        // Create binding set with real HiZ textures
         nvrhi::BindingSetDesc hizSetDesc;
         for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
         {
@@ -1252,7 +1276,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
                 auto computePipelineDesc = nvrhi::ComputePipelineDesc()
                     .setComputeShader(shader)
                     .addBindingLayout(m_computeClusterTilingBL)      // Set 0: Main bindings
-                    .addBindingLayout(m_computeClusterTilingHizBL)   // Set 1: HiZ textures (space 1)
+                    .addBindingLayout(m_computeClusterTilingHizBL)   // Set 1: HiZ textures
                     .addBindingLayout(m_bindlessBL);                 // Set 2: Bindless textures
                 RTXMG_LOG("RTX MegaGeo: GetComputeClusterTilingPSO - creating pipeline");
 
@@ -1265,7 +1289,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating compute state");
     auto state = nvrhi::ComputeState()
         .addBindingSet(bindingSet)           // Set 0: Main bindings
-        .addBindingSet(hizBindingSet)        // Set 1: HiZ textures (space 1)
+        .addBindingSet(hizBindingSet)        // Set 1: HiZ textures
         .addBindingSet(m_descriptorTable);   // Set 2: Bindless textures
     RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling - enableMonolithicClusterBuild=", m_tessellatorConfig.enableMonolithicClusterBuild));
 
@@ -1336,48 +1360,22 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         RTXMG_LOG("RTX MegaGeo: Loop mode - loop complete");
     }
 
-    // DEBUG: Always download and log shader debug output to diagnose allocation check failures
+    // Only download debug output when debug indices are set (matches sample behavior)
+    if (m_tessellatorConfig.debugSurfaceIndex >= 0 &&
+        m_tessellatorConfig.debugLaneIndex >= 0)
     {
-        Logger::info(str::format("RTX MegaGeo: Shader Debug Output for Instance:", instanceIndex, " Mesh:", donutMeshInfo.name));
+        Logger::info(str::format("RTX MegaGeo: Cluster Tiling Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name,
+            " (Surface:", m_tessellatorConfig.debugSurfaceIndex, ", Lane:", m_tessellatorConfig.debugLaneIndex, ")"));
 
         auto debugOutput = m_debugBuffer.Download(commandList);
-        Logger::info(str::format("RTX MegaGeo: debugOutput.size()=", debugOutput.size()));
-        if (!debugOutput.empty()) {
-            uint numElements = debugOutput.front().payloadType;
-            Logger::info(str::format("RTX MegaGeo: debugOutput numElements=", numElements));
-            if (numElements > 0 && numElements < debugOutput.size()) {
-                vectorlog::Log(debugOutput, ShaderDebugElement::OutputLambda, vectorlog::FormatOptions{ .wrap = false, .header = false, .elementIndex = true, .startIndex = 1, .count = numElements });
-            } else {
-                Logger::warn(str::format("RTX MegaGeo: Invalid numElements=", numElements, " (buffer size=", debugOutput.size(), ")"));
-            }
-        } else {
-            Logger::warn("RTX MegaGeo: debugOutput is empty, skipping debug log");
-        }
+        uint numElements = debugOutput.front().payloadType;
+        vectorlog::Log(debugOutput, ShaderDebugElement::OutputLambda, vectorlog::FormatOptions{ .wrap = false, .header = false, .elementIndex = false, .startIndex = 1, .count = numElements });
     }
     RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling complete for instance ", instanceIndex));
 
-    if (m_tessellatorConfig.enableLogging)
-    {
-        Logger::info(str::format("Vertex PatchPoints:", instanceIndex, " Mesh:", donutMeshInfo.name));
-        {
-            auto readBackDesc = GetReadbackDesc(subdivisionSurface.m_vertexDeviceData.patchPoints->getDesc());
-            auto readbackBuffer = commandList->getDevice()->createBuffer(readBackDesc);
-
-            std::vector<float3> patchPoints;
-            DownloadBuffer<float3>(subdivisionSurface.m_vertexDeviceData.patchPoints.Get(), patchPoints, readbackBuffer.Get(), false, commandList);
-            vectorlog::Log(patchPoints);
-        }
-
-        Logger::info(str::format("Texcoord PatchPoints:", instanceIndex, " Mesh:", donutMeshInfo.name));
-        {
-            auto readBackDesc = GetReadbackDesc(subdivisionSurface.m_texcoordDeviceData.patchPoints->getDesc());
-            auto readbackBuffer = commandList->getDevice()->createBuffer(readBackDesc);
-
-            std::vector<float2> patchPoints;
-            DownloadBuffer<float2>(subdivisionSurface.m_texcoordDeviceData.patchPoints.Get(), patchPoints, readbackBuffer.Get(), false, commandList);
-            vectorlog::Log(patchPoints);
-        }
-    }
+    // NOTE: Patchpoints logging removed - DownloadBuffer closes/reopens command list which
+    // destroys bound HiZ image views and causes VK_ERROR_DEVICE_LOST in DXVK.
+    // The sample code works differently because it uses a different nvrhi backend.
 }
 
 void ClusterAccelBuilder::CopyClusterOffset(uint32_t instanceIndex,
@@ -1689,6 +1687,14 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
     }
 }
 
+void ClusterAccelBuilder::EnsureTemplatesInitialized(uint32_t maxGeometryCountPerMesh, nvrhi::ICommandList* commandList)
+{
+    // Initialize cluster templates early, before any image views are bound
+    // The sync Downloads in InitStructuredClusterTemplates close/reopen the command list
+    // which destroys any bound resources (like HiZ textures)
+    InitStructuredClusterTemplates(maxGeometryCountPerMesh, commandList);
+}
+
 void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorConfig& config,
     ClusterAccels& accels, ClusterStatistics& stats, uint32_t frameIndex, nvrhi::ICommandList* commandList)
 {
@@ -1742,6 +1748,11 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
             if (m_dummyHiZTextures[i])
             {
                 commandList->clearTextureFloat(m_dummyHiZTextures[i].Get(), nvrhi::AllSubresources, clearColor);
+                // Transition back to ShaderResource state after clearing
+                // The clear leaves the texture in GENERAL/UAV layout, but we need ShaderResource
+                commandList->textureBarrier(m_dummyHiZTextures[i].Get(),
+                    nvrhi::ResourceStates::UnorderedAccess,
+                    nvrhi::ResourceStates::ShaderResource);
             }
         }
         m_dummyHiZTexturesInitialized = true;
@@ -1785,66 +1796,8 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
         stats::clusterAccelSamplers.clusterTilingTime.Stop();
     }
 
-    if (m_tessellatorConfig.enableLogging)
-    {
-        // sync download to get current frame results
-        m_tessellationCountersBuffer.Log(commandList, [](std::ostream& ss, const TessellationCounters& e)
-            {
-                ss << "{cluster: " << e.desiredClusters << "/" << e.clusters 
-                    << ", vertices: " << e.desiredVertices
-                    << ", tri: " << e.desiredTriangles
-                    << ", clasBytes: " << e.DesiredClasBytes() << "}";
-                return true;
-            });
-        TessellationCounters currentTessCounts = m_tessellationCountersBuffer.Download(commandList, false)[tessCounterIndex];
-
-        Logger::info("tessellation counters: ");
-        RTXMG_LOG(str::format("  clusters: ", currentTessCounts.clusters));
-        RTXMG_LOG(str::format("  desiredClusters: ", currentTessCounts.desiredClusters));
-        RTXMG_LOG(str::format("  desiredVertices: ", currentTessCounts.desiredVertices));
-        RTXMG_LOG(str::format("  desiredTriangles: ", currentTessCounts.desiredTriangles));
-        RTXMG_LOG(str::format("  desiredClasBytes: ", currentTessCounts.DesiredClasBytes()));
-
-        m_fillClustersDispatchIndirectBuffer.Log(commandList);
-        m_clusterOffsetCountsBuffer.Log(commandList);
-        
-        m_gridSamplersBuffer.Log(commandList, [](std::ostream& ss, const GridSampler& e)
-            {
-                ss << "{" << e.edgeSegments.x << ", " << e.edgeSegments.y << ", " << e.edgeSegments.z << ", " << e.edgeSegments.w;
-                return true;
-            });
-        
-        m_clustersBuffer.Log(commandList, [](std::ostream& ss, const Cluster& e)
-        {
-              ss << "{surface:" << e.iSurface << ", vertexOffset:" << e.nVertexOffset
-                  << ", offset:" << e.offset.x << ", " << e.offset.y << ", size: " << e.sizeX << ", " << e.sizeY << "}";
-              return true;
-        }, { .count = std::min(currentTessCounts.clusters, 64u) });
-
-        accels.clusterShadingDataBuffer.Log(commandList, [](std::ostream& ss, auto& e)
-        {
-            ss << "{surface id: " << e.m_surfaceId
-                << ", edges:" << e.m_edgeSegments.x << ", " << e.m_edgeSegments.y << ", " << e.m_edgeSegments.z << ", " << e.m_edgeSegments.w
-                << ", texcoords: (" << e.m_texcoords[0].x << "," << e.m_texcoords[0].y << "), (" << e.m_texcoords[1].x << "," << e.m_texcoords[1].y << ")" << ", (" << e.m_texcoords[2].x << "," << e.m_texcoords[2].y << ")" << ", (" << e.m_texcoords[3].x << "," << e.m_texcoords[3].y << ")"
-                << ", voffset:" << e.m_vertexOffset
-                << ", clusterOffset:" << e.m_clusterOffset.x << "," << e.m_clusterOffset.y
-                << ", cluster_size:" << e.m_clusterSizeX << "," << e.m_clusterSizeY
-                << "}";
-            return true;
-        }, { .count = std::min(currentTessCounts.clusters, 64u) });
-
-        m_clasIndirectArgDataBuffer.Log(commandList, [](std::ostream& ss, auto& e)
-        {
-            ss << "{clusterId:" << e.clusterIdOffset << ", geometryIndexOffset:" << (e.geometryIndexOffsetPacked & 0xFFFFFF)
-                << ", clusterTemplate:0x" << std::hex << e.clusterTemplate
-                << ", vertexBuffer:0x" << std::hex << e.vertexBuffer.startAddress
-                << ", vertexBufferStride:" << std::dec << e.vertexBuffer.strideInBytes
-                << "}";
-            return true;
-        }, { .count = std::min(currentTessCounts.clusters, 64u) });
-
-        accels.clasPtrsBuffer.Log(commandList, { .count = std::min(currentTessCounts.clusters, 64u) });
-    }
+    // NOTE: enableLogging block removed - Log()/Download() calls close/reopen command list
+    // which destroys bound image views and causes VK_ERROR_DEVICE_LOST in DXVK.
 
     RTXMG_LOG("RTX MegaGeo: BuildAccel - calling FillInstanceClusters");
     FillInstanceClusters(scene, accels, commandList);
@@ -1857,29 +1810,13 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     stats::clusterAccelSamplers.buildClasTime.Stop();
     RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildStructuredCLASes complete");
 
-    // Read tessellation counters synchronously to check if we have any clusters
-    auto currentCounterData = m_tessellationCountersBuffer.Download(commandList, false);
-    TessellationCounters currentTessCounts = currentCounterData[tessCounterIndex];
-
-    // Log counter values for debugging
-    Logger::info(str::format("RTX MegaGeo: BuildAccel - tessellation counters: clusters=", currentTessCounts.clusters,
-        " desiredClusters=", currentTessCounts.desiredClusters,
-        " desiredVertices=", currentTessCounts.desiredVertices,
-        " desiredTriangles=", currentTessCounts.desiredTriangles));
-
-    // Only build BLAS if we have valid clusters - building with 0 clusters can cause GPU crash
-    if (currentTessCounts.clusters > 0)
-    {
-        RTXMG_LOG("RTX MegaGeo: BuildAccel - calling BuildBlasFromClas");
-        // Limit to m_numInstances to match buffer allocations
-        uint32_t blasInstanceCount = std::min(uint32_t(instances.size()), m_numInstances);
-        BuildBlasFromClas(accels, instances.data(), blasInstanceCount, commandList);
-        RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildBlasFromClas complete");
-    }
-    else
-    {
-        Logger::warn("RTX MegaGeo: BuildAccel - skipping BuildBlasFromClas because cluster count is 0");
-    }
+    // Build BLAS unconditionally (matching sample behavior)
+    // NOTE: Removed sync Download check for clusters > 0 because Download closes/reopens
+    // command list which destroys bound image views in DXVK
+    RTXMG_LOG("RTX MegaGeo: BuildAccel - calling BuildBlasFromClas");
+    uint32_t blasInstanceCount = std::min(uint32_t(instances.size()), m_numInstances);
+    BuildBlasFromClas(accels, instances.data(), blasInstanceCount, commandList);
+    RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildBlasFromClas complete");
 
     // Async read of counters
     RTXMG_LOG("RTX MegaGeo: BuildAccel - downloading counters");

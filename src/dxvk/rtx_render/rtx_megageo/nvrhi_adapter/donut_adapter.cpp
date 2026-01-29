@@ -1,5 +1,5 @@
 // Disable verbose MegaGeo logging
-#define RTXMG_VERBOSE_LOGGING 0
+#define RTXMG_VERBOSE_LOGGING 1
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) dxvk::Logger::info(msg)
 #else
@@ -46,6 +46,9 @@
 #include <rtx_shaders/fill_blas_from_clas_args.h>
 #include <rtx_shaders/fill_instantiate_template_args.h>
 #include <rtx_shaders/patch_cluster_blas_addresses.h>
+
+// HiZ constants
+#include "../hiz/hiz_buffer_constants.h"
 
 #include <cstring>
 
@@ -183,6 +186,57 @@ static const dxvk::DxvkResourceSlot s_patchClusterBlasAddressesSlots[] = {
 };
 static const uint32_t s_patchClusterBlasAddressesSlotsCount = sizeof(s_patchClusterBlasAddressesSlots) / sizeof(s_patchClusterBlasAddressesSlots[0]);
 
+ShaderFactory::ShaderFactory(dxvk::RtxContext* ctx)
+  : m_rtxContext(ctx)
+{
+  // Get VkDevice for creating descriptor set layouts
+  if (m_rtxContext) {
+    m_vkDevice = m_rtxContext->getDevice()->handle();
+  }
+  RTXMG_LOG("ShaderFactory: Constructor called");
+}
+
+ShaderFactory::~ShaderFactory() {
+  // Destroy the HiZ descriptor set layout if we created one
+  if (m_hiZDescriptorSetLayout != VK_NULL_HANDLE && m_vkDevice != VK_NULL_HANDLE) {
+    vkDestroyDescriptorSetLayout(m_vkDevice, m_hiZDescriptorSetLayout, nullptr);
+    m_hiZDescriptorSetLayout = VK_NULL_HANDLE;
+    RTXMG_LOG("ShaderFactory: Destroyed HiZ descriptor set layout");
+  }
+}
+
+void ShaderFactory::ensureHiZDescriptorSetLayout() {
+  if (m_hiZDescriptorSetLayout != VK_NULL_HANDLE) {
+    return;  // Already created
+  }
+
+  if (m_vkDevice == VK_NULL_HANDLE) {
+    dxvk::Logger::err("ShaderFactory: Cannot create HiZ descriptor set layout - no VkDevice");
+    return;
+  }
+
+  // Create HiZ descriptor set layout for set 1
+  // This matches the shader's VK_BINDING(0, 1) Texture2D<float> t_HiZBuffer[HIZ_MAX_LODS]: register(t0, space1);
+  VkDescriptorSetLayoutBinding binding = {};
+  binding.binding = 0;  // Binding 0 in set 1
+  binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+  binding.descriptorCount = HIZ_MAX_LODS;  // 9 textures
+  binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+
+  VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+  layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+  layoutInfo.bindingCount = 1;
+  layoutInfo.pBindings = &binding;
+
+  VkResult result = vkCreateDescriptorSetLayout(m_vkDevice, &layoutInfo, nullptr, &m_hiZDescriptorSetLayout);
+  if (result == VK_SUCCESS && m_hiZDescriptorSetLayout != VK_NULL_HANDLE) {
+    dxvk::Logger::info(dxvk::str::format("ShaderFactory: Created HiZ descriptor set layout ", (void*)m_hiZDescriptorSetLayout,
+      " with ", HIZ_MAX_LODS, " SAMPLED_IMAGE bindings at binding 0"));
+  } else {
+    dxvk::Logger::err(dxvk::str::format("ShaderFactory: Failed to create HiZ descriptor set layout, result=", (int)result));
+  }
+}
+
 nvrhi::ShaderHandle ShaderFactory::CreateShader(
     const char* path,
     const char* entryPoint,
@@ -287,12 +341,24 @@ nvrhi::ShaderHandle ShaderFactory::CreateShader(
     }
   }
 
+  // Create shader options - add HiZ descriptor set layout for compute_cluster_tiling
+  // This shader uses VK_BINDING(0, 1) for HiZ textures (descriptor set 1)
+  dxvk::DxvkShaderOptions shaderOptions;
+  bool isClusterTilingShader = (pathStr.find("compute_cluster_tiling") != std::string::npos);
+  if (isClusterTilingShader) {
+    ensureHiZDescriptorSetLayout();
+    if (m_hiZDescriptorSetLayout != VK_NULL_HANDLE) {
+      shaderOptions.extraLayouts.push_back(m_hiZDescriptorSetLayout);
+      RTXMG_LOG(dxvk::str::format("ShaderFactory: Adding HiZ descriptor set layout to compute_cluster_tiling shader"));
+    }
+  }
+
   dxvk::Rc<dxvk::DxvkShader> dxvkShader = new dxvk::DxvkShader(
     vkStage,
     slotCount, resourceSlots,
     iface,
     codeBuffer,
-    dxvk::DxvkShaderOptions(),
+    shaderOptions,
     dxvk::DxvkShaderConstData()
   );
 

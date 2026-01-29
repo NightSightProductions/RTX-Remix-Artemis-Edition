@@ -154,7 +154,17 @@ namespace dxvk {
 #endif
     }
 
+    // MegaGeo support: Commit compute state but skip RTX bindless binding at sets 1, 2, 3
+    // This allows MegaGeo shaders to use their own descriptor set layout at set 1 (HiZ)
+    bool commitComputeStateForMegaGeo();
+
+    // Get the current compute pipeline's VkPipelineLayout (for MegaGeo HiZ binding)
+    VkPipelineLayout getCurrentComputePipelineLayout() const;
+
   protected:
+    // Flag to skip RTX bindless binding in updateComputeShaderResources
+    bool m_skipRtxBindlessBinding = false;
+
     virtual void updateComputeShaderResources() override;
     virtual void updateRaytracingShaderResources() override;
 

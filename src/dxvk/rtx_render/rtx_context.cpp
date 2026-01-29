@@ -2117,13 +2117,18 @@ namespace dxvk {
     ScopedCpuProfileZone();
     DxvkContext::updateComputeShaderResources();
 
+    // Skip RTX bindless binding for MegaGeo shaders that use their own descriptor set layout
+    if (m_skipRtxBindlessBinding) {
+      return;
+    }
+
     auto&& layout = m_state.cp.pipeline->layout();
     if (layout->requiresExtraDescriptorSet()) {
-      m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_COMPUTE, layout->pipelineLayout(), 
+      m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_COMPUTE, layout->pipelineLayout(),
                                   getSceneManager().getBindlessResourceManager().getGlobalBindlessTableSet(BindlessResourceManager::Textures),
                                   BINDING_SET_BINDLESS_TEXTURE2D);
 
-      m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_COMPUTE, layout->pipelineLayout(), 
+      m_cmd->cmdBindDescriptorSet(VK_PIPELINE_BIND_POINT_COMPUTE, layout->pipelineLayout(),
                                   getSceneManager().getBindlessResourceManager().getGlobalBindlessTableSet(BindlessResourceManager::Buffers),
                                   BINDING_SET_BINDLESS_RAW_BUFFER);
 
@@ -2131,6 +2136,21 @@ namespace dxvk {
                                   getSceneManager().getBindlessResourceManager().getGlobalBindlessTableSet(BindlessResourceManager::Samplers),
                                   BINDING_SET_BINDLESS_SAMPLER);
     }
+  }
+
+  bool RtxContext::commitComputeStateForMegaGeo() {
+    // Set flag to skip RTX bindless binding during commitComputeState
+    m_skipRtxBindlessBinding = true;
+    bool result = commitComputeState();
+    m_skipRtxBindlessBinding = false;
+    return result;
+  }
+
+  VkPipelineLayout RtxContext::getCurrentComputePipelineLayout() const {
+    if (m_state.cp.pipeline && m_state.cp.pipeline->layout()) {
+      return m_state.cp.pipeline->layout()->pipelineLayout();
+    }
+    return VK_NULL_HANDLE;
   }
 
   void RtxContext::updateRaytracingShaderResources() {

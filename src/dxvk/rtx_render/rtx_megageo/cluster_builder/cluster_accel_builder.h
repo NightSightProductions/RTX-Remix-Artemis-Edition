@@ -213,6 +213,11 @@ public:
     // Get shader factory for creating additional compute shaders
     donut::engine::ShaderFactory& getShaderFactory() { return m_shaderFactory; }
 
+    // Initialize cluster templates early (before any image views are bound)
+    // This MUST be called before updateHiZBuffer to avoid destroying bound resources
+    // when the sync Downloads in template init close/reopen the command list
+    void EnsureTemplatesInitialized(uint32_t maxGeometryCountPerMesh, nvrhi::ICommandList* commandList);
+
 protected:
     void UpdateMemoryAllocations(ClusterAccels& accels, uint32_t numInstances, uint32_t sceneSubdPatches);
 
@@ -280,6 +285,7 @@ protected:
     // The shader expects HIZ_MAX_LODS textures, so we need to bind something even when HiZ is disabled
     nvrhi::TextureHandle m_dummyHiZTextures[HIZ_MAX_LODS];
     bool m_dummyHiZTexturesInitialized = false;
+    bool m_hizInitialized = false;  // Track if real HiZ buffer has been cleared/initialized
 
     RTXMGBuffer<uint3> m_fillClustersDispatchIndirectBuffer; // number of thread groups per each instance
     RTXMGBuffer<uint2> m_clusterOffsetCountsBuffer; // offset+count per each instance

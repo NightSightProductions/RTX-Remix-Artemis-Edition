@@ -28,21 +28,44 @@
 namespace dxvk {
 
   // NVRHI IBindingLayout implementation storing binding descriptions
+  // When registerSpaceIsDescriptorSet is true, also holds a VkDescriptorSetLayout
   class NvrhiDxvkBindingLayout : public nvrhi::IBindingLayout {
   public:
     NvrhiDxvkBindingLayout(const nvrhi::BindingLayoutDesc& desc)
       : m_desc(desc)
+      , m_vkDescriptorSetLayout(VK_NULL_HANDLE)
+      , m_vkDevice(VK_NULL_HANDLE)
     {
     }
 
+    ~NvrhiDxvkBindingLayout() {
+      // Destroy the VkDescriptorSetLayout if we created one
+      if (m_vkDescriptorSetLayout != VK_NULL_HANDLE && m_vkDevice != VK_NULL_HANDLE) {
+        vkDestroyDescriptorSetLayout(m_vkDevice, m_vkDescriptorSetLayout, nullptr);
+        m_vkDescriptorSetLayout = VK_NULL_HANDLE;
+      }
+    }
+
     nvrhi::Object getNativeObject(nvrhi::ObjectType type) override {
+      // VkDescriptorSetLayout doesn't have a dedicated ObjectType, use getVkDescriptorSetLayout() instead
       return nvrhi::Object();
     }
 
     const nvrhi::BindingLayoutDesc& getDesc() const { return m_desc; }
 
+    // Set the VkDescriptorSetLayout (called by NvrhiDxvkDevice when registerSpaceIsDescriptorSet is true)
+    void setVkDescriptorSetLayout(VkDescriptorSetLayout layout, VkDevice device) {
+      m_vkDescriptorSetLayout = layout;
+      m_vkDevice = device;
+    }
+
+    VkDescriptorSetLayout getVkDescriptorSetLayout() const { return m_vkDescriptorSetLayout; }
+    bool hasVkDescriptorSetLayout() const { return m_vkDescriptorSetLayout != VK_NULL_HANDLE; }
+
   private:
     nvrhi::BindingLayoutDesc m_desc;
+    VkDescriptorSetLayout m_vkDescriptorSetLayout;
+    VkDevice m_vkDevice;  // Needed for cleanup
   };
 
   // NVRHI IBindingSet implementation storing resource bindings

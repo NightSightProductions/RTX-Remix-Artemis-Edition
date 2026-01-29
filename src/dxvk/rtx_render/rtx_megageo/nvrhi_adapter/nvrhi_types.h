@@ -598,6 +598,7 @@ namespace nvrhi {
 
     // Barriers
     virtual void bufferBarrier(IBuffer* buffer, ResourceStates stateBefore, ResourceStates stateAfter) = 0;
+    virtual void textureBarrier(ITexture* texture, ResourceStates stateBefore, ResourceStates stateAfter) = 0;
     virtual void globalBarrier(ResourceStates stateBefore, ResourceStates stateAfter) = 0;
 
     // Device access
@@ -1090,7 +1091,8 @@ namespace donut {
     // Adapter for shader compilation - wraps RTX Remix's RtxShaderManager
     class ShaderFactory {
     public:
-      ShaderFactory(dxvk::RtxContext* ctx) : m_rtxContext(ctx) {}
+      ShaderFactory(dxvk::RtxContext* ctx);
+      ~ShaderFactory();
 
       // Creates a shader using RTX Remix's shader system
       nvrhi::ShaderHandle CreateShader(const char* path, const char* entryPoint,
@@ -1106,6 +1108,11 @@ namespace donut {
 
     private:
       dxvk::RtxContext* m_rtxContext = nullptr;
+      VkDevice m_vkDevice = VK_NULL_HANDLE;
+      VkDescriptorSetLayout m_hiZDescriptorSetLayout = VK_NULL_HANDLE;  // HiZ textures for descriptor set 1
+
+      // Creates the HiZ descriptor set layout (called once on first use)
+      void ensureHiZDescriptorSetLayout();
     };
 
     // Adapter for common render passes - minimal implementation for RTX Remix
