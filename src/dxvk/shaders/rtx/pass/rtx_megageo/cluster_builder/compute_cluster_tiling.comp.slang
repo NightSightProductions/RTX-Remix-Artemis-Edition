@@ -26,6 +26,9 @@
 //!variant compute_cluster_tiling.comp
 //!end-variants
 
+// Use row-major matrix layout to match CPU struct packing (float3x4 = 48 bytes)
+#pragma pack_matrix(row_major)
+
 #include "rtx/pass/rtx_megageo/nvrhi_types.slangh"
 #include "rtx/pass/rtx_megageo/cluster_builder/compute_cluster_tiling_params.h"
 #include "rtx/pass/rtx_megageo/cluster_builder/material_data.h"
@@ -126,6 +129,16 @@ RWStructuredBuffer<ShaderDebugElement> u_Debug : register(u8);
 // Constant buffer (b0 → binding 300)
 ConstantBuffer<ComputeClusterTilingParams> g_Params : register(b0);
 
+// Helper to transform float4 by localToWorld (stored as 3 float4 rows)
+float3 transformByLocalToWorld(float4 v)
+{
+    return float3(
+        dot(g_Params.localToWorld[0], v),
+        dot(g_Params.localToWorld[1], v),
+        dot(g_Params.localToWorld[2], v)
+    );
+}
+
 const static uint32_t nSamples = kComputeClusterTilingWaves * kNumWaveSurfaceUVSamples;
 groupshared LimitFrame samples[nSamples];
 
@@ -204,7 +217,7 @@ float FrustumVisibility(SubdivisionEvaluatorHLSL subd, uint iLane)
         float3 cp = subd.m_vertexControlPoints[index];
 
         float4 p = { cp.x, cp.y, cp.z, 1.0f };
-        float3 pWorld = mul(g_Params.localToWorld, p);
+        float3 pWorld = transformByLocalToWorld(p);
         float4 pClip = mul(g_Params.matWorldToClip, float4(pWorld, 1.0f));
 
         uint16_t bits = 0u;
@@ -362,7 +375,7 @@ float CalculateEdgeVisibility(uint32_t iLane, uint32_t waveSampleOffset, float v
             if (!IsParallel(t0, t1))
             {
                 float3 nobj = cross(t0, t1);
-                float3 nworld = normalize(mul(g_Params.localToWorld, float4(nobj, 0.f)).xyz);
+                float3 nworld = normalize(transformByLocalToWorld(float4(nobj, 0.f)));
                 float cosTheta = dot(normalize(pworld[i] - g_Params.cameraPos), nworld);
                 float backfaceFactor = smoothstep(.6f, 1.f, cosTheta);
 
@@ -454,7 +467,7 @@ void WaveEvaluateBSplinePatch8(uint32_t iWave,
 float CalculateEdgeRates(LimitFrame limitFrame)
 {
 #if TESS_MODE == TESS_MODE_SPHERICAL_PROJECTION
-    const float3 poi = mul(g_Params.localToWorld, float4(limitFrame.p, 1.0f)).xyz;
+    const float3 poi = transformByLocalToWorld(float4(limitFrame.p, 1.0f));
     const float distance = max(length(poi - g_Params.cameraPos), 0.01f);
     float edgeRate = float(g_Params.viewportSize.y) * g_Params.fineTessellationRate / distance;
     return edgeRate;
@@ -482,7 +495,7 @@ uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, float visibility, 
     float segmentRate = iLane < 4 ? CalculateEdgeRates(samples[waveSampleOffset + 2 * iLane + 1]) : .0f;
     if (iLane < kNumWaveSurfaceUVSamples)
     {
-        samples[waveSampleOffset + iLane].p = mul(g_Params.localToWorld, float4(samples[waveSampleOffset + iLane].p, 1.0)).xyz;
+        samples[waveSampleOffset + iLane].p = transformByLocalToWorld(float4(samples[waveSampleOffset + iLane].p, 1.0));
     }
     float edgeLength = length(samples[waveSampleOffset + (iLane + 1) % kNumWaveSurfaceUVSamples].p - samples[waveSampleOffset + iLane % kNumWaveSurfaceUVSamples].p);
 
@@ -727,6 +740,17 @@ void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
 
     SHADER_DEBUG_INIT(u_Debug, uint2(g_Params.debugSurfaceIndex, g_Params.debugLaneIndex), uint2(iSurface, iLane));
 
+    // Debug: Log surface info for first lane of first wave only to avoid spam
+    if (iLane == 0 && iWave == 0)
+    {
+        uint32_t field0 = t_VertexSurfaceDescriptors[iSurface].field0;
+        uint32_t hasLimit = t_VertexSurfaceDescriptors[iSurface].HasLimit() ? 1u : 0u;
+        SHADER_DEBUG_FORCE(uint4(iSurface, field0, hasLimit, g_Params.surfaceEnd));
+        // Debug struct alignment: print key fields to find offset mismatch
+        SHADER_DEBUG_FORCE(float4(g_Params.cameraPos.x, g_Params.cameraPos.y, g_Params.cameraPos.z, g_Params.aabb.m_min.x));
+        SHADER_DEBUG_FORCE(uint4(g_Params.firstGeometryIndex, g_Params.isolationLevel, asuint(g_Params.fineTessellationRate), asuint(g_Params.coarseTessellationRate)));
+    }
+
 #if ENABLE_GROUP_ATOMICS
     if (iLane == 0 && iWave == 0)
     {
@@ -805,6 +829,18 @@ void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
     rSampler.edgeSegments[1] = WaveReadLaneAt(edgeSegments, 1);
     rSampler.edgeSegments[2] = WaveReadLaneAt(edgeSegments, 2);
     rSampler.edgeSegments[3] = WaveReadLaneAt(edgeSegments, 3);
+
+    // Debug: Log visibility and edge segments for first lane of first wave
+    if (iLane == 0 && iWave == 0)
+    {
+        uint16_t2 gridSize = rSampler.GridSize();
+        uint32_t triangles = 2u * (uint32_t)gridSize.x * (uint32_t)gridSize.y;
+        SHADER_DEBUG_FORCE(uint4(iSurface, (uint32_t)rSampler.edgeSegments[0] | ((uint32_t)rSampler.edgeSegments[1] << 16),
+                                 (uint32_t)rSampler.edgeSegments[2] | ((uint32_t)rSampler.edgeSegments[3] << 16), triangles));
+        // Debug the actual param values
+        SHADER_DEBUG_FORCE(float4(g_Params.coarseTessellationRate, g_Params.fineTessellationRate, tessFactor, visibility));
+        SHADER_DEBUG_FORCE(float4((float)gridSize.x, (float)gridSize.y, (float)g_Params.viewportSize.x, (float)g_Params.viewportSize.y));
+    }
 
     WriteSurfaceWave(iWave, iLane, iSurface, rSampler);
 }

@@ -41,7 +41,7 @@ struct ComputeClusterTilingParams
     uint32_t debugLaneIndex;
     
     float4x4 matWorldToClip;
-    float3x4 localToWorld;
+    float4 localToWorld[3];  // 3 rows of float4 (row-major 3x4 matrix, 48 bytes)
 
     float3 cameraPos;
     float pad1;

@@ -1012,14 +1012,29 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     const auto& localToWorld = instance.localToWorld;
     RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling - firstGeometryIndex=", firstGeometryIndex));
 
-    if (m_tessellatorConfig.debugSurfaceIndex >= 0 &&
-        m_tessellatorConfig.debugLaneIndex >= 0)
-    {
-        commandList->clearBufferUInt(m_debugBuffer.Get(), 0);
-    }
+    // ALWAYS clear debug buffer for debugging (not conditional)
+    commandList->clearBufferUInt(m_debugBuffer.Get(), 0);
+    RTXMG_LOG("RTX MegaGeo: Debug buffer cleared unconditionally");
 
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating params");
     ComputeClusterTilingParams params = {};
+
+    // Debug: Log struct layout - trace all fields to find alignment mismatch
+    Logger::info(str::format("RTX MegaGeo: STRUCT LAYOUT - sizeof=", sizeof(ComputeClusterTilingParams)));
+    Logger::info(str::format("  offset(surfaceStart)=", offsetof(ComputeClusterTilingParams, surfaceStart),
+        " offset(matWorldToClip)=", offsetof(ComputeClusterTilingParams, matWorldToClip),
+        " offset(localToWorld)=", offsetof(ComputeClusterTilingParams, localToWorld)));
+    Logger::info(str::format("  offset(cameraPos)=", offsetof(ComputeClusterTilingParams, cameraPos),
+        " offset(aabb)=", offsetof(ComputeClusterTilingParams, aabb),
+        " offset(edgeSegments)=", offsetof(ComputeClusterTilingParams, edgeSegments)));
+    Logger::info(str::format("  offset(firstGeometryIndex)=", offsetof(ComputeClusterTilingParams, firstGeometryIndex),
+        " offset(fineTessellationRate)=", offsetof(ComputeClusterTilingParams, fineTessellationRate),
+        " offset(viewportSize)=", offsetof(ComputeClusterTilingParams, viewportSize)));
+    Logger::info(str::format("  sizeof(float4)=", sizeof(float4),
+        " sizeof(float3)=", sizeof(float3),
+        " sizeof(Box3)=", sizeof(Box3),
+        " sizeof(float4x4)=", sizeof(float4x4)));
+
     params.debugSurfaceIndex = uint32_t(m_tessellatorConfig.debugSurfaceIndex);
     params.debugLaneIndex = uint32_t(m_tessellatorConfig.debugLaneIndex);
     RTXMG_LOG(str::format("RTX MegaGeo: params - camera ptr=", (void*)m_tessellatorConfig.camera));
@@ -1035,21 +1050,13 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     memcpy(&params.matWorldToClip, &viewProj.data[0][0], sizeof(float) * 16);
 
     RTXMG_LOG("RTX MegaGeo: params - copying localToWorld");
-    // Convert to column-major 3x4 format matching affineToColumnMajor from donut
-    // DXVK Matrix4 is row-major: data[row][col], with translation in data[3]
-    float* m = params.localToWorld.m_data;
-    m[0] = localToWorld.data[0][0];  // col0: m00
-    m[1] = localToWorld.data[1][0];  // col0: m10
-    m[2] = localToWorld.data[2][0];  // col0: m20
-    m[3] = localToWorld.data[3][0];  // col0: tx
-    m[4] = localToWorld.data[0][1];  // col1: m01
-    m[5] = localToWorld.data[1][1];  // col1: m11
-    m[6] = localToWorld.data[2][1];  // col1: m21
-    m[7] = localToWorld.data[3][1];  // col1: ty
-    m[8] = localToWorld.data[0][2];  // col2: m02
-    m[9] = localToWorld.data[1][2];  // col2: m12
-    m[10] = localToWorld.data[2][2]; // col2: m22
-    m[11] = localToWorld.data[3][2]; // col2: tz
+    // Use column-major format matching sample's affineToColumnMajor (48 bytes = 3 x float4)
+    // Row 0: (m00, m10, m20, tx) - column 0 of 3x3 + tx
+    // Row 1: (m01, m11, m21, ty) - column 1 of 3x3 + ty
+    // Row 2: (m02, m12, m22, tz) - column 2 of 3x3 + tz
+    params.localToWorld[0] = float4(localToWorld.data[0][0], localToWorld.data[1][0], localToWorld.data[2][0], localToWorld.data[3][0]);
+    params.localToWorld[1] = float4(localToWorld.data[0][1], localToWorld.data[1][1], localToWorld.data[2][1], localToWorld.data[3][1]);
+    params.localToWorld[2] = float4(localToWorld.data[0][2], localToWorld.data[1][2], localToWorld.data[2][2], localToWorld.data[3][2]);
 
     params.viewportSize.x = float(m_tessellatorConfig.viewportSize.x);
     params.viewportSize.y = float(m_tessellatorConfig.viewportSize.y);
@@ -1062,12 +1069,15 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     params.isolationLevel = m_tessellatorConfig.isolationLevel;
     params.coarseTessellationRate = m_tessellatorConfig.coarseTessellationRate;
     params.fineTessellationRate = m_tessellatorConfig.fineTessellationRate;
+    Logger::info(str::format("RTX MegaGeo: tessRates - coarse=", params.coarseTessellationRate,
+        " fine=", params.fineTessellationRate,
+        " tessFactor=", params.coarseTessellationRate / params.fineTessellationRate));
     RTXMG_LOG("RTX MegaGeo: params - getting camera eye");
 
-    // Convert dxvk Vector3 to float3
+    // Convert dxvk Vector3 to float4 (w = padding, C++ float3 is 16 bytes breaking alignment)
     auto eyePos = m_tessellatorConfig.camera->GetEye();
     RTXMG_LOG("RTX MegaGeo: params - setting cameraPos");
-    params.cameraPos = float3(eyePos.x, eyePos.y, eyePos.z);
+    params.cameraPos = float4(eyePos.x, eyePos.y, eyePos.z, 0.0f);
 
     // Transform aabb from local space to world space using localToWorld matrix
     // This matches the sample's: params.aabb = subdivisionSurface.m_aabb * localToWorld;
@@ -1076,7 +1086,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         auto& aabb = subdivisionSurface.m_aabb;
 
         // Start with translation (DXVK Matrix4 is row-major, translation in row 3)
-        float3 translation = float3(localToWorld.data[3][0], localToWorld.data[3][1], localToWorld.data[3][2]);
+        float4 translation = float4(localToWorld.data[3][0], localToWorld.data[3][1], localToWorld.data[3][2], 0.0f);
         params.aabb.m_min = translation;
         params.aabb.m_max = translation;
 
@@ -1091,16 +1101,24 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             // Scale by local min and max (aabb.m_mins is float[3])
             float minVal = aabb.m_mins[i];
             float maxVal = aabb.m_maxs[i];
-            float3 e = float3(minVal * rowX, minVal * rowY, minVal * rowZ);
-            float3 f = float3(maxVal * rowX, maxVal * rowY, maxVal * rowZ);
+            float4 e = float4(minVal * rowX, minVal * rowY, minVal * rowZ, 0.0f);
+            float4 f = float4(maxVal * rowX, maxVal * rowY, maxVal * rowZ, 0.0f);
 
             // Accumulate min/max contributions
-            params.aabb.m_min = params.aabb.m_min + float3(std::min(e.x, f.x), std::min(e.y, f.y), std::min(e.z, f.z));
-            params.aabb.m_max = params.aabb.m_max + float3(std::max(e.x, f.x), std::max(e.y, f.y), std::max(e.z, f.z));
+            params.aabb.m_min = float4(
+                params.aabb.m_min.x + std::min(e.x, f.x),
+                params.aabb.m_min.y + std::min(e.y, f.y),
+                params.aabb.m_min.z + std::min(e.z, f.z), 0.0f);
+            params.aabb.m_max = float4(
+                params.aabb.m_max.x + std::max(e.x, f.x),
+                params.aabb.m_max.y + std::max(e.y, f.y),
+                params.aabb.m_max.z + std::max(e.z, f.z), 0.0f);
         }
 
         // Debug: Log transformed aabb values
-        float3 extent = params.aabb.m_max - params.aabb.m_min;
+        float3 extent = float3(params.aabb.m_max.x - params.aabb.m_min.x,
+                               params.aabb.m_max.y - params.aabb.m_min.y,
+                               params.aabb.m_max.z - params.aabb.m_min.z);
         float diagonalLength = sqrt(extent.x * extent.x + extent.y * extent.y + extent.z * extent.z);
         Logger::info(str::format("RTX MegaGeo: aabb (world space) min=(", params.aabb.m_min.x, ",", params.aabb.m_min.y, ",", params.aabb.m_min.z,
             ") max=(", params.aabb.m_max.x, ",", params.aabb.m_max.y, ",", params.aabb.m_max.z, ") diag=", diagonalLength));
@@ -1229,7 +1247,14 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(2, scene.GetMaterialBuffer()))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(3, subdivisionSurface.m_surfaceToGeometryIndexBuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(4, subdivisionSurface.m_vertexDeviceData.surfaceDescriptors))
-        .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(5, subdivisionSurface.m_vertexDeviceData.controlPointIndices))
+        .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(5, subdivisionSurface.m_vertexDeviceData.controlPointIndices));
+    // DEBUG: Log surface descriptor buffer info
+    Logger::info(str::format("RTX MegaGeo: Binding SurfaceDescriptors SRV(4) - buffer=",
+        (void*)subdivisionSurface.m_vertexDeviceData.surfaceDescriptors.Get(),
+        " bytes=", subdivisionSurface.m_vertexDeviceData.surfaceDescriptors ?
+            subdivisionSurface.m_vertexDeviceData.surfaceDescriptors->getDesc().byteSize : 0,
+        " surfaceCount=", surfaceCount));
+    bindingSetDesc
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(6, subdivisionSurface.m_vertexDeviceData.patchPointsOffsets))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(7, subdivisionSurface.GetTopologyMap()->plansBuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(8, subdivisionSurface.GetTopologyMap()->subpatchTreesArraysBuffer))
@@ -1445,16 +1470,30 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         RTXMG_LOG("RTX MegaGeo: Loop mode - loop complete");
     }
 
-    // Only download debug output when debug indices are set (matches sample behavior)
-    if (m_tessellatorConfig.debugSurfaceIndex >= 0 &&
-        m_tessellatorConfig.debugLaneIndex >= 0)
+    // ALWAYS download and log debug output for debugging
     {
-        Logger::info(str::format("RTX MegaGeo: Cluster Tiling Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name,
-            " (Surface:", m_tessellatorConfig.debugSurfaceIndex, ", Lane:", m_tessellatorConfig.debugLaneIndex, ")"));
+        Logger::info(str::format("RTX MegaGeo: UNCONDITIONAL Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name));
 
         auto debugOutput = m_debugBuffer.Download(commandList);
         uint numElements = debugOutput.front().payloadType;
-        vectorlog::Log(debugOutput, ShaderDebugElement::OutputLambda, vectorlog::FormatOptions{ .wrap = false, .header = false, .elementIndex = false, .startIndex = 1, .count = numElements });
+        Logger::info(str::format("RTX MegaGeo: Debug buffer numElements=", numElements));
+
+        // Log first 40 debug entries manually for visibility
+        for (uint32_t i = 1; i <= std::min(numElements, 40u); ++i) {
+            const auto& elem = debugOutput[i];
+            // Check if this is a float type (PayloadType_Float = 9 to PayloadType_Float4 = 12)
+            if (elem.payloadType >= 9 && elem.payloadType <= 12) {
+                Logger::info(str::format("RTX MegaGeo: Debug[", i, "] line=", elem.lineNumber,
+                    " floats=[", elem.floatData.x, ",", elem.floatData.y, ",", elem.floatData.z, ",", elem.floatData.w, "]"));
+            } else {
+                Logger::info(str::format("RTX MegaGeo: Debug[", i, "] line=", elem.lineNumber,
+                    " vals=[", elem.uintData.x, ",", elem.uintData.y, ",", elem.uintData.z, ",", elem.uintData.w, "]"));
+            }
+        }
+
+        if (numElements > 0) {
+            vectorlog::Log(debugOutput, ShaderDebugElement::OutputLambda, vectorlog::FormatOptions{ .wrap = false, .header = false, .elementIndex = false, .startIndex = 1, .count = numElements });
+        }
     }
     RTXMG_LOG(str::format("RTX MegaGeo: ComputeInstanceClusterTiling complete for instance ", instanceIndex));
 

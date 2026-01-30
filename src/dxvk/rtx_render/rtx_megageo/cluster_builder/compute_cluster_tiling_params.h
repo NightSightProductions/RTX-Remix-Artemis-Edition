@@ -30,16 +30,6 @@
 
 #include "../utils/box3.h"
 
-#ifdef __cplusplus
-// Define float3x4 for C++ (3x4 matrix = 3 rows of float4)
-struct float3x4 {
-    union {
-        float4 r[3];          // 3 rows of float4
-        float m_data[12];     // Raw data access for affineToColumnMajor
-    };
-};
-#endif
-
 static const uint32_t kComputeClusterTilingWaves = 4;
 
 struct ComputeClusterTilingParams
@@ -48,12 +38,11 @@ struct ComputeClusterTilingParams
     uint32_t surfaceEnd; //exclusive
     uint32_t debugSurfaceIndex;
     uint32_t debugLaneIndex;
-    
-    float4x4 matWorldToClip;
-    float3x4 localToWorld;
 
-    float3 cameraPos;
-    float pad1;
+    float4x4 matWorldToClip;
+    float4 localToWorld[3];  // 3 rows of float4 (row-major 3x4 matrix, 48 bytes)
+
+    float4 cameraPos;  // xyz = camera position, w = padding (C++ float3 is 16 bytes, breaks alignment)
 
     Box3 aabb;
 

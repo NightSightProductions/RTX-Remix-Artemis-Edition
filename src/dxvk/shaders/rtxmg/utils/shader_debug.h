@@ -23,7 +23,7 @@
 #ifndef SHADER_DEBUG_H // using instead of "#pragma once" due to https://github.com/microsoft/DirectXShaderCompiler/issues/3943
 #define SHADER_DEBUG_H
 
-#define ENABLE_SHADER_DEBUG 0
+#define ENABLE_SHADER_DEBUG 1
 
 #ifdef __cplusplus
 #include <ostream>

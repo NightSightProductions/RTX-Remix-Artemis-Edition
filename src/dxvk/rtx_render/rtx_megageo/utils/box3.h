@@ -32,19 +32,57 @@
 #ifdef __cplusplus
 #include <algorithm>  // For std::min, std::max
 
-// Component-wise min/max for float3 in C++
-inline float3 min_float3(const float3& a, const float3& b) {
-    return float3(std::min(a.x, b.x), std::min(a.y, b.y), std::min(a.z, b.z));
-}
-
-inline float3 max_float3(const float3& a, const float3& b) {
-    return float3(std::max(a.x, b.x), std::max(a.y, b.y), std::max(a.z, b.z));
-}
-#endif
-
+// Use float4 for constant buffer compatibility (C++ float3 is 16 bytes, breaking alignment)
+// This ensures Box3 is exactly 32 bytes in both C++ and HLSL
 struct Box3
 {
-    // Alignment for constant buffer
+    float4 m_min;  // xyz = min, w = padding
+    float4 m_max;  // xyz = max, w = padding
+
+    void Init()
+    {
+        m_min = float4(1e37f, 1e37f, 1e37f, 0.0f);
+        m_max = float4(-1e37f, -1e37f, -1e37f, 0.0f);
+    }
+
+    void Init(float3 v0, float3 v1, float3 v2)
+    {
+        float3 minV(std::min({v0.x, v1.x, v2.x}), std::min({v0.y, v1.y, v2.y}), std::min({v0.z, v1.z, v2.z}));
+        float3 maxV(std::max({v0.x, v1.x, v2.x}), std::max({v0.y, v1.y, v2.y}), std::max({v0.z, v1.z, v2.z}));
+        m_min = float4(minV.x, minV.y, minV.z, 0.0f);
+        m_max = float4(maxV.x, maxV.y, maxV.z, 0.0f);
+    }
+
+    void Include(float3 p)
+    {
+        m_min = float4(std::min(m_min.x, p.x), std::min(m_min.y, p.y), std::min(m_min.z, p.z), 0.0f);
+        m_max = float4(std::max(m_max.x, p.x), std::max(m_max.y, p.y), std::max(m_max.z, p.z), 0.0f);
+    }
+
+    float3 Extent()
+    {
+        return float3(m_max.x - m_min.x, m_max.y - m_min.y, m_max.z - m_min.z);
+    }
+
+    bool Valid()
+    {
+        return m_min.x <= m_max.x &&
+            m_min.y <= m_max.y &&
+            m_min.z <= m_max.z;
+    }
+
+    Box3()
+    {
+        Init();
+    }
+};
+
+static_assert(sizeof(Box3) == 32, "Box3 must be exactly 32 bytes to match HLSL layout");
+
+#else
+// HLSL/Slang version - uses float3 + pad which is naturally 32 bytes
+struct Box3
+{
     float3 m_min;
     float pad0;
     float3 m_max;
@@ -59,24 +97,14 @@ struct Box3
 
     void Init(float3 v0, float3 v1, float3 v2)
     {
-#ifdef __cplusplus
-        m_min = min_float3(v0, min_float3(v1, v2));
-        m_max = max_float3(v0, max_float3(v1, v2));
-#else
         m_min = min(v0, min(v1, v2));
         m_max = max(v0, max(v1, v2));
-#endif
     }
 
     void Include(float3 p)
     {
-#ifdef __cplusplus
-        m_min = min_float3(m_min, p);
-        m_max = max_float3(m_max, p);
-#else
         m_min = min(m_min, p);
         m_max = max(m_max, p);
-#endif
     }
 
     float3 Extent()
@@ -90,18 +118,10 @@ struct Box3
             m_min.y <= m_max.y &&
             m_min.z <= m_max.z;
     }
-
-#ifdef __cplusplus
-    Box3()
-    {
-        Init();
-    }
-#endif
 };
+#endif
 
-#if defined(__cplusplus)
-static_assert(sizeof(Box3) % 16 == 0);
-#elif defined(TARGET_D3D12)
+#if defined(TARGET_D3D12)
 _Static_assert(sizeof(Box3) % 16 == 0, "Must be 16 byte aligned for constant buffer");
 #endif
 
