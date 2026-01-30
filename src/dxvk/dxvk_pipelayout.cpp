@@ -20,6 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 #include <cstring>
+#include <unordered_set>
 
 #include "dxvk_descriptor.h"
 #include "dxvk_limits.h"
@@ -71,7 +72,16 @@ namespace dxvk {
       if (m_descriptorSlots[i].slot == slot)
         return i;
     }
-    
+
+    // Debug: log missing slots (only once per slot value to avoid spam)
+    // This is expected for bindings in other descriptor sets (e.g., HiZ textures at vk::binding(0, 1))
+    static std::unordered_set<uint32_t> loggedMissingSlots;
+    if (loggedMissingSlots.find(slot) == loggedMissingSlots.end()) {
+      loggedMissingSlots.insert(slot);
+      // Only log as info, not warning - missing slots are expected for multi-descriptor-set shaders
+      Logger::info(str::format("DxvkDescriptorSlotMapping::getBindingId - slot ", slot,
+        " not in set 0 mapping (may be in another descriptor set)"));
+    }
     return InvalidBinding;
   }
   

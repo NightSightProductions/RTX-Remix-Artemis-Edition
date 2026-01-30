@@ -1400,11 +1400,14 @@ namespace dxvk {
     // Check if any instances use cluster BLAS before initializing
     bool hasClusterBlas = false;
     uint32_t clusterBlasCount = 0;
+    uint32_t nullBlasCount = 0;
+    uint32_t validBlasCount = 0;
     static uint32_t logCount = 0;
     bool shouldLogThisFrame = (logCount < 200); // Log first 200 frames
     logCount++;
     for (const auto& inst : instances) {
       if (inst && inst->getBlas()) {
+        validBlasCount++;
         BlasEntry* blas = inst->getBlas();
         if (shouldLogThisFrame && blas->isClusterBlas()) {
           Logger::info(str::format("RTX MegaGeo buildBlases: FOUND ClusterBlas! inst=", (void*)inst, " blas=", (void*)blas));
@@ -1413,7 +1416,17 @@ namespace dxvk {
           hasClusterBlas = true;
           clusterBlasCount++;
         }
+      } else if (inst) {
+        nullBlasCount++;
       }
+    }
+
+    // Log statistics every 60 frames to help debug timing issues
+    static uint32_t statsLogCounter = 0;
+    if ((statsLogCounter++ % 60) == 0) {
+      Logger::info(str::format("RTX MegaGeo buildBlases: instances=", instances.size(),
+                               " validBlas=", validBlasCount, " nullBlas=", nullBlasCount,
+                               " clusterBlas=", clusterBlasCount));
     }
 
     static bool loggedOnce = false;

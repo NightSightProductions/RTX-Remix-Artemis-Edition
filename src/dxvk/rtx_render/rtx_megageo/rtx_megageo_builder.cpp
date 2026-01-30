@@ -20,7 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 // Enable verbose MegaGeo logging for debugging
-#define RTXMG_VERBOSE_LOGGING 0
+#define RTXMG_VERBOSE_LOGGING 1
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -417,14 +417,16 @@ namespace dxvk {
     float aspectRatio = proj11 / proj00;
     m_tessellationCamera.SetFovY(fovY);
     m_tessellationCamera.SetAspectRatio(aspectRatio);
-    // Extract near/far planes
-    float proj22 = static_cast<float>(projMat[2][2]);
-    float proj32 = static_cast<float>(projMat[3][2]);
-    float zNear = proj32 / (proj22 - 1.0f);
-    float zFar = proj32 / (proj22 + 1.0f);
+    // Get near/far planes directly from RtCamera instead of extracting from projection matrix
+    float zNear = rtCamera.getNearPlane();
+    float zFar = rtCamera.getFarPlane();
+    // Ensure valid positive values
+    if (zNear <= 0.0f) zNear = 0.1f;
+    if (zFar <= zNear) zFar = 10000.0f;
     m_tessellationCamera.SetNear(zNear);
     m_tessellationCamera.SetFar(zFar);
-    RTXMG_LOG(str::format("RTX MegaGeo: Camera setup - eye=(", cameraPos.x, ",", cameraPos.y, ",", cameraPos.z, ") fovY=", fovY, " aspect=", aspectRatio));
+    Logger::info(str::format("RTX MegaGeo: Camera setup - eye=(", cameraPos.x, ",", cameraPos.y, ",", cameraPos.z,
+        ") fovY=", fovY, " aspect=", aspectRatio, " near=", zNear, " far=", zFar));
 
     // CRITICAL: Initialize cluster templates BEFORE binding any image views (like HiZ)
     // The sync Downloads in template initialization close/reopen the command list

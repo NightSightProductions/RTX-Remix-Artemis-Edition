@@ -530,6 +530,26 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
     // Sort surfaces by PureBspline, Bspline, Complex types for shader optimization
     std::vector<Tmr::SurfaceDescriptor> sortedDescriptors = m_surface_table->descriptors;
 
+    // DEBUG: Log descriptor HasLimit status before sorting
+    {
+        uint32_t hasLimitCount = 0;
+        uint32_t noLimitCount = 0;
+        for (uint32_t i = 0; i < m_surfaceCount && i < 10; i++) {
+            const auto& desc = sortedDescriptors[i];
+            bool hasLimit = desc.HasLimit();
+            if (hasLimit) hasLimitCount++; else noLimitCount++;
+            dxvk::Logger::info(dxvk::str::format("SubdivSurface: Descriptor[", i, "] field0=0x",
+                std::hex, desc.field0, std::dec, " firstCP=", desc.firstControlPoint,
+                " HasLimit=", hasLimit ? "true" : "false",
+                " planIdx=", desc.GetSubdivisionPlanIndex()));
+        }
+        for (uint32_t i = 10; i < m_surfaceCount; i++) {
+            if (sortedDescriptors[i].HasLimit()) hasLimitCount++; else noLimitCount++;
+        }
+        dxvk::Logger::info(dxvk::str::format("SubdivSurface: Total ", m_surfaceCount, " descriptors: ",
+            hasLimitCount, " have limit, ", noLimitCount, " no limit"));
+    }
+
     // Always copy texcoord descriptors - matching sample behavior
     std::vector<Tmr::LinearSurfaceDescriptor> sortedTexcoordDescriptors = m_texcoord_surface_table->descriptors;
     auto surfaceToGeometryIndex = quadrangulateFaceToSubshape(*m_shape, m_surfaceCount);
@@ -632,6 +652,10 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
     }
     UpdateSurfaceOffset(SurfaceType::NoLimit, m_surfaceCount);
 
+    dxvk::Logger::info(dxvk::str::format("SubdivSurface: Surface offsets: PureBSpline=", m_surfaceOffsets[0],
+        " RegularBSpline=", m_surfaceOffsets[1], " Limit=", m_surfaceOffsets[2],
+        " NoLimit=", m_surfaceOffsets[3], " total=", m_surfaceCount));
+
     std::vector<uint32_t> patchPointsOffsets(m_surfaceCount + 1, 0);
     for (uint32_t iSurface = 0; iSurface < m_surfaceCount; ++iSurface)
     {
@@ -666,6 +690,17 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
             ? 0
             : desc.GetFaceSize() + 1;
         texcoordPatchPointsOffsets[i + 1] = texcoordPatchPointsOffsets[i] + numPatchPoints;
+    }
+
+    // Log raw field0 values being uploaded to GPU
+    {
+        dxvk::Logger::info(dxvk::str::format("SubdivSurface: Uploading ", sortedDescriptors.size(), " descriptors to GPU"));
+        for (uint32_t i = 0; i < std::min(size_t(5), sortedDescriptors.size()); i++) {
+            dxvk::Logger::info(dxvk::str::format("SubdivSurface: GPU Descriptor[", i, "] field0=0x",
+                std::hex, sortedDescriptors[i].field0, std::dec,
+                " (bit0=", (sortedDescriptors[i].field0 & 1), ")",
+                " firstCP=", sortedDescriptors[i].firstControlPoint));
+        }
     }
 
     m_vertexDeviceData.surfaceDescriptors =

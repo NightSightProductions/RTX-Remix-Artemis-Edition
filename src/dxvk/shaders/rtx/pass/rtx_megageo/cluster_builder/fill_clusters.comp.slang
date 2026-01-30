@@ -60,45 +60,45 @@ groupshared float3 s_patchControlPoints[kPatchSize * kFillClustersVerticesWaves]
 #include "rtx/pass/rtx_megageo/cluster_builder/displacement.hlsli"
 #include "rtxmg/subdivision/osd_ports/tmr/surfaceDescriptor.h"
 
-// Vulkan bindings matching NVRHI CreateBindingSetAndLayout order (set 0)
-// SRVs (bindings 0-19)
-[[vk::binding(0, 0)]] StructuredBuffer<GridSampler> t_GridSamplers : register(t0);
-[[vk::binding(1, 0)]] StructuredBuffer<uint2> t_ClusterOffsetCounts : register(t1);
-[[vk::binding(2, 0)]] StructuredBuffer<Cluster> t_Clusters : register(t2);
-[[vk::binding(3, 0)]] StructuredBuffer<float3> t_VertexControlPoints : register(t3);
-[[vk::binding(4, 0)]] StructuredBuffer<SurfaceDescriptor> t_VertexSurfaceDescriptors : register(t4);
-[[vk::binding(5, 0)]] StructuredBuffer<Index> t_VertexControlPointIndices : register(t5);
-[[vk::binding(6, 0)]] StructuredBuffer<uint32_t> t_VertexPatchPointsOffsets : register(t6);
-[[vk::binding(7, 0)]] StructuredBuffer<SubdivisionPlanHLSL> t_Plans : register(t7);
-[[vk::binding(8, 0)]] StructuredBuffer<uint32_t> t_SubpatchTrees : register(t8);
-[[vk::binding(9, 0)]] StructuredBuffer<Index> t_PatchPointIndices : register(t9);
-[[vk::binding(10, 0)]] StructuredBuffer<float> t_StencilMatrix : register(t10);
-[[vk::binding(11, 0)]] StructuredBuffer<float3> t_VertexPatchPoints : register(t11);
-[[vk::binding(12, 0)]] StructuredBuffer<GeometryData> t_GeometryData : register(t12);
-[[vk::binding(13, 0)]] StructuredBuffer<MaterialConstants> t_MaterialConstants : register(t13);
-[[vk::binding(14, 0)]] StructuredBuffer<uint16_t> t_SurfaceToGeometryIndex : register(t14);
-[[vk::binding(15, 0)]] StructuredBuffer<LinearSurfaceDescriptor> t_TexCoordSurfaceDescriptors : register(t15);
-[[vk::binding(16, 0)]] StructuredBuffer<Index> t_TexCoordControlPointIndices : register(t16);
-[[vk::binding(17, 0)]] StructuredBuffer<uint32_t> t_TexCoordPatchPointsOffsets : register(t17);
-[[vk::binding(18, 0)]] StructuredBuffer<float2> t_TexCoordPatchPoints : register(t18);
-[[vk::binding(19, 0)]] StructuredBuffer<float2> t_TexCoords : register(t19);
+// Slang maps HLSL registers to Vulkan bindings: t→0-99, s→100-199, u→200-299, b→300-399
+// SRVs (t0-t19 → bindings 0-19)
+StructuredBuffer<GridSampler> t_GridSamplers : register(t0);
+StructuredBuffer<uint2> t_ClusterOffsetCounts : register(t1);
+StructuredBuffer<Cluster> t_Clusters : register(t2);
+StructuredBuffer<float3> t_VertexControlPoints : register(t3);
+StructuredBuffer<SurfaceDescriptor> t_VertexSurfaceDescriptors : register(t4);
+StructuredBuffer<Index> t_VertexControlPointIndices : register(t5);
+StructuredBuffer<uint32_t> t_VertexPatchPointsOffsets : register(t6);
+StructuredBuffer<SubdivisionPlanHLSL> t_Plans : register(t7);
+StructuredBuffer<uint32_t> t_SubpatchTrees : register(t8);
+StructuredBuffer<Index> t_PatchPointIndices : register(t9);
+StructuredBuffer<float> t_StencilMatrix : register(t10);
+StructuredBuffer<float3> t_VertexPatchPoints : register(t11);
+StructuredBuffer<GeometryData> t_GeometryData : register(t12);
+StructuredBuffer<MaterialConstants> t_MaterialConstants : register(t13);
+StructuredBuffer<uint16_t> t_SurfaceToGeometryIndex : register(t14);
+StructuredBuffer<LinearSurfaceDescriptor> t_TexCoordSurfaceDescriptors : register(t15);
+StructuredBuffer<Index> t_TexCoordControlPointIndices : register(t16);
+StructuredBuffer<uint32_t> t_TexCoordPatchPointsOffsets : register(t17);
+StructuredBuffer<float2> t_TexCoordPatchPoints : register(t18);
+StructuredBuffer<float2> t_TexCoords : register(t19);
 
-// Sampler (binding 20)
-[[vk::binding(20, 0)]] SamplerState s_DisplacementSampler : register(s0);
+// Bindless texture array for displacement mapping (t20 → binding 20)
+Texture2D bindlessTextures[] : register(t20);
 
-// UAVs (bindings 21-24)
-[[vk::binding(21, 0)]] RWStructuredBuffer<float3> u_ClusterVertexPositions : register(u0);
-[[vk::binding(22, 0)]] RWStructuredBuffer<ClusterShadingData> u_ClusterShadingData : register(u1);
-[[vk::binding(23, 0)]] RWStructuredBuffer<ShaderDebugElement> u_Debug : register(u2);
+// Sampler (s0 → binding 100)
+SamplerState s_DisplacementSampler : register(s0);
+
+// UAVs (u0-u3 → bindings 200-203)
+RWStructuredBuffer<float3> u_ClusterVertexPositions : register(u0);
+RWStructuredBuffer<ClusterShadingData> u_ClusterShadingData : register(u1);
+RWStructuredBuffer<ShaderDebugElement> u_Debug : register(u2);
 #if VERTEX_NORMALS
-[[vk::binding(24, 0)]] RWStructuredBuffer<float3> u_ClusterVertexNormals : register(u3);
+RWStructuredBuffer<float3> u_ClusterVertexNormals : register(u3);
 #endif
 
-// Constant buffer (binding 25)
-[[vk::binding(25, 0)]] ConstantBuffer<FillClustersParams> g_TessParams : register(b0);
-
-// Bindless texture array for displacement mapping (set 1)
-[[vk::binding(0, 1)]] Texture2D bindlessTextures[] : register(t20);
+// Constant buffer (b0 → binding 300)
+ConstantBuffer<FillClustersParams> g_TessParams : register(b0);
 
 void GathererWriteLimit(LimitFrame vertexLimit, Cluster cluster, uint32_t vertexIndex)
 {

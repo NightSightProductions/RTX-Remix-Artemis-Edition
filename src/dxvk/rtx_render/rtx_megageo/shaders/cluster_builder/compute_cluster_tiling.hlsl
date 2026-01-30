@@ -740,16 +740,17 @@ void WriteSurfaceWave(uint32_t iWave, uint32_t iLane, uint32_t iSurface, GridSam
 void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
 {
     const uint32_t iLane = threadIdx.x % kComputeClusterTilingLanes;
+    const uint32_t iWave = threadIdx.x / kComputeClusterTilingLanes;
+    const uint32_t iSurface = kComputeClusterTilingWaves * groupIdx.x + iWave + g_Params.surfaceStart;
+
+    // Initialize debug FIRST before any debug calls
+    SHADER_DEBUG_INIT(u_Debug, uint2(g_Params.debugSurfaceIndex, g_Params.debugLaneIndex), uint2(iSurface, iLane));
 
     // DEBUG: Log that shader is running (only from first lane of first wave of first group)
     if (threadIdx.x == 0 && groupIdx.x == 0)
     {
         SHADER_DEBUG_FORCE(uint4(100, g_Params.surfaceStart, g_Params.surfaceEnd, g_Params.maxClusters)); // marker 100 = shader entry
     }
-    const uint32_t iWave = threadIdx.x / kComputeClusterTilingLanes;
-    const uint32_t iSurface = kComputeClusterTilingWaves * groupIdx.x + iWave + g_Params.surfaceStart;
-
-    SHADER_DEBUG_INIT(u_Debug, uint2(g_Params.debugSurfaceIndex, g_Params.debugLaneIndex), uint2(iSurface, iLane));
 
 #if ENABLE_GROUP_ATOMICS
     if (iLane == 0 && iWave == 0)
@@ -776,12 +777,23 @@ void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
         return; // early out waves beyond cluster array end
     }
 
+    // DEBUG: Log the actual field0 value (only first lane of first few surfaces)
+    if (iLane == 0 && iSurface < 5)
+    {
+        uint32_t field0 = t_VertexSurfaceDescriptors[iSurface].field0;
+        uint32_t firstCP = t_VertexSurfaceDescriptors[iSurface].firstControlPoint;
+        bool hasLimit = t_VertexSurfaceDescriptors[iSurface].HasLimit();
+        SHADER_DEBUG_FORCE(uint4(150, iSurface, field0, hasLimit ? 1 : 0)); // marker 150 = descriptor info
+        SHADER_DEBUG_FORCE(uint4(151, iSurface, firstCP, numSurfaceDescriptors)); // marker 151 = firstCP and buffer size
+    }
+
     if (!HasLimit(iSurface))
     {
         // DEBUG: Log early return due to no limit (only first lane)
         if (iLane == 0)
         {
-            SHADER_DEBUG_FORCE(uint4(201, iSurface, 0, iWave)); // marker 201 = early return no limit
+            uint32_t field0 = t_VertexSurfaceDescriptors[iSurface].field0;
+            SHADER_DEBUG_FORCE(uint4(201, iSurface, field0, iWave)); // marker 201 = early return no limit, now includes field0
         }
         return; // don't process surfaces that have no limit
     }

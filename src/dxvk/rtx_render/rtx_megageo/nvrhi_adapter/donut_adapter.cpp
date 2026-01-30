@@ -127,10 +127,18 @@ static const dxvk::DxvkResourceSlot s_computeClusterTilingSlots[] = {
   { 14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoordControlPointIndices (t14)
   { 15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoordPatchPointsOffsets (t15)
   { 16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoords (t16)
-  // t_HiZBuffer array: t17 → binding 17 (9 LODs for HIZ_MAX_LODS)
-  { 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_IMAGE_VIEW_TYPE_2D, VK_ACCESS_SHADER_READ_BIT, 9 },   // t_HiZBuffer[9] (t17)
-  // bindlessTextures array: t20 → binding 20
-  { 20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // bindlessTextures (t20)
+  // HiZ textures: t17-t25 → bindings 17-25
+  { 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[0] (t17)
+  { 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[1] (t18)
+  { 19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[2] (t19)
+  { 20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[3] (t20)
+  { 21, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[4] (t21)
+  { 22, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[5] (t22)
+  { 23, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[6] (t23)
+  { 24, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[7] (t24)
+  { 25, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[8] (t25)
+  // Bindless textures: t26 → binding 26
+  { 26, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // bindlessTextures (t26)
   // Samplers: s0-s1 → bindings 100-101
   { 100, VK_DESCRIPTOR_TYPE_SAMPLER },        // s_DisplacementSampler (s0)
   { 101, VK_DESCRIPTOR_TYPE_SAMPLER },        // s_HizSampler (s1)

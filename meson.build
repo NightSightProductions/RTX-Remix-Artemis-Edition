@@ -293,6 +293,11 @@ rtx_shader_source_directory = join_paths(global_src_root_norm, 'src/dxvk/shaders
 # directory, this is just the best way currently for organizing it into the respective project it is outputting data for.
 rtx_shader_output_directory = join_paths(current_build_dir_norm, 'src/dxvk/rtx_shaders')
 
+# Include path for generated rtx_shaders headers (used by rtx_megageo and dxvk)
+# This points to the build output directory where compile_shaders.py generates .h files
+rtx_shader_output_include_path = include_directories('.', is_system: false)  # Placeholder - actual path handled via CPPFLAGS
+add_project_arguments('-I' + rtx_shader_output_directory + '/..', language: 'cpp')  # Adds src/dxvk so <rtx_shaders/xxx.h> works
+
 rtxdi_include_path = include_directories('submodules/rtxdi/rtxdi-sdk/include')
 # Need to use the include path as an argument to the shader build string,
 # and I couldn't find how to convert the IncludeDirs thing to a string... Meson.

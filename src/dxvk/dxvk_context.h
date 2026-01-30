@@ -1263,6 +1263,14 @@ namespace dxvk {
       return m_cpSet;
     }
 
+    // Get the current compute pipeline layout (for MegaGeo HiZ set binding)
+    VkPipelineLayout getComputePipelineLayout() const {
+      if (m_state.cp.pipeline != nullptr) {
+        return m_state.cp.pipeline->layout()->pipelineLayout();
+      }
+      return VK_NULL_HANDLE;
+    }
+
   protected:  
     
     Rc<DxvkDevice>          m_device;

@@ -1053,6 +1053,11 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 
     params.viewportSize.x = float(m_tessellatorConfig.viewportSize.x);
     params.viewportSize.y = float(m_tessellatorConfig.viewportSize.y);
+
+    // Update stats renderSize for profiler display
+    stats::clusterAccelSamplers.renderSize.x = static_cast<int>(m_tessellatorConfig.viewportSize.x);
+    stats::clusterAccelSamplers.renderSize.y = static_cast<int>(m_tessellatorConfig.viewportSize.y);
+
     params.firstGeometryIndex = firstGeometryIndex;
     params.isolationLevel = m_tessellatorConfig.isolationLevel;
     params.coarseTessellationRate = m_tessellatorConfig.coarseTessellationRate;
@@ -1064,22 +1069,52 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     RTXMG_LOG("RTX MegaGeo: params - setting cameraPos");
     params.cameraPos = float3(eyePos.x, eyePos.y, eyePos.z);
 
-    // Convert aabb
-    auto& aabb = subdivisionSurface.m_aabb;
-    params.aabb.m_min = float3(aabb.m_mins[0], aabb.m_mins[1], aabb.m_mins[2]);
-    params.aabb.m_max = float3(aabb.m_maxs[0], aabb.m_maxs[1], aabb.m_maxs[2]);
+    // Transform aabb from local space to world space using localToWorld matrix
+    // This matches the sample's: params.aabb = subdivisionSurface.m_aabb * localToWorld;
+    // Using the fast AABB transform algorithm from donut's box3::operator*
+    {
+        auto& aabb = subdivisionSurface.m_aabb;
 
-    // Debug: Log aabb values - if extent is 0, edge rate will be infinity (div by 0)
-    float3 extent = params.aabb.m_max - params.aabb.m_min;
-    float diagonalLength = sqrt(extent.x * extent.x + extent.y * extent.y + extent.z * extent.z);
-    Logger::info(str::format("RTX MegaGeo: aabb min=(", aabb.m_mins[0], ",", aabb.m_mins[1], ",", aabb.m_mins[2],
-        ") max=(", aabb.m_maxs[0], ",", aabb.m_maxs[1], ",", aabb.m_maxs[2], ") diag=", diagonalLength));
+        // Start with translation (DXVK Matrix4 is row-major, translation in row 3)
+        float3 translation = float3(localToWorld.data[3][0], localToWorld.data[3][1], localToWorld.data[3][2]);
+        params.aabb.m_min = translation;
+        params.aabb.m_max = translation;
+
+        // Apply the linear transform (rotation + scale) to bounds
+        // For each axis of the local AABB, compute contribution to world AABB
+        for (int i = 0; i < 3; i++) {
+            // Get row i of the linear part (columns 0-2 of Matrix4)
+            float rowX = localToWorld.data[i][0];
+            float rowY = localToWorld.data[i][1];
+            float rowZ = localToWorld.data[i][2];
+
+            // Scale by local min and max (aabb.m_mins is float[3])
+            float minVal = aabb.m_mins[i];
+            float maxVal = aabb.m_maxs[i];
+            float3 e = float3(minVal * rowX, minVal * rowY, minVal * rowZ);
+            float3 f = float3(maxVal * rowX, maxVal * rowY, maxVal * rowZ);
+
+            // Accumulate min/max contributions
+            params.aabb.m_min = params.aabb.m_min + float3(std::min(e.x, f.x), std::min(e.y, f.y), std::min(e.z, f.z));
+            params.aabb.m_max = params.aabb.m_max + float3(std::max(e.x, f.x), std::max(e.y, f.y), std::max(e.z, f.z));
+        }
+
+        // Debug: Log transformed aabb values
+        float3 extent = params.aabb.m_max - params.aabb.m_min;
+        float diagonalLength = sqrt(extent.x * extent.x + extent.y * extent.y + extent.z * extent.z);
+        Logger::info(str::format("RTX MegaGeo: aabb (world space) min=(", params.aabb.m_min.x, ",", params.aabb.m_min.y, ",", params.aabb.m_min.z,
+            ") max=(", params.aabb.m_max.x, ",", params.aabb.m_max.y, ",", params.aabb.m_max.z, ") diag=", diagonalLength));
+    }
 
     params.enableBackfaceVisibility = m_tessellatorConfig.enableBackfaceVisibility;
     params.enableFrustumVisibility = m_tessellatorConfig.enableFrustumVisibility;
     params.enableHiZVisibility = m_tessellatorConfig.enableHiZVisibility && m_tessellatorConfig.zbuffer != nullptr;
     params.edgeSegments = m_tessellatorConfig.edgeSegments;
     params.globalDisplacementScale = m_tessellatorConfig.displacementScale;
+
+    ONCE(Logger::info(str::format("RTX MegaGeo: Visibility params - frustum=", params.enableFrustumVisibility,
+        " backface=", params.enableBackfaceVisibility, " HiZ=", params.enableHiZVisibility,
+        " edgeSegments=(", params.edgeSegments.x, ",", params.edgeSegments.y, ",", params.edgeSegments.z, ",", params.edgeSegments.w, ")")));
 
     params.maxClasBlocks = uint32_t(m_maxClasBytes / size_t(cluster::kClasByteAlignment));
     params.maxClusters = m_maxClusters;
@@ -1212,7 +1247,10 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, m_gridSamplersBuffer,
             nvrhi::Format::UNKNOWN,
             nvrhi::BufferRange(surfaceOffset * m_gridSamplersBuffer.GetElementBytes(), surfaceCount * m_gridSamplersBuffer.GetElementBytes())))
-        .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(1, m_tessellationCountersBuffer, nvrhi::Format::UNKNOWN, tessCounterRange))
+        .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(1, m_tessellationCountersBuffer, nvrhi::Format::UNKNOWN, tessCounterRange));
+    Logger::info(str::format("RTX MegaGeo: Binding tessCounters UAV(1) - range offset=", tessCounterRange.byteOffset,
+                             " size=", tessCounterRange.byteSize, " buffer=", (void*)m_tessellationCountersBuffer.Get()));
+    bindingSetDesc
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(2, m_clustersBuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, accels.clusterShadingDataBuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(4, m_clasIndirectArgDataBuffer))
@@ -1326,7 +1364,11 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         params.surfaceStart = 0;
         params.surfaceEnd = subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
         uint32_t dispatchCount = params.surfaceEnd - params.surfaceStart;
-        RTXMG_LOG(str::format("RTX MegaGeo: Monolithic - dispatchCount=", dispatchCount));
+        Logger::info(str::format("RTX MegaGeo: Monolithic - surfaceStart=", params.surfaceStart,
+            " surfaceEnd=", params.surfaceEnd, " dispatchCount=", dispatchCount,
+            " surfaceOffsets=[", subdivisionSurface.m_surfaceOffsets[0], ",",
+            subdivisionSurface.m_surfaceOffsets[1], ",", subdivisionSurface.m_surfaceOffsets[2], ",",
+            subdivisionSurface.m_surfaceOffsets[3], "]"));
 
         RTXMG_LOG("RTX MegaGeo: Monolithic - writeBuffer");
         commandList->writeBuffer(m_computeClusterTilingParamsBuffer, &params, sizeof(ComputeClusterTilingParams));
@@ -1762,11 +1804,17 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     uint32_t tessCounterIndex = (m_buildAccelFrameIndex % kFrameCount);
     nvrhi::BufferRange tessCounterRange = { m_tessellationCountersBuffer.GetElementBytes() * tessCounterIndex, m_tessellationCountersBuffer.GetElementBytes() };
     RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel - tessCounterIndex=", tessCounterIndex));
+    Logger::info(str::format("RTX MegaGeo: tessCounterRange offset=", tessCounterRange.byteOffset,
+                             " size=", tessCounterRange.byteSize,
+                             " bufferSize=", m_tessellationCountersBuffer.GetBytes(),
+                             " elementSize=", m_tessellationCountersBuffer.GetElementBytes()));
 
     // Clear tessellation counters for this frame
     TessellationCounters tessCounters = {};
     RTXMG_LOG("RTX MegaGeo: BuildAccel - before UploadElement");
     m_tessellationCountersBuffer.UploadElement(tessCounters, tessCounterIndex, commandList);
+    Logger::info(str::format("RTX MegaGeo: Uploaded zeroed counters to index ", tessCounterIndex,
+                             " (clusters=", tessCounters.clusters, " desired=", tessCounters.desiredClusters, ")"));
     RTXMG_LOG("RTX MegaGeo: BuildAccel - after UploadElement");
 
     RTXMG_LOG("RTX MegaGeo: BuildAccel - before clearBufferUInt 1");
@@ -1877,11 +1925,25 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     BuildBlasFromClas(accels, instances.data(), blasInstanceCount, commandList);
     RTXMG_LOG("RTX MegaGeo: BuildAccel - BuildBlasFromClas complete");
 
-    // Async read of counters
+    // Async read of counters (reading previous frame's results for double-buffering)
+    uint32_t readIndex = (tessCounterIndex + 1) % kFrameCount;
+    Logger::info(str::format("RTX MegaGeo: About to download counters - writeIndex=", tessCounterIndex,
+                             " readIndex=", readIndex, " frame=", m_buildAccelFrameIndex));
     RTXMG_LOG("RTX MegaGeo: BuildAccel - downloading counters");
     auto counterBufferData = m_tessellationCountersBuffer.Download(commandList, true);
     RTXMG_LOG("RTX MegaGeo: BuildAccel - counters downloaded");
-    TessellationCounters counters = counterBufferData[(tessCounterIndex + 1) % kFrameCount];
+
+    // Log ALL counter indices to see which ones have data
+    for (uint32_t i = 0; i < kFrameCount; ++i) {
+        Logger::info(str::format("RTX MegaGeo: Counter[", i, "] clusters=", counterBufferData[i].clusters,
+                                 " desiredClusters=", counterBufferData[i].desiredClusters,
+                                 " desiredTriangles=", counterBufferData[i].desiredTriangles,
+                                 " desiredVertices=", counterBufferData[i].desiredVertices));
+    }
+
+    TessellationCounters counters = counterBufferData[readIndex];
+    Logger::info(str::format("RTX MegaGeo: Using counters from index ", readIndex,
+                             ": clusters=", counters.clusters, " desired=", counters.desiredClusters));
 
     // Record the desired required memory instead of the max
     stats.desired.m_numTriangles = counters.desiredTriangles;

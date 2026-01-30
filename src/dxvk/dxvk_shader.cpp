@@ -188,8 +188,14 @@ namespace dxvk {
     // Remap resource binding IDs
     Logger::info(str::format("DxvkShader::createShaderModule: Remapping ", m_idOffsets.size(), " bindings"));
     for (uint32_t ofs : m_idOffsets) {
-      if (code[ofs] < MaxNumResourceSlots)
-        code[ofs] = mapping.getBindingId(code[ofs]);
+      if (code[ofs] < MaxNumResourceSlots) {
+        uint32_t newBinding = mapping.getBindingId(code[ofs]);
+        // Only remap if binding was found in mapping - otherwise leave original binding
+        // This prevents corrupting SPIR-V when bindings belong to other descriptor sets
+        // (e.g., HiZ textures in set 1) that aren't in the main slot mapping
+        if (newBinding != 0xFFFFFFFFu)
+          code[ofs] = newBinding;
+      }
     }
 
     // For dual-source blending we need to re-map
