@@ -56,22 +56,24 @@ namespace donut {
 namespace engine {
 
 // Resource slots for copy_cluster_offset shader
-// Slang maps HLSL registers to Vulkan bindings: t0-t99→0-99, s0-s99→100-199, u0-u99→200-299, b0-b99→300-399
+// SPIRV uses DXVK convention: SRV at 0, UAV at 200+, CB at 300
 static const dxvk::DxvkResourceSlot s_copyClusterOffsetSlots[] = {
-  // SRV: t0 → binding 0
+  // Constant buffer: b0 → slot 300
+  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },   // cb (b0)
+  // SRV: t0 → slot 0
   { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // InTessellationCounters (t0)
-  // UAVs: u0-u1 → bindings 200-201
+  // UAVs: u0-u1 → slots 200-201
   { 200, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // InOutClusterOffsetCounts (u0)
   { 201, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // InOutFillClustersIndirectArgs (u1)
-  // Constant buffer: b0 → binding 300
-  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },  // cb (b0)
 };
 static const uint32_t s_copyClusterOffsetSlotsCount = sizeof(s_copyClusterOffsetSlots) / sizeof(s_copyClusterOffsetSlots[0]);
 
 // Resource slots for fill_clusters shader
-// Slang maps HLSL registers to Vulkan bindings: t0-t99→0-99, s0-s99→100-199, u0-u99→200-299, b0-b99→300-399
+// SPIRV uses DXVK convention: SRV at 0-20, Sampler at 100, UAV at 200+, CB at 300
 static const dxvk::DxvkResourceSlot s_fillClustersSlots[] = {
-  // SRVs: t0-t19 → bindings 0-19
+  // Constant buffer: b0 → slot 300
+  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },   // g_TessParams (b0)
+  // SRVs: t0-t20 → slots 0-20
   { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_GridSamplers (t0)
   { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_ClusterOffsetCounts (t1)
   { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_Clusters (t2)
@@ -92,24 +94,25 @@ static const dxvk::DxvkResourceSlot s_fillClustersSlots[] = {
   { 17, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoordPatchPointsOffsets (t17)
   { 18, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoordPatchPoints (t18)
   { 19, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoords (t19)
-  // Sampler: s0 → binding 100
-  { 100, VK_DESCRIPTOR_TYPE_SAMPLER },        // s_DisplacementSampler (s0)
-  // bindlessTextures array: t20 → binding 20
+  // bindlessTextures array: t20 → slot 20
   { 20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // bindlessTextures (t20)
-  // UAVs: u0-u3 → bindings 200-203
+  // Sampler: s0 → slot 100
+  { 100, VK_DESCRIPTOR_TYPE_SAMPLER },         // s_DisplacementSampler (s0)
+  // UAVs: u0-u3 → slots 200-203
   { 200, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_ClusterVertexPositions (u0)
   { 201, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_ClusterShadingData (u1)
   { 202, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_Debug (u2)
   { 203, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_ClusterVertexNormals (u3)
-  // Constant buffer: b0 → binding 300
-  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },  // g_TessParams (b0)
 };
 static const uint32_t s_fillClustersSlotsCount = sizeof(s_fillClustersSlots) / sizeof(s_fillClustersSlots[0]);
 
 // Resource slots for compute_cluster_tiling shader
-// Slang maps HLSL registers to Vulkan bindings: t0-t99→0-99, s0-s99→100-199, u0-u99→200-299, b0-b99→300-399
+// SPIRV uses DXVK convention: SRV at 0-17, Sampler at 100-101, UAV at 200-208, CB at 300
+// t_HiZBuffer (t17) is an array of 9 SAMPLED_IMAGEs at slot 17
 static const dxvk::DxvkResourceSlot s_computeClusterTilingSlots[] = {
-  // SRVs: t0-t16 → bindings 0-16
+  // Constant buffer: b0 → slot 300
+  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },   // g_Params (b0)
+  // SRVs: t0-t16 → slots 0-16
   { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_VertexControlPoints (t0)
   { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_GeometryData (t1)
   { 2, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_MaterialConstants (t2)
@@ -127,22 +130,13 @@ static const dxvk::DxvkResourceSlot s_computeClusterTilingSlots[] = {
   { 14, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoordControlPointIndices (t14)
   { 15, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoordPatchPointsOffsets (t15)
   { 16, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },  // t_TexCoords (t16)
-  // HiZ textures: t17-t25 → bindings 17-25
-  { 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[0] (t17)
-  { 18, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[1] (t18)
-  { 19, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[2] (t19)
-  { 20, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[3] (t20)
-  { 21, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[4] (t21)
-  { 22, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[5] (t22)
-  { 23, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[6] (t23)
-  { 24, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[7] (t24)
-  { 25, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // t_HiZBuffer[8] (t25)
-  // Bindless textures: t26 → binding 26
-  { 26, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE },   // bindlessTextures (t26)
-  // Samplers: s0-s1 → bindings 100-101
-  { 100, VK_DESCRIPTOR_TYPE_SAMPLER },        // s_DisplacementSampler (s0)
-  { 101, VK_DESCRIPTOR_TYPE_SAMPLER },        // s_HizSampler (s1)
-  // UAVs: u0-u8 → bindings 200-208
+  // t_HiZBuffer (t17) - array of 9 SAMPLED_IMAGEs for hierarchical Z-buffer
+  // Constructor: slot, type, view, access, count, flags
+  { 17, VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, VK_IMAGE_VIEW_TYPE_2D, VK_ACCESS_NONE_KHR, 9 },   // t_HiZBuffer (t17) - array[9]
+  // Samplers: s0-s1 → slots 100-101
+  { 100, VK_DESCRIPTOR_TYPE_SAMPLER },         // s_DisplacementSampler (s0)
+  { 101, VK_DESCRIPTOR_TYPE_SAMPLER },         // s_HizSampler (s1)
+  // UAVs: u0-u8 → slots 200-208
   { 200, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_GridSamplers (u0)
   { 201, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_TessellationCounters (u1)
   { 202, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_Clusters (u2)
@@ -152,45 +146,43 @@ static const dxvk::DxvkResourceSlot s_computeClusterTilingSlots[] = {
   { 206, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_VertexPatchPoints (u6)
   { 207, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_TexCoordPatchPoints (u7)
   { 208, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_Debug (u8)
-  // Constant buffer: b0 → binding 300
-  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },  // g_Params (b0)
 };
 static const uint32_t s_computeClusterTilingSlotsCount = sizeof(s_computeClusterTilingSlots) / sizeof(s_computeClusterTilingSlots[0]);
 
 // Resource slots for fill_blas_from_clas_args shader
-// Slang maps HLSL registers to Vulkan bindings: t0-t99→0-99, s0-s99→100-199, u0-u99→200-299, b0-b99→300-399
+// SPIRV uses DXVK convention: SRV at 0, UAV at 200, CB at 300
 static const dxvk::DxvkResourceSlot s_fillBlasFromClasArgsSlots[] = {
-  // SRV: t0 → binding 0
+  // Constant buffer: b0 → slot 300
+  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },   // g_Params (b0)
+  // SRV: t0 → slot 0
   { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // t_ClusterOffsetCounts (t0)
-  // UAV: u0 → binding 200
+  // UAV: u0 → slot 200
   { 200, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // u_BlasFromClasArgs (u0)
-  // Constant buffer: b0 → binding 300
-  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },  // g_Params (b0)
 };
 static const uint32_t s_fillBlasFromClasArgsSlotsCount = sizeof(s_fillBlasFromClasArgsSlots) / sizeof(s_fillBlasFromClasArgsSlots[0]);
 
 // Resource slots for fill_instantiate_template_args shader
-// Slang maps HLSL registers to Vulkan bindings: t0-t99→0-99, s0-s99→100-199, u0-u99→200-299, b0-b99→300-399
+// SPIRV uses DXVK convention: SRV at 0, UAV at 200, CB at 300
 static const dxvk::DxvkResourceSlot s_fillInstantiateTemplateArgsSlots[] = {
-  // SRV: t0 → binding 0
+  // Constant buffer: b0 → slot 300
+  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },   // cb (b0)
+  // SRV: t0 → slot 0
   { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // InTemplateAddresses (t0)
-  // UAV: u0 → binding 200
+  // UAV: u0 → slot 200
   { 200, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // OutArgs (u0)
-  // Constant buffer: b0 → binding 300
-  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },  // cb (b0)
 };
 static const uint32_t s_fillInstantiateTemplateArgsSlotsCount = sizeof(s_fillInstantiateTemplateArgsSlots) / sizeof(s_fillInstantiateTemplateArgsSlots[0]);
 
 // Resource slots for patch_cluster_blas_addresses shader
-// Slang maps HLSL registers to Vulkan bindings: t0-t99→0-99, s0-s99→100-199, u0-u99→200-299, b0-b99→300-399
+// SPIRV uses DXVK convention: SRV at 0-1, UAV at 200, CB at 300
 static const dxvk::DxvkResourceSlot s_patchClusterBlasAddressesSlots[] = {
-  // SRVs: t0-t1 → bindings 0-1
+  // Constant buffer: b0 → slot 300
+  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },   // cb (b0)
+  // SRVs: t0-t1 → slots 0-1
   { 0, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // InMappings (t0)
   { 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER },   // InBlasAddresses (t1)
-  // UAV: u0 → binding 200
+  // UAV: u0 → slot 200
   { 200, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, VK_IMAGE_VIEW_TYPE_MAX_ENUM, VK_ACCESS_SHADER_WRITE_BIT },  // InOutInstanceBuffer (u0)
-  // Constant buffer: b0 → binding 300
-  { 300, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER },  // cb (b0)
 };
 static const uint32_t s_patchClusterBlasAddressesSlotsCount = sizeof(s_patchClusterBlasAddressesSlots) / sizeof(s_patchClusterBlasAddressesSlots[0]);
 

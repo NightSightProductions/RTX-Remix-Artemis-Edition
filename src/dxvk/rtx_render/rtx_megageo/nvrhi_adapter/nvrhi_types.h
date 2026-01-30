@@ -1106,6 +1106,10 @@ namespace donut {
         return CreateShader(path, entryPoint, macros, desc.shaderType);
       }
 
+      // Get the HiZ descriptor set layout (for binding set 1)
+      // Returns VK_NULL_HANDLE if not yet created
+      VkDescriptorSetLayout getHiZDescriptorSetLayout() const { return m_hiZDescriptorSetLayout; }
+
     private:
       dxvk::RtxContext* m_rtxContext = nullptr;
       VkDevice m_vkDevice = VK_NULL_HANDLE;

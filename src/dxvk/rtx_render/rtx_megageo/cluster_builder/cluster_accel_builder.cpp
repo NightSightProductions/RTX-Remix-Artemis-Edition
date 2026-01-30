@@ -1338,6 +1338,17 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
                 nvrhi::ShaderHandle shader = m_shaderFactory.CreateShader("cluster_builder/compute_cluster_tiling.hlsl", "main", &macros, tilingDesc);
                 RTXMG_LOG(str::format("RTX MegaGeo: GetComputeClusterTilingPSO - shader=", (void*)shader.Get()));
 
+                // Store HiZ descriptor set layout in device for command list to use when binding set 1
+                // This only needs to be done once (the layout is shared across all shader permutations)
+                auto* nvrhiDevice = static_cast<NvrhiDxvkDevice*>(m_device.Get());
+                if (nvrhiDevice && nvrhiDevice->getHiZDescriptorSetLayout() == VK_NULL_HANDLE) {
+                    VkDescriptorSetLayout hiZLayout = m_shaderFactory.getHiZDescriptorSetLayout();
+                    if (hiZLayout != VK_NULL_HANDLE) {
+                        nvrhiDevice->setHiZDescriptorSetLayout(hiZLayout);
+                        RTXMG_LOG("RTX MegaGeo: Stored HiZ descriptor set layout in device");
+                    }
+                }
+
                 auto computePipelineDesc = nvrhi::ComputePipelineDesc()
                     .setComputeShader(shader)
                     .addBindingLayout(m_computeClusterTilingBL)      // Set 0: Main bindings

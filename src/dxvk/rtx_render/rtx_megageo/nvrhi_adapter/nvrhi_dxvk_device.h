@@ -111,12 +111,18 @@ namespace dxvk {
     const Rc<DxvkContext>& getDxvkContext() const { return m_context; }
     const Rc<RtxContext>& getRtxContext() const { return m_rtxContext; }
 
+    // HiZ descriptor set layout for compute_cluster_tiling shader
+    // This is set 1 with 9 SAMPLED_IMAGE bindings at binding 0-8
+    void setHiZDescriptorSetLayout(VkDescriptorSetLayout layout) { m_hiZDescriptorSetLayout = layout; }
+    VkDescriptorSetLayout getHiZDescriptorSetLayout() const { return m_hiZDescriptorSetLayout; }
+
   private:
     Rc<DxvkDevice> m_device;
     Rc<DxvkContext> m_context;
     Rc<RtxContext> m_rtxContext;
     VkDevice m_vkDevice;
     VkPhysicalDevice m_physicalDevice;
+    VkDescriptorSetLayout m_hiZDescriptorSetLayout = VK_NULL_HANDLE;
   };
 
 } // namespace dxvk

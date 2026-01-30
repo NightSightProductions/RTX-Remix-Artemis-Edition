@@ -356,12 +356,7 @@ namespace dxvk {
   }
 
   void NvrhiDxvkCommandList::bindHiZDescriptorSet(VkPipelineLayout pipelineLayout) {
-    if (!m_hasHiZBinding || m_hiZDescriptorSetLayout == VK_NULL_HANDLE) {
-      return;
-    }
-
-    if (pipelineLayout == VK_NULL_HANDLE) {
-      Logger::err("RTX MegaGeo: bindHiZDescriptorSet - null pipeline layout");
+    if (!m_hasHiZBinding) {
       return;
     }
 
@@ -371,16 +366,18 @@ namespace dxvk {
       return;
     }
 
-    // Allocate descriptor set from DxvkContext's pool
-    VkDescriptorSet hiZDescriptorSet = m_context->allocateDescriptorSet(m_hiZDescriptorSetLayout, "HiZ");
-    if (hiZDescriptorSet == VK_NULL_HANDLE) {
-      Logger::err("RTX MegaGeo: Failed to allocate HiZ descriptor set");
+    // Get the compute descriptor set that DXVK allocated for set 0
+    // After commitComputeState(), this contains all the bound resources
+    VkDescriptorSet computeSet = m_context->getComputeDescriptorSet();
+    if (computeSet == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: bindHiZDescriptorSet - null compute descriptor set");
       return;
     }
 
-    // Write image descriptors for HiZ textures
+    // HiZ textures are at slot 17, which maps to binding 18 in set 0
+    // (CB at binding 0, SRVs 0-16 at bindings 1-17, slot 17 at binding 18)
+    // The descriptor layout has count=9 for this binding (array of 9 textures)
     std::array<VkDescriptorImageInfo, HIZ_MAX_LODS> imageInfos;
-    std::array<VkWriteDescriptorSet, HIZ_MAX_LODS> writes;
 
     for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
       imageInfos[i] = {};
@@ -396,33 +393,21 @@ namespace dxvk {
           }
         }
       }
-
-      writes[i] = {};
-      writes[i].sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
-      writes[i].dstSet = hiZDescriptorSet;
-      writes[i].dstBinding = 0;  // All textures at binding 0, different array elements
-      writes[i].dstArrayElement = i;
-      writes[i].descriptorCount = 1;
-      writes[i].descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-      writes[i].pImageInfo = &imageInfos[i];
     }
 
-    m_device->getDxvkDevice()->vkd()->vkUpdateDescriptorSets(vkDevice, HIZ_MAX_LODS, writes.data(), 0, nullptr);
-    RTXMG_LOG("RTX MegaGeo: Updated HiZ descriptor set with texture views");
+    // Update binding 18 in set 0 with the HiZ texture array
+    VkWriteDescriptorSet write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = computeSet;
+    write.dstBinding = 18;  // Binding 18 in set 0 (slot 17 remapped)
+    write.dstArrayElement = 0;
+    write.descriptorCount = HIZ_MAX_LODS;  // Write all 9 at once
+    write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+    write.pImageInfo = imageInfos.data();
 
-    // Bind the HiZ descriptor set at set index 1 using the actual shader's pipeline layout
-    VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
-    m_device->getDxvkDevice()->vkd()->vkCmdBindDescriptorSets(
-      cmdBuffer,
-      VK_PIPELINE_BIND_POINT_COMPUTE,
-      pipelineLayout,
-      1,  // firstSet = 1 (we're binding set 1 only)
-      1,  // descriptorSetCount = 1
-      &hiZDescriptorSet,
-      0,  // dynamicOffsetCount
-      nullptr);
+    m_device->getDxvkDevice()->vkd()->vkUpdateDescriptorSets(vkDevice, 1, &write, 0, nullptr);
 
-    RTXMG_LOG("RTX MegaGeo: Bound HiZ descriptor set at set index 1");
+    RTXMG_LOG("RTX MegaGeo: Updated HiZ binding 18 in set 0 with 9 textures");
 
     // Reset HiZ binding state
     m_hasHiZBinding = false;
@@ -430,8 +415,8 @@ namespace dxvk {
 
   void NvrhiDxvkCommandList::dispatch(uint32_t x, uint32_t y, uint32_t z) {
     // For shaders with HiZ binding, we need special handling:
-    // HiZ textures are at [[vk::binding(0, 1)]] - descriptor set 1, binding 0
-    // We bind set 0 via DXVK's normal path, then bind set 1 with HiZ textures manually
+    // HiZ textures are at slot 17 (binding 18) in set 0 as an array of 9 SAMPLED_IMAGEs
+    // DXVK's bindResourceView doesn't support arrays, so we update binding 18 manually
     if (m_hasHiZBinding) {
       // Commit compute state - this binds the pipeline and set 0 resources
       RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
@@ -447,15 +432,15 @@ namespace dxvk {
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-      // Bind HiZ descriptor set at set index 1
-      // The shader expects: Texture2D t_HiZBuffer[HIZ_MAX_LODS] at [[vk::binding(0, 1)]]
+      // Update HiZ texture array at binding 18 in set 0
+      // The shader expects: Texture2D t_HiZBuffer[HIZ_MAX_LODS] at slot 17 -> binding 18
       VkPipelineLayout pipelineLayout = m_context->getComputePipelineLayout();
       bindHiZDescriptorSet(pipelineLayout);
 
       // Call vkCmdDispatch directly
       VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
       m_device->getDxvkDevice()->vkd()->vkCmdDispatch(cmdBuffer, x, y, z);
-      RTXMG_LOG(str::format("RTX MegaGeo: dispatch(", x, ", ", y, ", ", z, ") with HiZ set 1 binding"));
+      RTXMG_LOG(str::format("RTX MegaGeo: dispatch(", x, ", ", y, ", ", z, ") with HiZ binding 18"));
     } else {
       // Normal dispatch path through DXVK
       // Ensure all prior writes are visible to this shader read
@@ -507,7 +492,7 @@ namespace dxvk {
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
       // Bind HiZ descriptor set at set index 1
-      // The shader expects: Texture2D t_HiZBuffer[HIZ_MAX_LODS] at [[vk::binding(0, 1)]]
+      // Update HiZ texture array at binding 18 in set 0
       VkPipelineLayout pipelineLayout = m_context->getComputePipelineLayout();
       bindHiZDescriptorSet(pipelineLayout);
 
@@ -515,7 +500,7 @@ namespace dxvk {
       VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
       auto bufferSlice = argBufferSlice.getSliceHandle(0, sizeof(VkDispatchIndirectCommand));
       m_device->getDxvkDevice()->vkd()->vkCmdDispatchIndirect(cmdBuffer, bufferSlice.handle, bufferSlice.offset);
-      RTXMG_LOG("RTX MegaGeo: dispatchIndirect with HiZ set 1 binding");
+      RTXMG_LOG("RTX MegaGeo: dispatchIndirect with HiZ binding 18");
     } else {
       // Ensure all prior writes are visible to this shader read
       m_context->emitMemoryBarrier(0,
@@ -838,19 +823,24 @@ namespace dxvk {
         }
       }
 
-      // All shaders use Slang's default register mapping with DXVK's slot convention:
-      //   t0-t99 (SRVs)     -> slots 0-99
-      //   s0-s99 (Samplers) -> slots 100-199
-      //   u0-u99 (UAVs)     -> slots 200-299
-      //   b0-b99 (CBs)      -> slots 300-399
+      // For binding set 0 (main descriptor set), use DXVK convention slot numbers
+      // that match the pre-compiled SPIRV layout:
+      //   SRVs (t0, t1, ...) → slots 0, 1, 2, ...
+      //   Samplers (s0, s1, ...) → slots 100, 101, ...
+      //   UAVs (u0, u1, ...) → slots 200, 201, ...
+      //   CBs (b0, b1, ...) → slots 300, 301, ...
+      // The SPIRV bindings use these DXVK convention values, and the slot mapping
+      // remaps them to sequential Vulkan binding indices.
 
       for (const auto& item : desc.bindings) {
-        uint32_t dxvkSlot = item.slot;  // Start with HLSL register number
+        uint32_t dxvkSlot = item.slot;  // Default for non-set-0 bindings
 
         switch (item.type) {
           case nvrhi::BindingSetItem::Type::StructuredBuffer_SRV:
-            // SRV tN → slot N (DXVK convention)
-            dxvkSlot = item.slot;
+            // SRV: DXVK convention slot = register number (t0→0, t1→1, etc.)
+            if (bindingSetIndex == 0) {
+              dxvkSlot = item.slot;  // SRV slots are at register number
+            }
             if (item.resourceHandle) {
               auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
               Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
@@ -877,8 +867,10 @@ namespace dxvk {
             break;
 
           case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV:
-            // UAV uN → slot 200+N (DXVK convention)
-            dxvkSlot = 200 + item.slot;
+            // UAV: DXVK convention slot = 200 + register number (u0→200, u1→201, etc.)
+            if (bindingSetIndex == 0) {
+              dxvkSlot = 200 + item.slot;
+            }
             if (item.resourceHandle) {
               auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
               Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
@@ -903,9 +895,11 @@ namespace dxvk {
             break;
 
           case nvrhi::BindingSetItem::Type::ConstantBuffer:
-            // CB bN → slot 300+N (DXVK convention)
+            // CB: DXVK convention slot = 300 + register number (b0→300, b1→301, etc.)
+            if (bindingSetIndex == 0) {
+              dxvkSlot = 300 + item.slot;
+            }
             // Also push constants if data is cached (for Slang push constant compilation)
-            dxvkSlot = 300 + item.slot;
             if (item.resourceHandle) {
               auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
 
@@ -933,8 +927,10 @@ namespace dxvk {
             break;
 
           case nvrhi::BindingSetItem::Type::Sampler:
-            // Sampler sN → slot 100+N (DXVK convention)
-            dxvkSlot = 100 + item.slot;
+            // Sampler: DXVK convention slot = 100 + register number (s0→100, s1→101, etc.)
+            if (bindingSetIndex == 0) {
+              dxvkSlot = 100 + item.slot;
+            }
             if (item.resourceHandle) {
               auto* nvrhiSampler = static_cast<NvrhiDxvkSampler*>(item.resourceHandle);
               Rc<DxvkSampler> dxvkSampler = nvrhiSampler->getDxvkSampler();
@@ -1015,8 +1011,11 @@ namespace dxvk {
                   Logger::err(str::format("RTX MegaGeo: HiZ Texture_SRV array[", item.arrayElement, "] has NULL resourceHandle!"));
                 }
               } else {
-                // Texture_SRV tN → slot N (DXVK convention)
-                uint32_t effectiveSlot = item.slot + item.arrayElement;
+                // Texture_SRV: DXVK convention slot = register number (t0→0, t1→1, etc.)
+                if (bindingSetIndex == 0) {
+                  dxvkSlot = item.slot;  // SRV slots are at register number
+                }
+                uint32_t effectiveSlot = dxvkSlot + item.arrayElement;
                 if (item.resourceHandle) {
                   nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
                   if (nativeObj.pointer == nullptr) {
@@ -1054,9 +1053,12 @@ namespace dxvk {
             break;
 
           case nvrhi::BindingSetItem::Type::Texture_UAV:
-            // Texture_UAV uN → slot 200+N (DXVK convention)
+            // Texture_UAV: DXVK convention slot = 200 + register number (u0→200, u1→201, etc.)
             {
-              uint32_t effectiveSlot = 200 + item.slot + item.arrayElement;
+              if (bindingSetIndex == 0) {
+                dxvkSlot = 200 + item.slot;
+              }
+              uint32_t effectiveSlot = dxvkSlot + item.arrayElement;
               if (item.resourceHandle) {
                 // Try to get native object to verify this is actually a texture
                 nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);

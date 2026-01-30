@@ -165,9 +165,16 @@ namespace dxvk {
     VkShaderStageFlagBits stage) const {
     if (stage == VK_SHADER_STAGE_FLAG_BITS_MAX_ENUM)
       stage = m_stage;
-    for (const auto& slot : m_slots)
+
+    Logger::info(str::format("DxvkShader::defineResourceSlots - adding ", m_slots.size(), " slots for stage=0x", std::hex, stage));
+
+    for (const auto& slot : m_slots) {
+      Logger::info(str::format("  defineResourceSlots: slot=", slot.slot, " type=", slot.type));
       mapping.defineSlot(stage, slot);
-    
+    }
+
+    Logger::info(str::format("DxvkShader::defineResourceSlots - mapping now has ", mapping.bindingCount(), " bindings"));
+
     if (m_interface.pushConstSize) {
       mapping.definePushConstRange(stage,
         m_interface.pushConstOffset,
@@ -186,7 +193,12 @@ namespace dxvk {
     Logger::info(str::format("DxvkShader::createShaderModule: Decompressed, size=", spirvCode.size(), " bytes"));
 
     // Remap resource binding IDs
-    Logger::info(str::format("DxvkShader::createShaderModule: Remapping ", m_idOffsets.size(), " bindings"));
+    Logger::info(str::format("DxvkShader::createShaderModule: Remapping ", m_idOffsets.size(), " bindings, mapping has ", mapping.bindingCount(), " entries"));
+    // Log what slots are in the mapping
+    for (uint32_t i = 0; i < mapping.bindingCount(); i++) {
+      const auto& b = mapping.bindingInfos()[i];
+      Logger::info(str::format("  mapping[", i, "]: slot=", b.slot, " type=", b.type));
+    }
     for (uint32_t ofs : m_idOffsets) {
       if (code[ofs] < MaxNumResourceSlots) {
         uint32_t newBinding = mapping.getBindingId(code[ofs]);
