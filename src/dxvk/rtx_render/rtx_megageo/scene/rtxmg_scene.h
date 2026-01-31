@@ -54,7 +54,9 @@ public:
 
     // Instance management
     const std::vector<Instance>& GetSubdMeshInstances() const { return m_instances; }
+    std::vector<Instance>& GetSubdMeshInstances() { return m_instances; }
     void AddInstance(const Instance& instance) { m_instances.push_back(instance); }
+    void ClearInstances() { m_instances.clear(); }
 
     // Buffer accessors for shader bindings
     nvrhi::BufferHandle GetGeometryBuffer() const { return m_geometryBuffer; }

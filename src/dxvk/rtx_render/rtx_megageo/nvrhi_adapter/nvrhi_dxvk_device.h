@@ -116,6 +116,9 @@ namespace dxvk {
     void setHiZDescriptorSetLayout(VkDescriptorSetLayout layout) { m_hiZDescriptorSetLayout = layout; }
     VkDescriptorSetLayout getHiZDescriptorSetLayout() const { return m_hiZDescriptorSetLayout; }
 
+    // Get or create shared descriptor pool for efficient binding set allocation
+    VkDescriptorPool getSharedDescriptorPool();
+
   private:
     Rc<DxvkDevice> m_device;
     Rc<DxvkContext> m_context;
@@ -123,6 +126,12 @@ namespace dxvk {
     VkDevice m_vkDevice;
     VkPhysicalDevice m_physicalDevice;
     VkDescriptorSetLayout m_hiZDescriptorSetLayout = VK_NULL_HANDLE;
+
+    // Shared descriptor pool for efficient binding set allocation
+    // Using FREE_DESCRIPTOR_SET_BIT allows individual sets to be freed
+    VkDescriptorPool m_sharedDescriptorPool = VK_NULL_HANDLE;
+    static constexpr uint32_t kSharedPoolMaxSets = 1024;
+    static constexpr uint32_t kSharedPoolDescriptorCount = 4096;
   };
 
 } // namespace dxvk

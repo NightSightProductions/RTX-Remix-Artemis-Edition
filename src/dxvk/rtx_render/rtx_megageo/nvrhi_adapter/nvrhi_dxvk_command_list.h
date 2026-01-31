@@ -136,8 +136,31 @@ namespace dxvk {
     VkPipelineLayout m_hiZPipelineLayout = VK_NULL_HANDLE;
     Rc<DxvkImageView> m_hiZImageViews[HIZ_MAX_LODS] = {};
 
+    // UAV texture array binding for HiZ reduce shader
+    // This handles RWTexture2D<float> u_output[HIZ_MAX_LODS]: register(u0)
+    bool m_hasUAVArrayBinding = false;
+    uint32_t m_uavArrayBinding = 0;  // Vulkan binding index for UAV array
+    Rc<DxvkImageView> m_uavImageViews[HIZ_MAX_LODS] = {};
+
+    // Pre-built descriptor sets to bind after commitComputeState()
+    // This matches the NVRHI-Vulkan native approach: pre-build VkDescriptorSets in createBindingSet(),
+    // then bind them with a single vkCmdBindDescriptorSets call at dispatch time.
+    // We hold a reference to the binding set to keep the descriptor set alive until dispatch completes.
+    struct PendingDescriptorSetBinding {
+      VkDescriptorSet descriptorSet;
+      uint32_t setIndex;
+      VkPipelineLayout pipelineLayout;  // Pipeline layout to use when binding (from MegaGeo pipeline)
+      nvrhi::BindingSetHandle bindingSetRef;  // Ref-counted handle to keep descriptor set alive
+    };
+    std::vector<PendingDescriptorSetBinding> m_pendingDescriptorSets;
+
+    // Binding sets that need to stay alive until command buffer execution completes
+    // We track them here and transfer to DXVK's command list tracking in dispatch()
+    std::vector<nvrhi::BindingSetHandle> m_inFlightBindingSets;
+
     void bindComputeResources(const nvrhi::ComputeState& state);
     void bindHiZDescriptorSet(VkPipelineLayout pipelineLayout);  // Binds HiZ descriptor set before dispatch
+    void bindUAVArrayDescriptorSet();  // Binds UAV texture array before dispatch
     void translateClusterOperation(
       const nvrhi::rt::cluster::OperationDesc& nvrhiDesc,
       VkClusterAccelerationStructureCommandsInfoNV& vkCmds);

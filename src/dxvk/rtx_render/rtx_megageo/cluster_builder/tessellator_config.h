@@ -30,17 +30,21 @@ class ZBuffer;
 
 struct TessellatorConfig
 {
-    static constexpr float kDefaultFineTessellationRate = 1.0f;
-    static constexpr float kDefaultCoarseTessellationRate = 1.0f / 15.0f;
+    // Default rate for SPHERICAL_PROJECTION mode (screen-space tessellation)
+    // Formula: edgeRate = viewportHeight * rate / viewDepth
+    // With viewport 720 and rate 0.05: at depth 10 -> edgeRate = 720*0.05/10 = 3.6 segments per unit
+    // Lower values = less tessellation, higher = more tessellation
+    static constexpr float kDefaultFineTessellationRate = 0.05f;
+    static constexpr float kDefaultCoarseTessellationRate = 0.05f / 15.0f;
 
-    // REDUCED: 256K clusters for better memory compatibility (was 2M)
-    static constexpr uint32_t kDefaultMaxClusters = (1u << 18);
+    // 2M clusters
+    static constexpr uint32_t kDefaultMaxClusters = (1u << 21);
 
-    // REDUCED: 128MB per vertex buffer for better memory compatibility (was 512MB)
-    static constexpr size_t kDefaultVertexBufferBytes = (128ull << 20);
+    // 1024MB vertices at 1440p render res
+    static constexpr size_t kDefaultVertexBufferBytes = (1024ull << 20);
 
-    // REDUCED: 256MB CLAS memory for better memory compatibility (was 1GB)
-    static constexpr size_t kDefaultClasBufferBytes = (256ull << 20);
+    // 3GB CLAS memory at 1440p render res
+    static constexpr size_t kDefaultClasBufferBytes = (3076ull << 20);
 
     static constexpr uint32_t kMinIsolationLevel = 1u;
     static constexpr uint32_t kMaxIsolationLevel = 6u;
@@ -76,12 +80,14 @@ struct TessellatorConfig
     
     MemorySettings memorySettings;
     VisibilityMode visMode = VisibilityMode::VIS_LIMIT_EDGES;
-    AdaptiveTessellationMode tessMode = AdaptiveTessellationMode::WORLD_SPACE_EDGE_LENGTH;
+    // SPHERICAL_PROJECTION using screenspace (clip.w depth) - no camera position needed
+    AdaptiveTessellationMode tessMode = AdaptiveTessellationMode::SPHERICAL_PROJECTION;
 
     float fineTessellationRate = kDefaultFineTessellationRate;
     float coarseTessellationRate = kDefaultCoarseTessellationRate;
     bool  enableFrustumVisibility = true;
     bool  enableHiZVisibility = true;
+    // Backface visibility using screenspace (clip-space normal) - no camera position needed
     bool  enableBackfaceVisibility = true;
     bool  enableLogging = false; // enable debug logging for tessellator build
     bool  enableMonolithicClusterBuild = true;  // Must use monolithic - only one shader permutation is pre-compiled

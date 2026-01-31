@@ -127,15 +127,12 @@ namespace dxvk {
   void ScratchManager::resetWritePointers() {
     // Called at start of frame - reset all chunk write pointers so they can be reused
     // DXVK handles GPU synchronization at frame boundaries, so chunks from previous frame are safe to reuse
-    Logger::info(str::format("RTX MegaGeo: ScratchManager::resetWritePointers - pool size=", m_chunkPool.size(),
-      " currentChunk=", (m_currentChunk ? "yes" : "no")));
     for (auto& chunk : m_chunkPool) {
       chunk->writePointer = 0;
     }
     if (m_currentChunk) {
       m_currentChunk->writePointer = 0;
     }
-    Logger::info("RTX MegaGeo: ScratchManager::resetWritePointers - done");
   }
 
 } // namespace dxvk

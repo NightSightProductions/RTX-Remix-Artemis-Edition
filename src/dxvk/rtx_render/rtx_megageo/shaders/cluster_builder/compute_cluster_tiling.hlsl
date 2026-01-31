@@ -338,11 +338,14 @@ float CalculateEdgeVisibility(uint32_t iLane, uint32_t waveSampleOffset, float v
             {
                 float3 nobj = cross(t0, t1);
                 float3 nworld = normalize(mul(g_Params.localToWorld, float4(nobj, 0.f)).xyz);
-                float cosTheta = dot(normalize(pworld[i] - g_Params.cameraPos), nworld);
+                // Screenspace approach: transform normal to clip space and check Z contribution
+                // Positive Z means normal points away from camera (into the scene)
+                float4 nClipContrib = mul(g_Params.matWorldToClip, float4(nworld, 0.0f));
+                float cosTheta = nClipContrib.z / max(length(nClipContrib.xyz), 0.001f);
                 float backfaceFactor = smoothstep(.6f, 1.f, cosTheta);
 
                 visibility *= (1.f - backfaceFactor);
-            }            
+            }
         }
     }
     return visibility;
@@ -429,9 +432,13 @@ void WaveEvaluateBSplinePatch8(uint32_t iWave,
 float CalculateEdgeRates(LimitFrame limitFrame)
 {
 #if TESS_MODE == TESS_MODE_SPHERICAL_PROJECTION
+    // Screenspace approach: use clip.w as distance (no cameraPos needed)
     const float3 poi = mul(g_Params.localToWorld, float4(limitFrame.p, 1.0f)).xyz;
-    const float distance = max(length(poi - g_Params.cameraPos), 0.01f);
+    float4 clipPos = mul(g_Params.matWorldToClip, float4(poi, 1.0f));
+    // Use abs(clipPos.w) - only prevent division by zero with tiny epsilon
+    const float distance = max(abs(clipPos.w), 0.0001f);
     float edgeRate = float(g_Params.viewportSize.y) * g_Params.fineTessellationRate / distance;
+    // No artificial limits on edge rate - let the tessellation system handle it naturally
     return edgeRate;
 #elif TESS_MODE == TESS_MODE_WORLD_SPACE_EDGE_LENGTH
     float diagonalLength = length(g_Params.aabb.Extent());
@@ -444,6 +451,13 @@ uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, float visibility, 
 {
     uint32_t waveSampleOffset = kNumWaveSurfaceUVSamples * iWave;
 #if TESS_MODE == TESS_MODE_UNIFORM
+    // Transform samples to world space first - required for CalculateEdgeVisibility
+    // which expects world-space coordinates for visibility calculations
+    if (iLane < kNumWaveSurfaceUVSamples)
+    {
+        samples[waveSampleOffset + iLane].p = mul(g_Params.localToWorld, float4(samples[waveSampleOffset + iLane].p, 1.0)).xyz;
+    }
+
     if (iLane < 4)
     {
         uint32_t segments = g_Params.edgeSegments[iLane];

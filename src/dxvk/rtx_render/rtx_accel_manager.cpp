@@ -24,7 +24,7 @@
 #include <assert.h>
 
 // Disable verbose MegaGeo logging in hot path
-#define RTXMG_VERBOSE_LOGGING 1
+#define RTXMG_VERBOSE_LOGGING 0
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -462,10 +462,55 @@ namespace dxvk {
     // NOTE: Would like to use the BLAS Linked instances here, but that misses viewmodel and virtual instances
     std::unordered_map<BlasEntry*, std::vector<RtInstance*>> uniqueBlas;
 
-    // RTX Mega Geometry: Process completed surfaces BEFORE the instance loop
+    // RTX Mega Geometry: Process completed surfaces and build cluster BLAS BEFORE the instance loop
     // This ensures surfaceId->instanceIndex mapping is populated before addBlas() is called
+    // CRITICAL: buildClusterBlas must run BEFORE addBlas so getInstanceIndexForSurface works
     if (m_megaGeoBuilder != nullptr) {
       m_megaGeoBuilder->processCompletedSurfaces();
+
+      // Collect transforms for all cluster BLAS instances FIRST
+      // IMPORTANT: Use getTransform() not surface.objectToWorld - the VkInstance has the actual world transform
+      std::unordered_map<uint32_t, Matrix4> surfaceTransforms;
+      uint32_t clusterInstCount = 0;
+      for (RtInstance* inst : instances) {
+        if (inst && inst->getBlas() && inst->getBlas()->isClusterBlas()) {
+          uint32_t surfaceId = inst->getBlas()->megaGeoSurfaceId;
+          // getTransform() returns the actual world transform from VkAccelerationStructureInstanceKHR
+          Matrix4 worldTransform = inst->getTransform();
+          surfaceTransforms[surfaceId] = worldTransform;
+          // Log first few to debug transform values
+          if (clusterInstCount < 3) {
+            Vector3 worldPos = inst->getWorldPosition();
+            Logger::info(str::format("RTX MegaGeo: Collecting transform surfaceId=", surfaceId,
+                " worldPos=(", worldPos.x, ",", worldPos.y, ",", worldPos.z, ")",
+                " row3=(", worldTransform.data[3][0], ",", worldTransform.data[3][1], ",", worldTransform.data[3][2], ")"));
+          }
+          clusterInstCount++;
+        }
+      }
+      Logger::info(str::format("RTX MegaGeo: Collected ", clusterInstCount, " cluster instance transforms, unique=", surfaceTransforms.size()));
+
+      // Build cluster BLAS if we have any transforms
+      if (!surfaceTransforms.empty()) {
+        Rc<RtxContext> rtxCtx = dynamic_cast<RtxContext*>(ctx.ptr());
+        if (rtxCtx != nullptr) {
+          const RtCamera& camera = cameraManager.getCamera(CameraType::Main);
+
+          // Get depth buffer for HiZ culling
+          Rc<DxvkImageView> depthBuffer = nullptr;
+          if (rtxCtx->getCommonObjects()->getResources().isResourceReady()) {
+            Resources::RaytracingOutput& rtOutput = rtxCtx->getCommonObjects()->getResources().getRaytracingOutput();
+            if (rtOutput.m_primaryDepth.view != nullptr) {
+              depthBuffer = rtOutput.m_primaryDepth.view;
+            }
+          }
+
+          // Build cluster BLAS - this rebuilds instances from surfaceTransforms
+          // After this call, getInstanceIndexForSurface will return valid indices
+          ONCE(Logger::info("RTX MegaGeo AccelManager: Calling buildClusterBlas (early, before instance loop)"));
+          m_megaGeoBuilder->buildClusterBlas(rtxCtx, depthBuffer, camera, surfaceTransforms);
+        }
+      }
     }
 
     for (RtInstance* instance : instances) {
@@ -473,7 +518,7 @@ namespace dxvk {
       if (instance && instance->getBlas() && instance->getBlas()->isClusterBlas()) {
         static bool loggedSkipOnce = false;
         if (!loggedSkipOnce) {
-          Logger::info(str::format("RTX MegaGeo mergeInstancesIntoBlas: ClusterBlas instance found! inst=", (void*)instance,
+          RTXMG_LOG(str::format("RTX MegaGeo mergeInstancesIntoBlas: ClusterBlas instance found! inst=", (void*)instance,
                                    " isHidden=", instance->isHidden(),
                                    " mask=", instance->getVkInstance().mask));
           loggedSkipOnce = true;
@@ -792,7 +837,7 @@ namespace dxvk {
     // Set to 0 here and record mapping for later GPU-side patching
     bool isClusterBlas = blasEntry->isClusterBlas();
     if (isClusterBlas) {
-      Logger::info(str::format("RTX MegaGeo AccelManager::addBlas: isClusterBlas=", isClusterBlas,
+      RTXMG_LOG(str::format("RTX MegaGeo AccelManager::addBlas: isClusterBlas=", isClusterBlas,
                                " megaGeoBuilder=", (blasEntry->megaGeoBuilder ? "valid" : "NULL"),
                                " surfaceId=", blasEntry->megaGeoSurfaceId));
     }
@@ -811,7 +856,7 @@ namespace dxvk {
         // Record the mapping for GPU-side patching
         m_clusterInstancePatches.push_back({remixIndex, rtxmgIndex, tlasType});
 
-        ONCE(Logger::info(str::format("RTX MegaGeo AccelManager: Tracking cluster instance for GPU patching: ",
+        ONCE(RTXMG_LOG(str::format("RTX MegaGeo AccelManager: Tracking cluster instance for GPU patching: ",
                                       "remix=", remixIndex, " rtxmg=", rtxmgIndex, " tlas=", (int)tlasType)));
       } else {
         Logger::warn(str::format("RTX MegaGeo AccelManager: No RTXMG instance index for surface ", blasEntry->megaGeoSurfaceId));
@@ -1070,7 +1115,7 @@ namespace dxvk {
     // RTX Mega Geometry: Patch cluster BLAS addresses directly on GPU
     // This is done AFTER uploading instance data so we can patch in-place
     if (!m_clusterInstancePatches.empty() && m_megaGeoBuilder != nullptr) {
-      Logger::info(str::format("RTX MegaGeo AccelManager: GPU-side patching ", m_clusterInstancePatches.size(), " cluster BLAS addresses"));
+      RTXMG_LOG(str::format("RTX MegaGeo AccelManager: GPU-side patching ", m_clusterInstancePatches.size(), " cluster BLAS addresses"));
 
       // Create NVRHI wrapper for the instance buffer
       nvrhi::BufferDesc wrapperDesc;
@@ -1410,7 +1455,7 @@ namespace dxvk {
         validBlasCount++;
         BlasEntry* blas = inst->getBlas();
         if (shouldLogThisFrame && blas->isClusterBlas()) {
-          Logger::info(str::format("RTX MegaGeo buildBlases: FOUND ClusterBlas! inst=", (void*)inst, " blas=", (void*)blas));
+          RTXMG_LOG(str::format("RTX MegaGeo buildBlases: FOUND ClusterBlas! inst=", (void*)inst, " blas=", (void*)blas));
         }
         if (blas->isClusterBlas()) {
           hasClusterBlas = true;
@@ -1436,10 +1481,10 @@ namespace dxvk {
     }
 
     if (hasClusterBlas) {
-      // Lazy initialization of RtxMegaGeoBuilder
+      // Lazy initialization of RtxMegaGeoBuilder (if not initialized earlier)
       Rc<RtxContext> rtxCtx = dynamic_cast<RtxContext*>(ctx.ptr());
       if (rtxCtx != nullptr && m_megaGeoBuilder == nullptr) {
-        Logger::info("RTX Mega Geometry: Initializing RtxMegaGeoBuilder in AccelManager");
+        Logger::info("RTX Mega Geometry: Initializing RtxMegaGeoBuilder in AccelManager (late init)");
         m_megaGeoBuilder = new RtxMegaGeoBuilder(m_device, rtxCtx);
         if (!m_megaGeoBuilder->initialize()) {
           Logger::err("RTX Mega Geometry: Failed to initialize RtxMegaGeoBuilder");
@@ -1449,37 +1494,14 @@ namespace dxvk {
         }
       }
 
+      // NOTE: buildClusterBlas is now called EARLIER (before instance loop)
+      // to ensure getInstanceIndexForSurface returns valid indices in addBlas()
+      // This section is kept for lazy initialization only
       if (m_megaGeoBuilder != nullptr) {
-        ScopedGpuProfileZone(ctx, "buildClusterBLAS");
-
-        // CRITICAL: Process completed async surfaces BEFORE building cluster BLAS
-        // This ensures worker threads have finished creating subdivision surfaces
-        // and they've been integrated into the scene
-        ONCE(Logger::info("RTX MegaGeo AccelManager: Processing completed surfaces before build"));
-        m_megaGeoBuilder->processCompletedSurfaces();
-
-        // Get camera for frustum culling
-        const RtCamera& camera = cameraManager.getCamera(CameraType::Main);
-
-        // Get depth buffer for HiZ culling from the raytracing output
-        Rc<DxvkImageView> depthBuffer = nullptr;
-        if (rtxCtx != nullptr && rtxCtx->getCommonObjects()->getResources().isResourceReady()) {
-          Resources::RaytracingOutput& rtOutput = rtxCtx->getCommonObjects()->getResources().getRaytracingOutput();
-          if (rtOutput.m_primaryDepth.view != nullptr) {
-            depthBuffer = rtOutput.m_primaryDepth.view;
-          }
-        }
-
-        // Build all cluster BLAS
-        if (rtxCtx != nullptr) {
-          ONCE(Logger::info("RTX MegaGeo AccelManager: Calling buildClusterBlas"));
-          m_megaGeoBuilder->buildClusterBlas(rtxCtx, depthBuffer, camera);
-          RTXMG_LOG("RTX MegaGeo AccelManager: buildClusterBlas returned");
-        } else {
-          Logger::warn("RTX Mega Geometry: Could not cast DxvkContext to RtxContext for cluster BLAS building");
-        }
+        // Already built earlier - just log stats
+        RTXMG_LOG("RTX MegaGeo AccelManager: Cluster BLAS already built earlier in frame");
       } else {
-        ONCE(Logger::err("RTX MegaGeo AccelManager: Builder is null, cannot build cluster BLAS"));
+        ONCE(Logger::err("RTX MegaGeo AccelManager: Builder is null after late init attempt"));
       }
     } else {
       static bool infoLogged = false;

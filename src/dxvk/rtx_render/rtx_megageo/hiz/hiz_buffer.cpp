@@ -261,12 +261,12 @@ void HiZBuffer::GetDesc(nvrhi::BindingLayoutDesc* outBindingLayout, nvrhi::Bindi
 
     if (writeable)
     {
-        // u0 array maps to binding 200+ with compiler shift
-        outBindingLayout->addItem(nvrhi::BindingLayoutItem::Texture_UAV(200).
+        // u0 array - use register number 0 (NVRHI convention), DXVK adapter adds 200
+        outBindingLayout->addItem(nvrhi::BindingLayoutItem::Texture_UAV(0).
             setSize(HIZ_MAX_LODS));
         for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
         {
-            outBindingSet->addItem(nvrhi::BindingSetItem::Texture_UAV(200, textureObjects[i]).setArrayElement(i));
+            outBindingSet->addItem(nvrhi::BindingSetItem::Texture_UAV(0, textureObjects[i]).setArrayElement(i));
         }
     }
     else
@@ -310,12 +310,12 @@ void HiZBuffer::Reduce(nvrhi::ITexture* zbuffer, nvrhi::ICommandList* commandLis
     bindingLayoutDesc
         .addItem(nvrhi::BindingLayoutItem::Texture_SRV(0))    // t0 zbuffer
         .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(1))  // t1 g_params
-        .addItem(nvrhi::BindingLayoutItem::Sampler(100))       // s0 sampler
+        .addItem(nvrhi::BindingLayoutItem::Sampler(0))       // s0 sampler (binding offset 100 applied automatically)
         .setVisibility(nvrhi::ShaderType::Compute);
     bindingSetDesc
         .addItem(nvrhi::BindingSetItem::Texture_SRV(0, zbuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_reduceParamsBuffer))
-        .addItem(nvrhi::BindingSetItem::Sampler(100, m_sampler));
+        .addItem(nvrhi::BindingSetItem::Sampler(0, m_sampler));
 
     if (!m_passBL)
     {

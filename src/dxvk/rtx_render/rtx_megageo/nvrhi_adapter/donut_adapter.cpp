@@ -1,5 +1,5 @@
 // Disable verbose MegaGeo logging
-#define RTXMG_VERBOSE_LOGGING 1
+#define RTXMG_VERBOSE_LOGGING 0
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) dxvk::Logger::info(msg)
 #else

@@ -34,6 +34,7 @@
 #include "nvrhi_dxvk_pipeline.h"
 #include "nvrhi_dxvk_shader.h"
 #include "../../../util/log/log.h"
+#include <unordered_map>
 
 namespace dxvk {
 
@@ -331,8 +332,180 @@ namespace dxvk {
       return nullptr;
     }
 
-    // Create and return a compute pipeline wrapper
-    return new NvrhiDxvkComputePipeline(dxvkShader, desc);
+    // Create compute pipeline wrapper
+    auto* pipeline = new NvrhiDxvkComputePipeline(dxvkShader, desc);
+
+    // Create native VkPipeline with prebuilt descriptor set layouts (matching the sample)
+    // This is the key optimization: instead of using DXVK's per-binding approach, we create
+    // a pipeline with descriptor set layouts that match our prebuilt descriptor sets.
+    // At dispatch time, we bind the pipeline and descriptor sets with single Vulkan calls.
+
+    // Collect VkDescriptorSetLayouts from binding layouts
+    std::vector<VkDescriptorSetLayout> setLayouts;
+    for (const auto& bindingLayout : desc.bindingLayouts) {
+      if (!bindingLayout) continue;
+
+      auto* nvrhiLayout = static_cast<NvrhiDxvkBindingLayout*>(bindingLayout.Get());
+      if (nvrhiLayout && nvrhiLayout->hasVkDescriptorSetLayout()) {
+        setLayouts.push_back(nvrhiLayout->getVkDescriptorSetLayout());
+      }
+    }
+
+    if (!setLayouts.empty()) {
+      // Create pipeline layout from descriptor set layouts
+      VkPipelineLayoutCreateInfo pipelineLayoutInfo = {};
+      pipelineLayoutInfo.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO;
+      pipelineLayoutInfo.setLayoutCount = static_cast<uint32_t>(setLayouts.size());
+      pipelineLayoutInfo.pSetLayouts = setLayouts.data();
+
+      // Check for push constants in binding layouts
+      // Also check for constant buffers - Slang may compile small CBs to push constants
+      VkPushConstantRange pushConstantRange = {};
+      bool hasPushConstants = false;
+      bool hasConstantBuffer = false;
+      for (const auto& bindingLayout : desc.bindingLayouts) {
+        if (!bindingLayout) continue;
+        auto* nvrhiLayout = static_cast<NvrhiDxvkBindingLayout*>(bindingLayout.Get());
+        if (!nvrhiLayout) continue;
+
+        for (const auto& item : nvrhiLayout->getDesc().bindings) {
+          if (item.resourceType == nvrhi::BindingLayoutItem::ResourceType::PushConstants) {
+            pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+            pushConstantRange.offset = 0;
+            pushConstantRange.size = item.size;
+            hasPushConstants = true;
+            break;
+          }
+          if (item.resourceType == nvrhi::BindingLayoutItem::ResourceType::ConstantBuffer) {
+            hasConstantBuffer = true;
+          }
+        }
+      }
+
+      // If there's a constant buffer but no explicit push constants, add a default push constant range
+      // This handles the case where Slang compiles the CB to push constants in SPIR-V
+      if (!hasPushConstants && hasConstantBuffer) {
+        pushConstantRange.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
+        pushConstantRange.offset = 0;
+        pushConstantRange.size = 128;  // Default size to cover most small CBs
+        hasPushConstants = true;
+      }
+
+      if (hasPushConstants) {
+        pipelineLayoutInfo.pushConstantRangeCount = 1;
+        pipelineLayoutInfo.pPushConstantRanges = &pushConstantRange;
+      }
+
+      VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+      VkResult result = vkCreatePipelineLayout(m_vkDevice, &pipelineLayoutInfo, nullptr, &pipelineLayout);
+      if (result != VK_SUCCESS) {
+        Logger::err(str::format("RTX MegaGeo: createComputePipeline - failed to create pipeline layout, result=", (int)result));
+        return pipeline;  // Return pipeline without native VkPipeline, will use DXVK fallback
+      }
+
+      // Get SPIRV from the DXVK shader
+      SpirvCodeBuffer spirvCode = dxvkShader->getCode();
+      if (spirvCode.size() == 0) {
+        Logger::err("RTX MegaGeo: createComputePipeline - shader has no SPIRV code");
+        vkDestroyPipelineLayout(m_vkDevice, pipelineLayout, nullptr);
+        return pipeline;
+      }
+
+      // Create shader module
+      VkShaderModuleCreateInfo shaderModuleInfo = {};
+      shaderModuleInfo.sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+      shaderModuleInfo.codeSize = spirvCode.size();
+      shaderModuleInfo.pCode = spirvCode.data();
+
+      VkShaderModule shaderModule = VK_NULL_HANDLE;
+      result = vkCreateShaderModule(m_vkDevice, &shaderModuleInfo, nullptr, &shaderModule);
+      if (result != VK_SUCCESS) {
+        Logger::err(str::format("RTX MegaGeo: createComputePipeline - failed to create shader module, result=", (int)result));
+        vkDestroyPipelineLayout(m_vkDevice, pipelineLayout, nullptr);
+        return pipeline;
+      }
+
+      // Create compute pipeline
+      VkComputePipelineCreateInfo pipelineInfo = {};
+      pipelineInfo.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO;
+      pipelineInfo.stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
+      pipelineInfo.stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
+      pipelineInfo.stage.module = shaderModule;
+      pipelineInfo.stage.pName = "main";
+      pipelineInfo.layout = pipelineLayout;
+
+      VkPipeline vkPipeline = VK_NULL_HANDLE;
+      result = vkCreateComputePipelines(m_vkDevice, VK_NULL_HANDLE, 1, &pipelineInfo, nullptr, &vkPipeline);
+
+      // Shader module can be destroyed after pipeline creation
+      vkDestroyShaderModule(m_vkDevice, shaderModule, nullptr);
+
+      if (result != VK_SUCCESS) {
+        Logger::err(str::format("RTX MegaGeo: createComputePipeline - failed to create pipeline, result=", (int)result));
+        vkDestroyPipelineLayout(m_vkDevice, pipelineLayout, nullptr);
+        return pipeline;
+      }
+
+      // Store in pipeline wrapper - use first layout for descriptor set layout reference
+      pipeline->setVkPipeline(vkPipeline, pipelineLayout, setLayouts[0], m_vkDevice);
+
+      Logger::info(str::format("RTX MegaGeo: Created native VkPipeline ", (void*)vkPipeline,
+        " with ", setLayouts.size(), " descriptor set layouts"));
+    }
+
+    return pipeline;
+  }
+
+  // DXVK binding offset convention for HLSL register types:
+  // - SRV (t registers): offset 0
+  // - Sampler (s registers): offset 100
+  // - UAV (u registers): offset 200
+  // - CB (b registers): offset 300
+  static constexpr uint32_t kSrvBindingOffset = 0;
+  static constexpr uint32_t kSamplerBindingOffset = 100;
+  static constexpr uint32_t kUavBindingOffset = 200;
+  static constexpr uint32_t kCbBindingOffset = 300;
+
+  static uint32_t getBindingOffsetForLayoutType(nvrhi::BindingLayoutItem::ResourceType type) {
+    switch (type) {
+      case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_SRV:
+      case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_SRV:
+      case nvrhi::BindingLayoutItem::ResourceType::TypedBuffer_SRV:
+      case nvrhi::BindingLayoutItem::ResourceType::Texture_SRV:
+        return kSrvBindingOffset;
+      case nvrhi::BindingLayoutItem::ResourceType::Sampler:
+        return kSamplerBindingOffset;
+      case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_UAV:
+      case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_UAV:
+      case nvrhi::BindingLayoutItem::ResourceType::TypedBuffer_UAV:
+      case nvrhi::BindingLayoutItem::ResourceType::Texture_UAV:
+        return kUavBindingOffset;
+      case nvrhi::BindingLayoutItem::ResourceType::ConstantBuffer:
+        return kCbBindingOffset;
+      default:
+        return 0;
+    }
+  }
+
+  static uint32_t getBindingOffsetForSetType(nvrhi::BindingSetItem::Type type) {
+    switch (type) {
+      case nvrhi::BindingSetItem::Type::StructuredBuffer_SRV:
+      case nvrhi::BindingSetItem::Type::RawBuffer_SRV:
+      case nvrhi::BindingSetItem::Type::TypedBuffer_SRV:
+      case nvrhi::BindingSetItem::Type::Texture_SRV:
+        return kSrvBindingOffset;
+      case nvrhi::BindingSetItem::Type::Sampler:
+        return kSamplerBindingOffset;
+      case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV:
+      case nvrhi::BindingSetItem::Type::RawBuffer_UAV:
+      case nvrhi::BindingSetItem::Type::TypedBuffer_UAV:
+      case nvrhi::BindingSetItem::Type::Texture_UAV:
+        return kUavBindingOffset;
+      case nvrhi::BindingSetItem::Type::ConstantBuffer:
+        return kCbBindingOffset;
+      default:
+        return 0;
+    }
   }
 
   nvrhi::BindingLayoutHandle NvrhiDxvkDevice::createBindingLayout(
@@ -345,63 +518,80 @@ namespace dxvk {
     // Create binding layout wrapper
     auto* layout = new NvrhiDxvkBindingLayout(desc);
 
-    // If this layout uses registerSpaceIsDescriptorSet, create an actual VkDescriptorSetLayout
-    // This is needed for HiZ textures which use Vulkan descriptor set 1
-    if (desc.registerSpaceIsDescriptorSet) {
-      Logger::info(str::format("RTX MegaGeo: Creating VkDescriptorSetLayout for space ", desc.registerSpace));
+    // ALWAYS create a VkDescriptorSetLayout for prebuilt descriptor sets (matching the sample)
+    // This is a major optimization - instead of per-binding calls, we create descriptor sets once
+    // and bind them with a single vkCmdBindDescriptorSets call.
+    //
+    // Binding number assignment uses DXVK's binding offset convention:
+    // - SRV (t registers): binding = slot
+    // - Sampler (s registers): binding = 100 + slot
+    // - UAV (u registers): binding = 200 + slot
+    // - CB (b registers): binding = 300 + slot
+    // For registerSpaceIsDescriptorSet layouts: use slot directly (for HiZ textures in space 1)
 
-      std::vector<VkDescriptorSetLayoutBinding> bindings;
+    std::vector<VkDescriptorSetLayoutBinding> bindings;
 
-      for (const auto& item : desc.bindings) {
-        VkDescriptorSetLayoutBinding binding = {};
-        binding.binding = item.slot;  // HLSL register -> Vulkan binding
-        binding.descriptorCount = item.size > 0 ? item.size : 1;
-        binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;  // Compute shaders only for now
+    for (const auto& item : desc.bindings) {
+      VkDescriptorSetLayoutBinding binding = {};
 
-        switch (item.resourceType) {
-          case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_SRV:
-          case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_SRV:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            break;
-          case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_UAV:
-          case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_UAV:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
-            break;
-          case nvrhi::BindingLayoutItem::ResourceType::Texture_SRV:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
-            break;
-          case nvrhi::BindingLayoutItem::ResourceType::Texture_UAV:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
-            break;
-          case nvrhi::BindingLayoutItem::ResourceType::Sampler:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
-            break;
-          case nvrhi::BindingLayoutItem::ResourceType::ConstantBuffer:
-            binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
-            break;
-          default:
-            Logger::warn(str::format("RTX MegaGeo: Unknown binding type ", (int)item.resourceType, " in registerSpaceIsDescriptorSet layout"));
-            continue;
-        }
+      // For registerSpaceIsDescriptorSet, use the slot directly
+      // Otherwise, use binding offset based on resource type
+      if (desc.registerSpaceIsDescriptorSet) {
+        binding.binding = item.slot;
+      } else {
+        binding.binding = getBindingOffsetForLayoutType(item.resourceType) + item.slot;
+      }
+      binding.descriptorCount = item.size > 0 ? item.size : 1;
+      binding.stageFlags = VK_SHADER_STAGE_COMPUTE_BIT;
 
-        bindings.push_back(binding);
-        Logger::info(str::format("RTX MegaGeo:   binding=", binding.binding, " type=", binding.descriptorType, " count=", binding.descriptorCount));
+      switch (item.resourceType) {
+        case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_SRV:
+        case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_SRV:
+          binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+          break;
+        case nvrhi::BindingLayoutItem::ResourceType::StructuredBuffer_UAV:
+        case nvrhi::BindingLayoutItem::ResourceType::RawBuffer_UAV:
+          binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+          break;
+        case nvrhi::BindingLayoutItem::ResourceType::Texture_SRV:
+          binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+          break;
+        case nvrhi::BindingLayoutItem::ResourceType::Texture_UAV:
+          binding.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+          break;
+        case nvrhi::BindingLayoutItem::ResourceType::Sampler:
+          binding.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+          break;
+        case nvrhi::BindingLayoutItem::ResourceType::ConstantBuffer:
+          binding.descriptorType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+          break;
+        case nvrhi::BindingLayoutItem::ResourceType::PushConstants:
+          // Push constants don't need descriptor bindings
+          continue;
+        default:
+          Logger::warn(str::format("RTX MegaGeo: Unknown binding type ", (int)item.resourceType));
+          continue;
       }
 
-      if (!bindings.empty()) {
-        VkDescriptorSetLayoutCreateInfo layoutInfo = {};
-        layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
-        layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
-        layoutInfo.pBindings = bindings.data();
+      bindings.push_back(binding);
+      RTXMG_LOG(str::format("RTX MegaGeo:   binding=", binding.binding, " type=", binding.descriptorType,
+        " count=", binding.descriptorCount, " (slot=", item.slot, ")"));
+    }
 
-        VkDescriptorSetLayout vkLayout = VK_NULL_HANDLE;
-        VkResult result = vkCreateDescriptorSetLayout(m_vkDevice, &layoutInfo, nullptr, &vkLayout);
-        if (result == VK_SUCCESS && vkLayout != VK_NULL_HANDLE) {
-          layout->setVkDescriptorSetLayout(vkLayout, m_vkDevice);
-          Logger::info(str::format("RTX MegaGeo: Created VkDescriptorSetLayout ", (void*)vkLayout, " for space ", desc.registerSpace));
-        } else {
-          Logger::err(str::format("RTX MegaGeo: Failed to create VkDescriptorSetLayout, result=", (int)result));
-        }
+    if (!bindings.empty()) {
+      VkDescriptorSetLayoutCreateInfo layoutInfo = {};
+      layoutInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO;
+      layoutInfo.bindingCount = static_cast<uint32_t>(bindings.size());
+      layoutInfo.pBindings = bindings.data();
+
+      VkDescriptorSetLayout vkLayout = VK_NULL_HANDLE;
+      VkResult result = vkCreateDescriptorSetLayout(m_vkDevice, &layoutInfo, nullptr, &vkLayout);
+      if (result == VK_SUCCESS && vkLayout != VK_NULL_HANDLE) {
+        layout->setVkDescriptorSetLayout(vkLayout, m_vkDevice);
+        Logger::info(str::format("RTX MegaGeo: Created VkDescriptorSetLayout ", (void*)vkLayout,
+          " for space ", desc.registerSpace, " with ", bindings.size(), " bindings"));
+      } else {
+        Logger::err(str::format("RTX MegaGeo: Failed to create VkDescriptorSetLayout, result=", (int)result));
       }
     }
 
@@ -436,8 +626,292 @@ namespace dxvk {
     const nvrhi::BindingSetDesc& desc,
     nvrhi::IBindingLayout* layout)
   {
-    // Create and return a binding set wrapper that stores the description and layout
-    return new NvrhiDxvkBindingSet(desc, layout);
+    // Create binding set wrapper
+    auto* bindingSet = new NvrhiDxvkBindingSet(desc, layout);
+
+    // PREBUILT DESCRIPTOR SET APPROACH (matching the sample)
+    // Create a VkDescriptorSet at binding set creation time, then at dispatch we just call
+    // vkCmdBindDescriptorSets - this is much faster than per-binding calls.
+    //
+    // The layout must have a VkDescriptorSetLayout (created in createBindingLayout).
+    // The pipeline must also be created with matching descriptor set layouts (in createComputePipeline).
+    auto* nvrhiLayout = static_cast<NvrhiDxvkBindingLayout*>(layout);
+    if (!nvrhiLayout) {
+      RTXMG_LOG("RTX MegaGeo: createBindingSet - null layout, returning without descriptor set");
+      return bindingSet;
+    }
+
+    const nvrhi::BindingLayoutDesc& layoutDesc = nvrhiLayout->getDesc();
+
+    // Only create prebuilt descriptor sets if the layout has a VkDescriptorSetLayout
+    if (!nvrhiLayout->hasVkDescriptorSetLayout()) {
+      RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - layout space=", layoutDesc.registerSpace,
+        " has no VkDescriptorSetLayout, skipping prebuilt descriptor set"));
+      return bindingSet;
+    }
+
+    VkDescriptorSetLayout descriptorSetLayout = nvrhiLayout->getVkDescriptorSetLayout();
+
+    RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - creating prebuilt descriptor set for space ",
+      layoutDesc.registerSpace, " with ", desc.bindings.size(), " bindings"));
+
+    // Count descriptors by type for pool creation (from binding SET, not layout)
+    std::unordered_map<VkDescriptorType, uint32_t> poolSizeMap;
+    for (const auto& item : desc.bindings) {
+      VkDescriptorType descType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+      switch (item.type) {
+        case nvrhi::BindingSetItem::Type::StructuredBuffer_SRV:
+        case nvrhi::BindingSetItem::Type::RawBuffer_SRV:
+        case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV:
+        case nvrhi::BindingSetItem::Type::RawBuffer_UAV:
+          descType = VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+          break;
+        case nvrhi::BindingSetItem::Type::TypedBuffer_SRV:
+          descType = VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER;
+          break;
+        case nvrhi::BindingSetItem::Type::TypedBuffer_UAV:
+          descType = VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER;
+          break;
+        case nvrhi::BindingSetItem::Type::Texture_SRV:
+          descType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+          break;
+        case nvrhi::BindingSetItem::Type::Texture_UAV:
+          descType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+          break;
+        case nvrhi::BindingSetItem::Type::Sampler:
+          descType = VK_DESCRIPTOR_TYPE_SAMPLER;
+          break;
+        case nvrhi::BindingSetItem::Type::ConstantBuffer:
+          descType = VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER;
+          break;
+        default:
+          continue;
+      }
+      poolSizeMap[descType]++;
+    }
+
+    if (poolSizeMap.empty()) {
+      RTXMG_LOG("RTX MegaGeo: createBindingSet - no valid bindings, returning without descriptor set");
+      return bindingSet;
+    }
+
+    // Use shared descriptor pool for efficient allocation (matching the sample)
+    // This is a major performance optimization: creating a new VkDescriptorPool per binding set
+    // is extremely slow. Instead, we use a single shared pool and allocate from it.
+    VkDescriptorPool descriptorPool = getSharedDescriptorPool();
+    if (descriptorPool == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: createBindingSet - failed to get shared descriptor pool");
+      return bindingSet;
+    }
+
+    // Allocate descriptor set from the layout's VkDescriptorSetLayout
+    VkDescriptorSetAllocateInfo allocInfo = {};
+    allocInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_ALLOCATE_INFO;
+    allocInfo.descriptorPool = descriptorPool;
+    allocInfo.descriptorSetCount = 1;
+    allocInfo.pSetLayouts = &descriptorSetLayout;
+
+    VkDescriptorSet descriptorSet = VK_NULL_HANDLE;
+    VkResult result = vkAllocateDescriptorSets(m_vkDevice, &allocInfo, &descriptorSet);
+    if (result != VK_SUCCESS) {
+      // Don't destroy shared pool on failure - just log and return
+      Logger::err(str::format("RTX MegaGeo: createBindingSet - failed to allocate descriptor set, result=", (int)result));
+      return bindingSet;
+    }
+
+    // Write descriptors - use binding numbers that match how the layout was created:
+    // - registerSpaceIsDescriptorSet: use slot directly (matches shader)
+    // Write descriptors - binding numbers must match the layout:
+    // - For registerSpaceIsDescriptorSet: use slot directly
+    // - Otherwise: use binding offset based on resource type (matching createBindingLayout)
+    std::vector<VkDescriptorBufferInfo> bufferInfos;
+    std::vector<VkDescriptorImageInfo> imageInfos;
+    std::vector<VkWriteDescriptorSet> writes;
+
+    bufferInfos.reserve(desc.bindings.size());
+    imageInfos.reserve(desc.bindings.size());
+    writes.reserve(desc.bindings.size());
+
+    for (const auto& item : desc.bindings) {
+      if (item.resourceHandle == nullptr) continue;
+
+      VkWriteDescriptorSet write = {};
+      write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+      write.dstSet = descriptorSet;
+
+      // Calculate binding number using the same logic as createBindingLayout
+      if (layoutDesc.registerSpaceIsDescriptorSet) {
+        write.dstBinding = item.slot;
+      } else {
+        write.dstBinding = getBindingOffsetForSetType(item.type) + item.slot;
+      }
+
+      write.dstArrayElement = item.arrayElement;
+      write.descriptorCount = 1;
+
+      switch (item.type) {
+        case nvrhi::BindingSetItem::Type::StructuredBuffer_SRV:
+        case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV:
+        case nvrhi::BindingSetItem::Type::ConstantBuffer:
+        {
+          auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
+          Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
+
+          uint64_t bufferSize = dxvkBuffer->info().size;
+          uint64_t offset = std::min(item.range.byteOffset, bufferSize);
+          uint64_t size = (item.range.byteSize > 0)
+            ? std::min(item.range.byteSize, bufferSize - offset)
+            : bufferSize - offset;
+
+          DxvkBufferSliceHandle sliceHandle = dxvkBuffer->getSliceHandle();
+
+          VkDescriptorBufferInfo bufferInfo = {};
+          bufferInfo.buffer = sliceHandle.handle;
+          bufferInfo.offset = sliceHandle.offset + offset;
+          bufferInfo.range = size;
+          bufferInfos.push_back(bufferInfo);
+
+          write.descriptorType = (item.type == nvrhi::BindingSetItem::Type::ConstantBuffer)
+            ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER
+            : VK_DESCRIPTOR_TYPE_STORAGE_BUFFER;
+          write.pBufferInfo = &bufferInfos.back();
+          writes.push_back(write);
+
+          RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - buffer binding=", item.slot,
+            " type=", (int)write.descriptorType, " size=", size));
+          break;
+        }
+        case nvrhi::BindingSetItem::Type::Sampler:
+        {
+          auto* nvrhiSampler = static_cast<NvrhiDxvkSampler*>(item.resourceHandle);
+          Rc<DxvkSampler> dxvkSampler = nvrhiSampler->getDxvkSampler();
+
+          VkDescriptorImageInfo imageInfo = {};
+          imageInfo.sampler = dxvkSampler->handle();
+          imageInfos.push_back(imageInfo);
+
+          write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLER;
+          write.pImageInfo = &imageInfos.back();
+          writes.push_back(write);
+
+          RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - sampler binding=", item.slot));
+          break;
+        }
+        case nvrhi::BindingSetItem::Type::Texture_SRV:
+        {
+          // Create image view and write descriptor for texture SRV
+          nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+          if (nativeObj.pointer == nullptr) {
+            Logger::warn(str::format("RTX MegaGeo: createBindingSet - Texture_SRV slot=", item.slot,
+              " is not a VK_Image, skipping"));
+            break;
+          }
+
+          auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
+          const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+          if (dxvkImage == nullptr) {
+            Logger::warn(str::format("RTX MegaGeo: createBindingSet - Texture_SRV slot=", item.slot,
+              " has null DxvkImage, skipping"));
+            break;
+          }
+
+          // Create image view
+          DxvkImageViewCreateInfo viewInfo;
+          viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
+          viewInfo.format = dxvkImage->info().format;
+          viewInfo.usage = VK_IMAGE_USAGE_SAMPLED_BIT;
+
+          // Handle depth formats
+          VkFormat fmt = dxvkImage->info().format;
+          if (fmt == VK_FORMAT_D32_SFLOAT || fmt == VK_FORMAT_D16_UNORM ||
+              fmt == VK_FORMAT_D24_UNORM_S8_UINT || fmt == VK_FORMAT_D32_SFLOAT_S8_UINT) {
+            viewInfo.aspect = VK_IMAGE_ASPECT_DEPTH_BIT;
+          } else {
+            viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+          }
+          viewInfo.minLevel = 0;
+          viewInfo.numLevels = dxvkImage->info().mipLevels;
+          viewInfo.minLayer = 0;
+          viewInfo.numLayers = 1;
+
+          Rc<DxvkImageView> imageView = m_device->createImageView(dxvkImage, viewInfo);
+          if (imageView != nullptr) {
+            VkDescriptorImageInfo imageInfo = {};
+            imageInfo.imageView = imageView->handle();
+            imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+            imageInfos.push_back(imageInfo);
+
+            write.descriptorType = VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE;
+            write.pImageInfo = &imageInfos.back();
+            writes.push_back(write);
+
+            RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - texture SRV binding=", item.slot,
+              " array=", item.arrayElement));
+          }
+          break;
+        }
+        case nvrhi::BindingSetItem::Type::Texture_UAV:
+        {
+          // Create image view and write descriptor for texture UAV
+          nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+          if (nativeObj.pointer == nullptr) {
+            Logger::warn(str::format("RTX MegaGeo: createBindingSet - Texture_UAV slot=", item.slot,
+              " is not a VK_Image, skipping"));
+            break;
+          }
+
+          auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
+          const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+          if (dxvkImage == nullptr) {
+            Logger::warn(str::format("RTX MegaGeo: createBindingSet - Texture_UAV slot=", item.slot,
+              " has null DxvkImage, skipping"));
+            break;
+          }
+
+          // Create image view for storage
+          DxvkImageViewCreateInfo viewInfo;
+          viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
+          viewInfo.format = dxvkImage->info().format;
+          viewInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+          viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+          viewInfo.minLevel = 0;
+          viewInfo.numLevels = 1;
+          viewInfo.minLayer = 0;
+          viewInfo.numLayers = 1;
+
+          Rc<DxvkImageView> imageView = m_device->createImageView(dxvkImage, viewInfo);
+          if (imageView != nullptr) {
+            VkDescriptorImageInfo imageInfo = {};
+            imageInfo.imageView = imageView->handle();
+            imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;
+            imageInfos.push_back(imageInfo);
+
+            write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+            write.pImageInfo = &imageInfos.back();
+            writes.push_back(write);
+
+            RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - texture UAV binding=", item.slot,
+              " array=", item.arrayElement));
+          }
+          break;
+        }
+        default:
+          break;
+      }
+    }
+
+    // Update descriptor set with all writes
+    if (!writes.empty()) {
+      vkUpdateDescriptorSets(m_vkDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
+    }
+
+    // Store in binding set (shared pool - set is freed back to pool when binding set is destroyed)
+    bindingSet->setDescriptorSet(descriptorPool, descriptorSet, m_vkDevice, false);
+
+    Logger::info(str::format("RTX MegaGeo: createBindingSet - created pre-built descriptor set with ",
+      writes.size(), " descriptors for space ", layoutDesc.registerSpace));
+
+    return bindingSet;
   }
 
   nvrhi::rt::cluster::OperationSizeInfo NvrhiDxvkDevice::getClusterOperationSizeInfo(
@@ -579,6 +1053,43 @@ namespace dxvk {
     // IMPORTANT: Only call this when absolutely necessary (e.g., before destroying resources)
     // as it stalls the entire GPU pipeline and kills performance.
     m_device->waitForIdle();
+  }
+
+  VkDescriptorPool NvrhiDxvkDevice::getSharedDescriptorPool() {
+    if (m_sharedDescriptorPool != VK_NULL_HANDLE) {
+      return m_sharedDescriptorPool;
+    }
+
+    // Create a large shared descriptor pool with FREE_DESCRIPTOR_SET_BIT
+    // This allows individual descriptor sets to be freed back to the pool.
+    // Pool sizes are generous to handle all descriptor types used by RTX MG.
+    std::vector<VkDescriptorPoolSize> poolSizes = {
+      { VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, kSharedPoolDescriptorCount },
+      { VK_DESCRIPTOR_TYPE_SAMPLED_IMAGE, kSharedPoolDescriptorCount },
+      { VK_DESCRIPTOR_TYPE_STORAGE_IMAGE, kSharedPoolDescriptorCount },
+      { VK_DESCRIPTOR_TYPE_SAMPLER, kSharedPoolDescriptorCount },
+      { VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, kSharedPoolDescriptorCount },
+      { VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER, kSharedPoolDescriptorCount },
+      { VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER, kSharedPoolDescriptorCount },
+    };
+
+    VkDescriptorPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = kSharedPoolMaxSets;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+
+    VkResult result = vkCreateDescriptorPool(m_vkDevice, &poolInfo, nullptr, &m_sharedDescriptorPool);
+    if (result != VK_SUCCESS) {
+      Logger::err(str::format("RTX MegaGeo: Failed to create shared descriptor pool, result=", (int)result));
+      return VK_NULL_HANDLE;
+    }
+
+    Logger::info(str::format("RTX MegaGeo: Created shared descriptor pool with maxSets=", kSharedPoolMaxSets,
+      " and ", kSharedPoolDescriptorCount, " descriptors per type"));
+
+    return m_sharedDescriptorPool;
   }
 
 } // namespace dxvk

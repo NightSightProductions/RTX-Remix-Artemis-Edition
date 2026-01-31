@@ -175,7 +175,8 @@ namespace dxvk {
     bool buildClusterBlas(
       const Rc<RtxContext>& context,
       const Rc<DxvkImageView>& depthBuffer,
-      const class RtCamera& camera);
+      const class RtCamera& camera,
+      const std::unordered_map<uint32_t, Matrix4>& instanceTransforms = {});
 
     /**
      * \brief Get built BLAS for a surface
@@ -445,9 +446,16 @@ namespace dxvk {
     std::unordered_map<uint32_t, RTXMGSubdivisionSurfaceEntry> m_surfaces;
     uint32_t m_nextSurfaceId = 1;
 
-    // Mapping from surfaceId to instance index in the scene
+    // Mapping from surfaceId to instance index in the scene (rebuilt each frame)
     // Used to look up BLAS addresses after cluster build
     std::unordered_map<uint32_t, uint32_t> m_surfaceToInstanceIndex;
+
+    // Mapping from surfaceId to mesh index in the scene (persistent)
+    // Used to rebuild instances each frame
+    std::unordered_map<uint32_t, uint32_t> m_surfaceToMeshIndex;
+
+    // Instance transforms from RTX Remix (surfaceId -> objectToWorld)
+    std::unordered_map<uint32_t, Matrix4> m_instanceTransforms;
 
     // Downloaded BLAS addresses from GPU (populated after BuildAccel)
     std::vector<VkDeviceAddress> m_downloadedBlasAddresses;

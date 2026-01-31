@@ -52,6 +52,7 @@ namespace dxvk {
 
 class RTXMGScene;
 class SubdivisionSurface;
+class ZBuffer;
 struct TopologyMap;
 struct Instance;
 
@@ -279,6 +280,8 @@ protected:
     nvrhi::BindingLayoutHandle m_computeClusterTilingBL;
     nvrhi::BindingLayoutHandle m_computeClusterTilingHizBL;  // Separate HiZ binding layout (space 1)
     nvrhi::BindingSetHandle m_dummyHizBindingSet;           // Dummy HiZ binding set when zbuffer is null
+    nvrhi::BindingSetHandle m_cachedHizBindingSet;          // Cached HiZ binding set when zbuffer available
+    const ZBuffer* m_cachedHizBuffer = nullptr;              // Track which zbuffer the cached set was created for
     nvrhi::ComputePipelineHandle m_computeClusterTilingPSOs[ComputeClusterTilingPermutation::kCount];
 
     // Dummy HiZ textures for when HiZ culling is disabled
@@ -329,6 +332,9 @@ protected:
     nvrhi::BufferHandle m_fillBlasFromClasArgsParamsBuffer; // constant buffer for filling indirect args to initialize blas from clas
 
     RTXMGBuffer<ShaderDebugElement> m_debugBuffer;
+
+    // Current frame index for deferred destruction tracking
+    uint32_t m_currentFrameIndex = 0;
 
     // Deferred destruction - keep old buffers alive for N frames to avoid use-after-free
     // This avoids calling waitForIdle() which kills performance

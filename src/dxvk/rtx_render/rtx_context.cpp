@@ -2153,6 +2153,25 @@ namespace dxvk {
     return VK_NULL_HANDLE;
   }
 
+  void RtxContext::bindExternalComputeDescriptorSet(
+      VkDescriptorSet descriptorSet,
+      uint32_t setIndex,
+      VkPipelineLayout pipelineLayout) {
+    // Use provided pipeline layout, or fall back to current compute pipeline layout
+    VkPipelineLayout layout = pipelineLayout;
+    if (layout == VK_NULL_HANDLE) {
+      layout = getCurrentComputePipelineLayout();
+    }
+
+    if (layout != VK_NULL_HANDLE && descriptorSet != VK_NULL_HANDLE) {
+      m_cmd->cmdBindDescriptorSet(
+        VK_PIPELINE_BIND_POINT_COMPUTE,
+        layout,
+        descriptorSet,
+        setIndex);
+    }
+  }
+
   void RtxContext::updateRaytracingShaderResources() {
     ScopedCpuProfileZone();
     DxvkContext::updateRaytracingShaderResources();

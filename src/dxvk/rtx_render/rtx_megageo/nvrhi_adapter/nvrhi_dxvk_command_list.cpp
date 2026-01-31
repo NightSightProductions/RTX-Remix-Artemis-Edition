@@ -20,7 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 // Enable verbose MegaGeo logging for debugging
-#define RTXMG_VERBOSE_LOGGING 1
+#define RTXMG_VERBOSE_LOGGING 0
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) dxvk::Logger::info(msg)
 #else
@@ -62,6 +62,20 @@ namespace dxvk {
       m_hiZImageViews[i] = nullptr;
     }
     // Note: Keep m_hiZDescriptorSetLayout and m_hiZPipelineLayout cached for reuse
+
+    // Clear UAV array binding state
+    m_hasUAVArrayBinding = false;
+    for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
+      m_uavImageViews[i] = nullptr;
+    }
+
+    // Clear pending pre-built descriptor set bindings (these were never dispatched)
+    m_pendingDescriptorSets.clear();
+
+    // Clear in-flight binding sets from previous frame
+    // By this point, DXVK has synchronized with the GPU and previous command buffers have completed,
+    // so it's safe to release the binding set references (and thus their descriptor sets)
+    m_inFlightBindingSets.clear();
 
     RTXMG_LOG("RTX MegaGeo: clearState - done");
   }
@@ -377,11 +391,13 @@ namespace dxvk {
     // HiZ textures are at slot 17, which maps to binding 18 in set 0
     // (CB at binding 0, SRVs 0-16 at bindings 1-17, slot 17 at binding 18)
     // The descriptor layout has count=9 for this binding (array of 9 textures)
+    // NOTE: HiZ textures are UAVs that stay in GENERAL layout (written by reduce pass),
+    // so we must use GENERAL layout when reading them, not SHADER_READ_ONLY_OPTIMAL.
     std::array<VkDescriptorImageInfo, HIZ_MAX_LODS> imageInfos;
 
     for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
       imageInfos[i] = {};
-      imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
+      imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;
       if (m_hiZImageViews[i] != nullptr) {
         imageInfos[i].imageView = m_hiZImageViews[i]->handle();
       } else {
@@ -413,34 +429,171 @@ namespace dxvk {
     m_hasHiZBinding = false;
   }
 
+  void NvrhiDxvkCommandList::bindUAVArrayDescriptorSet() {
+    if (!m_hasUAVArrayBinding) {
+      return;
+    }
+
+    VkDevice vkDevice = m_device->getVkDevice();
+    if (vkDevice == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: bindUAVArrayDescriptorSet - null VkDevice");
+      return;
+    }
+
+    // Get the compute descriptor set that DXVK allocated for set 0
+    VkDescriptorSet computeSet = m_context->getComputeDescriptorSet();
+    if (computeSet == VK_NULL_HANDLE) {
+      Logger::err("RTX MegaGeo: bindUAVArrayDescriptorSet - null compute descriptor set");
+      return;
+    }
+
+    // UAV array at u0 (slot 200) maps to binding 3 in set 0 for HiZ reduce shaders
+    // Layout: binding 0=t0 (zbuffer), 1=t1 (params), 2=s0 (sampler), 3=u0 (UAV array)
+    std::array<VkDescriptorImageInfo, HIZ_MAX_LODS> imageInfos;
+
+    for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i) {
+      imageInfos[i] = {};
+      imageInfos[i].imageLayout = VK_IMAGE_LAYOUT_GENERAL;  // UAVs use GENERAL layout
+      if (m_uavImageViews[i] != nullptr) {
+        imageInfos[i].imageView = m_uavImageViews[i]->handle();
+      } else {
+        // Use first valid view as fallback for missing levels
+        for (uint32_t j = 0; j < HIZ_MAX_LODS; ++j) {
+          if (m_uavImageViews[j] != nullptr) {
+            imageInfos[i].imageView = m_uavImageViews[j]->handle();
+            break;
+          }
+        }
+      }
+    }
+
+    // Update binding 3 in set 0 with the UAV texture array
+    VkWriteDescriptorSet write = {};
+    write.sType = VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET;
+    write.dstSet = computeSet;
+    write.dstBinding = 3;  // Binding 3 in set 0 for UAV array (u0 at slot 200)
+    write.dstArrayElement = 0;
+    write.descriptorCount = HIZ_MAX_LODS;  // Write all 9 at once
+    write.descriptorType = VK_DESCRIPTOR_TYPE_STORAGE_IMAGE;
+    write.pImageInfo = imageInfos.data();
+
+    m_device->getDxvkDevice()->vkd()->vkUpdateDescriptorSets(vkDevice, 1, &write, 0, nullptr);
+
+    RTXMG_LOG("RTX MegaGeo: Updated UAV binding 3 in set 0 with 9 storage images");
+
+    // Reset UAV binding state
+    m_hasUAVArrayBinding = false;
+  }
+
   void NvrhiDxvkCommandList::dispatch(uint32_t x, uint32_t y, uint32_t z) {
-    // For shaders with HiZ binding, we need special handling:
-    // HiZ textures are at slot 17 (binding 18) in set 0 as an array of 9 SAMPLED_IMAGEs
-    // DXVK's bindResourceView doesn't support arrays, so we update binding 18 manually
-    if (m_hasHiZBinding) {
-      // Commit compute state - this binds the pipeline and set 0 resources
-      RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
-      if (!rtxContext->commitComputeStateForMegaGeo()) {
-        Logger::err("RTX MegaGeo: Failed to commit compute state for MegaGeo dispatch");
-        return;
+    // Check if we have pre-built descriptor sets with their own pipeline layout
+    // In this case, we use native Vulkan calls instead of DXVK's pipeline
+    bool hasNativePipeline = false;
+    VkPipeline nativePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout nativePipelineLayout = VK_NULL_HANDLE;
+
+    if (!m_pendingDescriptorSets.empty() && m_pendingDescriptorSets[0].pipelineLayout != VK_NULL_HANDLE) {
+      // Get the native pipeline from the compute state
+      if (m_computeState.pipeline) {
+        auto* computePipeline = static_cast<NvrhiDxvkComputePipeline*>(m_computeState.pipeline.Get());
+        if (computePipeline && computePipeline->hasVkPipeline()) {
+          hasNativePipeline = true;
+          nativePipeline = computePipeline->getVkPipeline();
+          nativePipelineLayout = computePipeline->getPipelineLayout();
+        }
+      }
+    }
+
+    // For shaders with HiZ/UAV array bindings or pre-built descriptor sets, we need special handling.
+    if (m_hasHiZBinding || m_hasUAVArrayBinding || !m_pendingDescriptorSets.empty()) {
+      VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
+
+      if (hasNativePipeline) {
+        // Use native Vulkan pipeline - completely bypass DXVK's pipeline
+        m_device->getDxvkDevice()->vkd()->vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, nativePipeline);
+        RTXMG_LOG(str::format("RTX MegaGeo: bound native VkPipeline ", (void*)nativePipeline));
+      } else {
+        // Commit DXVK compute state - this binds the pipeline and set 0 resources
+        RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
+        if (!rtxContext->commitComputeStateForMegaGeo()) {
+          Logger::err("RTX MegaGeo: Failed to commit compute state for MegaGeo dispatch");
+          return;
+        }
       }
 
-      // Now emit barrier AFTER state is committed (so resources are properly tracked)
+      // Emit barrier for resource synchronization
       m_context->emitMemoryBarrier(0,
         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-      // Update HiZ texture array at binding 18 in set 0
-      // The shader expects: Texture2D t_HiZBuffer[HIZ_MAX_LODS] at slot 17 -> binding 18
-      VkPipelineLayout pipelineLayout = m_context->getComputePipelineLayout();
-      bindHiZDescriptorSet(pipelineLayout);
+      // Bind pre-built descriptor sets with vkCmdBindDescriptorSets
+      // Also handle push constants for constant buffers
+      if (!m_pendingDescriptorSets.empty()) {
+        for (const auto& pending : m_pendingDescriptorSets) {
+          VkPipelineLayout layoutToUse = pending.pipelineLayout != VK_NULL_HANDLE
+            ? pending.pipelineLayout
+            : (hasNativePipeline ? nativePipelineLayout : m_context->getComputePipelineLayout());
+
+          RTXMG_LOG(str::format("RTX MegaGeo: binding pre-built descriptor set at index ", pending.setIndex,
+            " with pipelineLayout=", (void*)layoutToUse));
+
+          m_device->getDxvkDevice()->vkd()->vkCmdBindDescriptorSets(
+            cmdBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            layoutToUse,
+            pending.setIndex,
+            1,
+            &pending.descriptorSet,
+            0,
+            nullptr);
+
+          // Push constants for constant buffers in this binding set
+          // The shader may have been compiled with push constants for small CBs
+          if (pending.bindingSetRef) {
+            auto* nvrhiBindingSet = static_cast<NvrhiDxvkBindingSet*>(pending.bindingSetRef.Get());
+            if (nvrhiBindingSet) {
+              const auto& desc = nvrhiBindingSet->getDesc();
+              for (const auto& item : desc.bindings) {
+                if (item.type == nvrhi::BindingSetItem::Type::ConstantBuffer && item.resourceHandle) {
+                  auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
+                  if (nvrhiBuffer->hasCachedData()) {
+                    uint32_t pushSize = static_cast<uint32_t>(nvrhiBuffer->getCachedDataSize());
+                    RTXMG_LOG(str::format("RTX MegaGeo: vkCmdPushConstants size=", pushSize, " (b", item.slot, ")"));
+                    m_device->getDxvkDevice()->vkd()->vkCmdPushConstants(
+                      cmdBuffer,
+                      layoutToUse,
+                      VK_SHADER_STAGE_COMPUTE_BIT,
+                      0,
+                      pushSize,
+                      nvrhiBuffer->getCachedData());
+                  }
+                }
+              }
+            }
+          }
+
+          // Keep the binding set alive until command buffer execution completes
+          m_inFlightBindingSets.push_back(pending.bindingSetRef);
+        }
+        m_pendingDescriptorSets.clear();
+      }
+
+      // Update HiZ texture array at binding 18 in set 0 (if bound)
+      if (m_hasHiZBinding) {
+        VkPipelineLayout pipelineLayout = hasNativePipeline ? nativePipelineLayout : m_context->getComputePipelineLayout();
+        bindHiZDescriptorSet(pipelineLayout);
+      }
+
+      // Update UAV texture array at binding 3 in set 0 (if bound)
+      if (m_hasUAVArrayBinding) {
+        bindUAVArrayDescriptorSet();
+      }
 
       // Call vkCmdDispatch directly
-      VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
       m_device->getDxvkDevice()->vkd()->vkCmdDispatch(cmdBuffer, x, y, z);
-      RTXMG_LOG(str::format("RTX MegaGeo: dispatch(", x, ", ", y, ", ", z, ") with HiZ binding 18"));
+      RTXMG_LOG(str::format("RTX MegaGeo: dispatch(", x, ", ", y, ", ", z, ") with special bindings"));
     } else {
       // Normal dispatch path through DXVK
       // Ensure all prior writes are visible to this shader read
@@ -476,31 +629,85 @@ namespace dxvk {
     DxvkBufferSlice argBufferSlice(dxvkBuffer, offset, sizeof(VkDispatchIndirectCommand));
     m_context->bindDrawBuffers(argBufferSlice, DxvkBufferSlice());
 
-    // For shaders with HiZ binding, bind HiZ descriptor set at set 1
-    if (m_hasHiZBinding) {
-      RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
-      if (!rtxContext->commitComputeStateForMegaGeo()) {
-        Logger::err("RTX MegaGeo: Failed to commit compute state for MegaGeo dispatchIndirect");
-        return;
+    // Check if we have pre-built descriptor sets with their own pipeline layout
+    bool hasNativePipeline = false;
+    VkPipeline nativePipeline = VK_NULL_HANDLE;
+    VkPipelineLayout nativePipelineLayout = VK_NULL_HANDLE;
+
+    if (!m_pendingDescriptorSets.empty() && m_pendingDescriptorSets[0].pipelineLayout != VK_NULL_HANDLE) {
+      if (m_computeState.pipeline) {
+        auto* computePipeline = static_cast<NvrhiDxvkComputePipeline*>(m_computeState.pipeline.Get());
+        if (computePipeline && computePipeline->hasVkPipeline()) {
+          hasNativePipeline = true;
+          nativePipeline = computePipeline->getVkPipeline();
+          nativePipelineLayout = computePipeline->getPipelineLayout();
+        }
+      }
+    }
+
+    // For shaders with HiZ/UAV array bindings or pre-built descriptor sets, we need special handling
+    if (m_hasHiZBinding || m_hasUAVArrayBinding || !m_pendingDescriptorSets.empty()) {
+      VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
+
+      if (hasNativePipeline) {
+        // Use native Vulkan pipeline - completely bypass DXVK's pipeline
+        m_device->getDxvkDevice()->vkd()->vkCmdBindPipeline(cmdBuffer, VK_PIPELINE_BIND_POINT_COMPUTE, nativePipeline);
+        RTXMG_LOG(str::format("RTX MegaGeo: bound native VkPipeline for dispatchIndirect ", (void*)nativePipeline));
+      } else {
+        RtxContext* rtxContext = static_cast<RtxContext*>(m_context.ptr());
+        if (!rtxContext->commitComputeStateForMegaGeo()) {
+          Logger::err("RTX MegaGeo: Failed to commit compute state for MegaGeo dispatchIndirect");
+          return;
+        }
       }
 
-      // Emit barrier AFTER state is committed
+      // Emit barrier for resource synchronization
       m_context->emitMemoryBarrier(0,
         VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
 
-      // Bind HiZ descriptor set at set index 1
-      // Update HiZ texture array at binding 18 in set 0
-      VkPipelineLayout pipelineLayout = m_context->getComputePipelineLayout();
-      bindHiZDescriptorSet(pipelineLayout);
+      // Bind pre-built descriptor sets with vkCmdBindDescriptorSets
+      if (!m_pendingDescriptorSets.empty()) {
+        for (const auto& pending : m_pendingDescriptorSets) {
+          VkPipelineLayout layoutToUse = pending.pipelineLayout != VK_NULL_HANDLE
+            ? pending.pipelineLayout
+            : (hasNativePipeline ? nativePipelineLayout : m_context->getComputePipelineLayout());
+
+          RTXMG_LOG(str::format("RTX MegaGeo: binding pre-built descriptor set at index ", pending.setIndex,
+            " with pipelineLayout=", (void*)layoutToUse));
+
+          m_device->getDxvkDevice()->vkd()->vkCmdBindDescriptorSets(
+            cmdBuffer,
+            VK_PIPELINE_BIND_POINT_COMPUTE,
+            layoutToUse,
+            pending.setIndex,
+            1,
+            &pending.descriptorSet,
+            0,
+            nullptr);
+
+          m_inFlightBindingSets.push_back(pending.bindingSetRef);
+        }
+        m_pendingDescriptorSets.clear();
+      }
+
+      // Update HiZ texture array at binding 18 in set 0 (if bound)
+      if (m_hasHiZBinding) {
+        VkPipelineLayout pipelineLayout = hasNativePipeline ? nativePipelineLayout : m_context->getComputePipelineLayout();
+        bindHiZDescriptorSet(pipelineLayout);
+      }
+
+      // Update UAV texture array at binding 3 in set 0 (if bound)
+      if (m_hasUAVArrayBinding) {
+        bindUAVArrayDescriptorSet();
+      }
 
       // Call vkCmdDispatchIndirect directly
-      VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
       auto bufferSlice = argBufferSlice.getSliceHandle(0, sizeof(VkDispatchIndirectCommand));
       m_device->getDxvkDevice()->vkd()->vkCmdDispatchIndirect(cmdBuffer, bufferSlice.handle, bufferSlice.offset);
-      RTXMG_LOG("RTX MegaGeo: dispatchIndirect with HiZ binding 18");
+      RTXMG_LOG("RTX MegaGeo: dispatchIndirect with special bindings");
     } else {
       // Ensure all prior writes are visible to this shader read
       m_context->emitMemoryBarrier(0,
@@ -531,27 +738,24 @@ namespace dxvk {
 
     const nvrhi::rt::cluster::OperationDesc& desc = nvrhiDesc;
 
-    // CRITICAL: Insert barriers matching NVRHI sample behavior
-    // Sample uses: ShaderResource (SHADER_READ) for input, UnorderedAccess (SHADER_READ|SHADER_WRITE) for output
+    // NO pre-barriers needed - matching sample behavior
+    // All buffers have keepInitialState=true, so NVRHI's state tracker doesn't insert barriers
+    // DXVK handles synchronization internally
+
+    // Diagnostic logging for crash investigation
+    Logger::info(str::format("RTX MegaGeo: executeMultiIndirectClusterOperation - scratchSize=", desc.scratchSizeInBytes));
     if (desc.inIndirectArgsBuffer) {
-      // indirectArgsBuffer: ShaderResource state (readable)
-      m_context->emitMemoryBarrier(
-        0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        VK_ACCESS_SHADER_READ_BIT);
+      Logger::info(str::format("RTX MegaGeo:   inIndirectArgsBuffer addr=", desc.inIndirectArgsBuffer->getGpuVirtualAddress()));
+    }
+    if (desc.inOutAddressesBuffer) {
+      Logger::info(str::format("RTX MegaGeo:   inOutAddressesBuffer addr=", desc.inOutAddressesBuffer->getGpuVirtualAddress()));
     }
     if (desc.outSizesBuffer) {
-      // outSizesBuffer: UnorderedAccess state (read/write)
-      m_context->emitMemoryBarrier(
-        0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      Logger::info(str::format("RTX MegaGeo:   outSizesBuffer addr=", desc.outSizesBuffer->getGpuVirtualAddress()));
     }
-    RTXMG_LOG("RTX MegaGeo: Inserted pre-command barriers");
+    if (desc.outAccelerationStructuresBuffer) {
+      Logger::info(str::format("RTX MegaGeo:   outAccelStructBuffer addr=", desc.outAccelerationStructuresBuffer->getGpuVirtualAddress()));
+    }
 
     // Get direct Vulkan command buffer from DXVK
     VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
@@ -583,6 +787,11 @@ namespace dxvk {
     }
 
     if (vkCmdBuildClusterAS) {
+      // Always log key values for crash diagnosis
+      Logger::info(str::format("RTX MegaGeo: vkCmdBuildClusterAS scratchData=", std::hex, vkCmds.scratchData,
+                               " dstImplicit=", vkCmds.dstImplicitData,
+                               " srcInfos=", vkCmds.srcInfosArray.deviceAddress,
+                               " count=", vkCmds.srcInfosCount));
       RTXMG_LOG("RTX MegaGeo: About to call vkCmdBuildClusterAccelerationStructureIndirectNV");
       RTXMG_LOG(str::format("RTX MegaGeo: FINAL vkCmds.sType=", vkCmds.sType, " vkCmds.pNext=", (void*)vkCmds.pNext));
       RTXMG_LOG(str::format("RTX MegaGeo: FINAL vkCmds.scratchData=", vkCmds.scratchData,
@@ -615,15 +824,9 @@ namespace dxvk {
       return;
     }
 
-    // Insert post-operation barrier to ensure cluster AS build completes before any dependent operations
-    // This is critical for synchronizing between the cluster AS build and subsequent TLAS builds or ray tracing
-    m_context->emitMemoryBarrier(
-      0,
-      VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-      VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR | VK_ACCESS_SHADER_WRITE_BIT,
-      VK_PIPELINE_STAGE_ALL_COMMANDS_BIT,
-      VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR | VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_MEMORY_READ_BIT);
-    RTXMG_LOG("RTX MegaGeo: Inserted post-operation barrier");
+    // NO post-barriers - matching sample behavior
+    // NVRHI's automatic barrier system handles subsequent state transitions
+    // DXVK should handle synchronization when BLAS is used in TLAS build
 
     RTXMG_LOG("RTX MegaGeo: executeMultiIndirectClusterOperation - Complete");
   }
@@ -803,24 +1006,32 @@ namespace dxvk {
       const nvrhi::BindingSetDesc& desc = nvrhiBindingSet->getDesc();
       RTXMG_LOG(str::format("RTX MegaGeo: bindComputeResources - bindingSet[", bindingSetIndex, "] has ", desc.bindings.size(), " bindings"));
 
-      // Log all bindings in this set (only for 29-binding compute_cluster_tiling)
-      static bool loggedBindings = false;
-      if (!loggedBindings && bindingSetIndex == 0 && desc.bindings.size() == 29) {
-        loggedBindings = true;
-        for (size_t i = 0; i < desc.bindings.size(); ++i) {
-          const auto& b = desc.bindings[i];
-          const char* typeName = "Unknown";
-          switch (b.type) {
-            case nvrhi::BindingSetItem::Type::ConstantBuffer: typeName = "CB"; break;
-            case nvrhi::BindingSetItem::Type::StructuredBuffer_SRV: typeName = "SRV"; break;
-            case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV: typeName = "UAV"; break;
-            case nvrhi::BindingSetItem::Type::Sampler: typeName = "Sampler"; break;
-            case nvrhi::BindingSetItem::Type::Texture_SRV: typeName = "TexSRV"; break;
-            case nvrhi::BindingSetItem::Type::Texture_UAV: typeName = "TexUAV"; break;
-            default: break;
+      // NVRHI-Vulkan Native Approach: If this binding set has a pre-built VkDescriptorSet,
+      // queue it for binding after commitComputeState() instead of using per-binding calls.
+      // This matches the sample's approach of pre-building descriptor sets in createBindingSet()
+      // and binding them with a single vkCmdBindDescriptorSets call.
+      if (nvrhiBindingSet->hasDescriptorSet()) {
+        auto* bindingLayout = nvrhiBindingSet->getLayout();
+        auto* nvrhiLayout = static_cast<NvrhiDxvkBindingLayout*>(bindingLayout);
+        uint32_t setIndex = nvrhiLayout ? nvrhiLayout->getDesc().registerSpace : bindingSetIndex;
+
+        // Get the pipeline layout from the MegaGeo compute pipeline (not DXVK's layout)
+        VkPipelineLayout pipelineLayout = VK_NULL_HANDLE;
+        if (state.pipeline) {
+          auto* computePipeline = static_cast<NvrhiDxvkComputePipeline*>(state.pipeline.Get());
+          if (computePipeline && computePipeline->hasVkPipeline()) {
+            pipelineLayout = computePipeline->getPipelineLayout();
           }
-          Logger::info(str::format("RTX MegaGeo: Binding[", i, "] vk::binding=", i, " type=", typeName, " nvrhi_slot=", b.slot, " range=[", b.range.byteOffset, ",", b.range.byteSize, "]"));
         }
+
+        RTXMG_LOG(str::format("RTX MegaGeo: bindingSet[", bindingSetIndex,
+          "] has pre-built descriptor set, queuing for bind at set index ", setIndex,
+          " with pipelineLayout=", (void*)pipelineLayout));
+
+        // Store the binding set handle to keep the descriptor set alive until command buffer completes
+        m_pendingDescriptorSets.push_back({nvrhiBindingSet->getDescriptorSet(), setIndex, pipelineLayout, bindingSet});
+        bindingSetIndex++;
+        continue;  // Skip per-binding approach for this set
       }
 
       // For binding set 0 (main descriptor set), use DXVK convention slot numbers
@@ -850,16 +1061,9 @@ namespace dxvk {
               uint64_t size = (item.range.byteSize > 0)
                 ? std::min(item.range.byteSize, bufferSize - offset)
                 : bufferSize - offset;
+
               DxvkBufferSlice slice(dxvkBuffer, offset, size);
-              // Get the actual slice handle to see physical offset
-              DxvkBufferSliceHandle sliceHandle = slice.getSliceHandle();
-              uint64_t physOffset = sliceHandle.offset;
-              if (physOffset % 16 != 0) {
-                Logger::err(str::format("RTX MegaGeo: ALIGNMENT ERROR! SRV slot=", dxvkSlot,
-                  " physOffset=", physOffset, " (not 16-byte aligned!)",
-                  " rangeOffset=", offset, " buffer=", nvrhiBuffer->getDesc().debugName));
-              }
-              RTXMG_LOG(str::format("RTX MegaGeo: bind SRV slot=", dxvkSlot, " physOffset=", physOffset, " rangeOffset=", offset, " size=", size));
+              RTXMG_LOG(str::format("RTX MegaGeo: bind SRV slot=", dxvkSlot, " offset=", offset, " size=", size));
               m_context->bindResourceBuffer(dxvkSlot, slice);
             } else {
               Logger::err(str::format("RTX MegaGeo: SRV slot=", dxvkSlot, " has NULL resourceHandle!"));
@@ -880,16 +1084,9 @@ namespace dxvk {
               uint64_t size = (item.range.byteSize > 0)
                 ? std::min(item.range.byteSize, bufferSize - offset)
                 : bufferSize - offset;
+
               DxvkBufferSlice slice(dxvkBuffer, offset, size);
-              // Get the actual slice handle to see physical offset
-              DxvkBufferSliceHandle sliceHandle = slice.getSliceHandle();
-              uint64_t physOffset = sliceHandle.offset;
-              if (physOffset % 16 != 0) {
-                Logger::err(str::format("RTX MegaGeo: ALIGNMENT ERROR! UAV slot=", dxvkSlot,
-                  " physOffset=", physOffset, " (not 16-byte aligned!)",
-                  " rangeOffset=", offset, " buffer=", nvrhiBuffer->getDesc().debugName));
-              }
-              RTXMG_LOG(str::format("RTX MegaGeo: bind UAV slot=", dxvkSlot, " (u", item.slot, ") physOffset=", physOffset, " rangeOffset=", offset, " size=", size));
+              RTXMG_LOG(str::format("RTX MegaGeo: bind UAV slot=", dxvkSlot, " (u", item.slot, ") offset=", offset, " size=", size));
               m_context->bindResourceBuffer(dxvkSlot, slice);
             }
             break;
@@ -903,10 +1100,9 @@ namespace dxvk {
             if (item.resourceHandle) {
               auto* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(item.resourceHandle);
 
-              // CRITICAL: If we have cached data, push it as push constants
-              // This is needed because Slang may compile ConstantBuffer to push constants in SPIR-V
+              // Push constants for Slang-compiled shaders that use push constants
               if (nvrhiBuffer->hasCachedData()) {
-                uint32_t pushOffset = 0;  // Push constants always start at offset 0
+                uint32_t pushOffset = 0;
                 uint32_t pushSize = static_cast<uint32_t>(nvrhiBuffer->getCachedDataSize());
                 RTXMG_LOG(str::format("RTX MegaGeo: pushConstants size=", pushSize, " (b", item.slot, ")"));
                 m_context->pushConstants(pushOffset, pushSize, nvrhiBuffer->getCachedData());
@@ -915,11 +1111,11 @@ namespace dxvk {
               // Also bind as uniform buffer (in case shader uses descriptor binding)
               Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
               uint64_t bufferSize = dxvkBuffer->info().size;
-              // Resolve range to fit buffer (matching NVRHI's BufferRange::resolve)
               uint64_t offset = std::min(item.range.byteOffset, bufferSize);
               uint64_t size = (item.range.byteSize > 0)
                 ? std::min(item.range.byteSize, bufferSize - offset)
                 : bufferSize - offset;
+
               DxvkBufferSlice slice(dxvkBuffer, offset, size);
               RTXMG_LOG(str::format("RTX MegaGeo: bind CBV slot=", dxvkSlot, " (b", item.slot, ") offset=", offset, " size=", size));
               m_context->bindResourceBuffer(dxvkSlot, slice);
@@ -1054,57 +1250,126 @@ namespace dxvk {
 
           case nvrhi::BindingSetItem::Type::Texture_UAV:
             // Texture_UAV: DXVK convention slot = 200 + register number (u0→200, u1→201, etc.)
+            // For UAV arrays (like HiZ reduce u_output[HIZ_MAX_LODS]), we need special handling
+            // because DXVK's bindResourceView() doesn't support descriptor arrays.
             {
               if (bindingSetIndex == 0) {
                 dxvkSlot = 200 + item.slot;
               }
-              uint32_t effectiveSlot = dxvkSlot + item.arrayElement;
-              if (item.resourceHandle) {
-                // Try to get native object to verify this is actually a texture
-                nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
-                if (nativeObj.pointer == nullptr) {
-                  // Not a texture - might be a buffer passed incorrectly, skip binding
-                  Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
-                    " - resource is not a VK_Image, skipping bind"));
-                  break;
-                }
 
-                auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
-                const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
-                if (dxvkImage == nullptr) {
-                  Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
-                    " - null DxvkImage, skipping bind"));
-                  break;
-                }
+              // Check if this is a UAV array binding (slot 0 with array elements for HiZ reduce)
+              // The binding layout for UAV arrays has slot 0 with HIZ_MAX_LODS elements
+              bool isUAVArrayBinding = (item.slot == 0 && item.arrayElement < HIZ_MAX_LODS);
 
-                // Verify the image supports storage usage
-                VkImageUsageFlags imageUsage = dxvkImage->info().usage;
-                if (!(imageUsage & VK_IMAGE_USAGE_STORAGE_BIT)) {
-                  Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
-                    " - image doesn't have STORAGE_BIT, skipping bind"));
-                  break;
-                }
+              if (isUAVArrayBinding) {
+                // UAV array: DON'T use DXVK's bindResourceView() because it doesn't support arrays.
+                // Store the image views and update the descriptor set array in dispatch().
+                RTXMG_LOG(str::format("RTX MegaGeo: storing UAV array Texture_UAV[", item.arrayElement, "]"));
 
-                // Create image view for UAV (storage image)
-                DxvkImageViewCreateInfo viewInfo;
-                viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
-                viewInfo.format = dxvkImage->info().format;
-                viewInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
-                viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
-                viewInfo.minLevel = 0;
-                viewInfo.numLevels = 1;  // UAVs typically bind single mip level
-                viewInfo.minLayer = 0;
-                viewInfo.numLayers = 1;
+                if (item.resourceHandle) {
+                  nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+                  if (nativeObj.pointer == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: UAV array Texture_UAV[", item.arrayElement,
+                      "] - resource is not a VK_Image, skipping"));
+                    break;
+                  }
 
-                Rc<DxvkImageView> imageView = m_device->getDxvkDevice()->createImageView(dxvkImage, viewInfo);
-                if (imageView != nullptr) {
-                  RTXMG_LOG(str::format("RTX MegaGeo: bind Texture_UAV slot=", effectiveSlot, " (u", item.slot, " array=", item.arrayElement, ")"));
-                  m_context->bindResourceView(effectiveSlot, imageView, nullptr);
+                  auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
+                  const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+                  if (dxvkImage == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: UAV array Texture_UAV[", item.arrayElement,
+                      "] - null DxvkImage, skipping"));
+                    break;
+                  }
+
+                  // Verify the image supports storage usage
+                  VkImageUsageFlags imageUsage = dxvkImage->info().usage;
+                  if (!(imageUsage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+                    Logger::warn(str::format("RTX MegaGeo: UAV array Texture_UAV[", item.arrayElement,
+                      "] - image doesn't have STORAGE_BIT, skipping"));
+                    break;
+                  }
+
+                  // Create image view for UAV (storage image)
+                  DxvkImageViewCreateInfo viewInfo;
+                  viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
+                  viewInfo.format = dxvkImage->info().format;
+                  viewInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+                  viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                  viewInfo.minLevel = 0;
+                  viewInfo.numLevels = 1;  // UAVs bind single mip level
+                  viewInfo.minLayer = 0;
+                  viewInfo.numLayers = 1;
+
+                  Rc<DxvkImageView> imageView = m_device->getDxvkDevice()->createImageView(dxvkImage, viewInfo);
+                  if (imageView != nullptr) {
+                    RTXMG_LOG(str::format("RTX MegaGeo: created UAV image view for array[", item.arrayElement,
+                      "] format=", (uint32_t)dxvkImage->info().format));
+
+                    // Track the image and view for command buffer lifetime
+                    m_context->getCommandList()->trackResource<DxvkAccess::Write>(dxvkImage);
+                    m_context->getCommandList()->trackResource<DxvkAccess::Write>(imageView);
+
+                    // Store in m_uavImageViews for array update in dispatch()
+                    m_uavImageViews[item.arrayElement] = imageView;
+                    m_hasUAVArrayBinding = true;
+                  } else {
+                    Logger::err(str::format("RTX MegaGeo: UAV array Texture_UAV[", item.arrayElement,
+                      "] - failed to create image view"));
+                  }
                 } else {
-                  Logger::err(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot, " - failed to create image view"));
+                  Logger::err(str::format("RTX MegaGeo: UAV array Texture_UAV[", item.arrayElement, "] has NULL resourceHandle!"));
                 }
               } else {
-                Logger::err(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot, " has NULL resourceHandle!"));
+                // Non-array UAV: use standard binding
+                uint32_t effectiveSlot = dxvkSlot + item.arrayElement;
+                if (item.resourceHandle) {
+                  // Try to get native object to verify this is actually a texture
+                  nvrhi::Object nativeObj = item.resourceHandle->getNativeObject(nvrhi::ObjectType::VK_Image);
+                  if (nativeObj.pointer == nullptr) {
+                    // Not a texture - might be a buffer passed incorrectly, skip binding
+                    Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
+                      " - resource is not a VK_Image, skipping bind"));
+                    break;
+                  }
+
+                  auto* nvrhiTexture = static_cast<NvrhiDxvkTexture*>(item.resourceHandle);
+                  const Rc<DxvkImage>& dxvkImage = nvrhiTexture->getDxvkImage();
+                  if (dxvkImage == nullptr) {
+                    Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
+                      " - null DxvkImage, skipping bind"));
+                    break;
+                  }
+
+                  // Verify the image supports storage usage
+                  VkImageUsageFlags imageUsage = dxvkImage->info().usage;
+                  if (!(imageUsage & VK_IMAGE_USAGE_STORAGE_BIT)) {
+                    Logger::warn(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot,
+                      " - image doesn't have STORAGE_BIT, skipping bind"));
+                    break;
+                  }
+
+                  // Create image view for UAV (storage image)
+                  DxvkImageViewCreateInfo viewInfo;
+                  viewInfo.type = VK_IMAGE_VIEW_TYPE_2D;
+                  viewInfo.format = dxvkImage->info().format;
+                  viewInfo.usage = VK_IMAGE_USAGE_STORAGE_BIT;
+                  viewInfo.aspect = VK_IMAGE_ASPECT_COLOR_BIT;
+                  viewInfo.minLevel = 0;
+                  viewInfo.numLevels = 1;  // UAVs typically bind single mip level
+                  viewInfo.minLayer = 0;
+                  viewInfo.numLayers = 1;
+
+                  Rc<DxvkImageView> imageView = m_device->getDxvkDevice()->createImageView(dxvkImage, viewInfo);
+                  if (imageView != nullptr) {
+                    RTXMG_LOG(str::format("RTX MegaGeo: bind Texture_UAV slot=", effectiveSlot, " (u", item.slot, " array=", item.arrayElement, ")"));
+                    m_context->bindResourceView(effectiveSlot, imageView, nullptr);
+                  } else {
+                    Logger::err(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot, " - failed to create image view"));
+                  }
+                } else {
+                  Logger::err(str::format("RTX MegaGeo: Texture_UAV slot=", effectiveSlot, " has NULL resourceHandle!"));
+                }
               }
             }
             break;

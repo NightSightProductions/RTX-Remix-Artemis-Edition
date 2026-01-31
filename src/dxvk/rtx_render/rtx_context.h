@@ -161,6 +161,14 @@ namespace dxvk {
     // Get the current compute pipeline's VkPipelineLayout (for MegaGeo HiZ binding)
     VkPipelineLayout getCurrentComputePipelineLayout() const;
 
+    // MegaGeo support: Bind an external VkDescriptorSet for compute pipeline
+    // This matches the native NVRHI-Vulkan approach of pre-building descriptor sets
+    // and binding them with vkCmdBindDescriptorSets
+    void bindExternalComputeDescriptorSet(
+      VkDescriptorSet descriptorSet,
+      uint32_t setIndex,
+      VkPipelineLayout pipelineLayout = VK_NULL_HANDLE);
+
   protected:
     // Flag to skip RTX bindless binding in updateComputeShaderResources
     bool m_skipRtxBindlessBinding = false;

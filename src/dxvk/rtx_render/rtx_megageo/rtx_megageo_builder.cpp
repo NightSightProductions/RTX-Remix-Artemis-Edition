@@ -19,8 +19,8 @@
 * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 * DEALINGS IN THE SOFTWARE.
 */
-// Enable verbose MegaGeo logging for debugging
-#define RTXMG_VERBOSE_LOGGING 1
+// Enable verbose MegaGeo logging for debugging (0=off for performance, 1=on for debugging)
+#define RTXMG_VERBOSE_LOGGING 0
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -33,6 +33,10 @@
 #include "../../util/log/log.h"
 #include "../../../util/util_error.h"  // For DxvkError exception handling
 #include <cmath>
+#include <chrono>
+
+// Enable chrono timing for performance profiling (set to 1 to enable)
+#define RTXMG_CHRONO_TIMING 1
 #include "nvrhi_adapter/nvrhi_dxvk_texture.h"
 #include "scene/rtxmg_scene.h"
 #include "scene/instance.h"
@@ -369,17 +373,20 @@ namespace dxvk {
   bool RtxMegaGeoBuilder::buildClusterBlas(
     const Rc<RtxContext>& context,
     const Rc<DxvkImageView>& depthBuffer,
-    const RtCamera& rtCamera)
+    const RtCamera& rtCamera,
+    const std::unordered_map<uint32_t, Matrix4>& instanceTransforms)
   {
+    // Store instance transforms for use when setting localToWorld
+    m_instanceTransforms = instanceTransforms;
     static uint32_t s_frameCounter = 0;
     s_frameCounter++;
-    Logger::info(str::format("RTX MegaGeo: buildClusterBlas - FRAME ", s_frameCounter, " Entry"));
+    RTXMG_LOG(str::format("RTX MegaGeo: buildClusterBlas - FRAME ", s_frameCounter, " Entry"));
 
     // Reset scratch buffers at start of frame - DXVK ensures GPU is done with previous frame
     if (m_commandList) {
-      Logger::info(str::format("RTX MegaGeo: FRAME ", s_frameCounter, " - calling clearState"));
+      RTXMG_LOG(str::format("RTX MegaGeo: FRAME ", s_frameCounter, " - calling clearState"));
       m_commandList->clearState();
-      Logger::info(str::format("RTX MegaGeo: FRAME ", s_frameCounter, " - clearState done"));
+      RTXMG_LOG(str::format("RTX MegaGeo: FRAME ", s_frameCounter, " - clearState done"));
     }
 
     if (!m_initialized) {
@@ -395,18 +402,22 @@ namespace dxvk {
     }
 
     // Update tessellation camera from RTX Remix camera
-    Vector3 cameraPos = rtCamera.getPosition(true);
-    m_tessellationCamera.SetEye(cameraPos);
+    // Use actual world space camera position for distance-based LOD calculations
+    // Control points are stored in world space, so we need world space camera position
+    dxvk::Vector3 camPos = rtCamera.getPosition(true);
+    Vector3 actualCameraPos(camPos.x, camPos.y, camPos.z);
+    m_tessellationCamera.SetEye(actualCameraPos);
+
     // Extract forward direction from view matrix for lookat
-    Matrix4d viewMat = rtCamera.getWorldToView(true);
-    float fwdX = -static_cast<float>(viewMat[0][2]);
-    float fwdY = -static_cast<float>(viewMat[1][2]);
-    float fwdZ = -static_cast<float>(viewMat[2][2]);
+    Matrix4d worldToView = rtCamera.getWorldToView(true);
+    float fwdX = -static_cast<float>(worldToView[0][2]);
+    float fwdY = -static_cast<float>(worldToView[1][2]);
+    float fwdZ = -static_cast<float>(worldToView[2][2]);
     Vector3 forward(fwdX, fwdY, fwdZ);
-    m_tessellationCamera.SetLookat(cameraPos + forward);
-    float upX = static_cast<float>(viewMat[0][1]);
-    float upY = static_cast<float>(viewMat[1][1]);
-    float upZ = static_cast<float>(viewMat[2][1]);
+    m_tessellationCamera.SetLookat(actualCameraPos + forward);
+    float upX = static_cast<float>(worldToView[0][1]);
+    float upY = static_cast<float>(worldToView[1][1]);
+    float upZ = static_cast<float>(worldToView[2][1]);
     Vector3 up(upX, upY, upZ);
     m_tessellationCamera.SetUp(up);
     // Extract FOV and aspect from projection matrix
@@ -417,16 +428,14 @@ namespace dxvk {
     float aspectRatio = proj11 / proj00;
     m_tessellationCamera.SetFovY(fovY);
     m_tessellationCamera.SetAspectRatio(aspectRatio);
-    // Get near/far planes directly from RtCamera instead of extracting from projection matrix
+    // Get near/far planes directly from RtCamera - use actual game values
     float zNear = rtCamera.getNearPlane();
     float zFar = rtCamera.getFarPlane();
-    // Ensure valid positive values
-    if (zNear <= 0.0f) zNear = 0.1f;
-    if (zFar <= zNear) zFar = 10000.0f;
+    // Only prevent degenerate values that would break the projection matrix
+    if (zNear <= 0.0f) zNear = 0.001f;  // Tiny near plane to support close objects
+    if (zFar <= zNear) zFar = 1000000.0f;  // Very large far plane - no artificial limit
     m_tessellationCamera.SetNear(zNear);
     m_tessellationCamera.SetFar(zFar);
-    Logger::info(str::format("RTX MegaGeo: Camera setup - eye=(", cameraPos.x, ",", cameraPos.y, ",", cameraPos.z,
-        ") fovY=", fovY, " aspect=", aspectRatio, " near=", zNear, " far=", zFar));
 
     // CRITICAL: Initialize cluster templates BEFORE binding any image views (like HiZ)
     // The sync Downloads in template initialization close/reopen the command list
@@ -452,7 +461,7 @@ namespace dxvk {
     // Configure tessellator
     TessellatorConfig config;
     config.enableVertexNormals = true;
-    config.enableLogging = true;  // Enable detailed logging to debug clusters=0
+    config.enableLogging = false;  // DISABLED - causes GPU readback stalls (~1 second per frame)
     config.zbuffer = m_zBuffer.get();
     config.camera = &m_tessellationCamera;
 
@@ -461,11 +470,11 @@ namespace dxvk {
     if (depthBuffer != nullptr) {
       VkExtent3D extent = depthBuffer->mipLevelExtent(0);
       config.viewportSize = { extent.width, extent.height };
-      Logger::info(str::format("RTX MegaGeo: viewportSize set to ", extent.width, "x", extent.height));
+      RTXMG_LOG(str::format("RTX MegaGeo: viewportSize set to ", extent.width, "x", extent.height));
     } else {
       // Fallback to a reasonable default if no depth buffer
       config.viewportSize = { 1920, 1080 };
-      Logger::warn("RTX MegaGeo: No depth buffer, using default viewportSize 1920x1080");
+      RTXMG_LOG("RTX MegaGeo: No depth buffer, using default viewportSize 1920x1080");
     }
 
     RTXMG_LOG("RTX MegaGeo: buildClusterBlas - About to call BuildAccel");
@@ -476,6 +485,91 @@ namespace dxvk {
     RTXMG_LOG("RTX MegaGeo: buildClusterBlas - Initializing TopologyCache device data");
     m_topologyCaches[0]->InitDeviceData(m_commandList.Get());
     RTXMG_LOG("RTX MegaGeo: buildClusterBlas - TopologyCache device data initialized");
+
+    // PROPER FIX: Rebuild instance list each frame from active transforms
+    // This ensures only surfaces with valid transforms this frame are rendered
+    // Prevents "sticking to screen" bug from identity transforms on inactive surfaces
+    RTXMG_LOG(str::format("RTX MegaGeo: Rebuilding instances - m_instanceTransforms.size()=", m_instanceTransforms.size(),
+        " m_surfaceToMeshIndex.size()=", m_surfaceToMeshIndex.size()));
+
+    if (m_scene) {
+      // Clear instances from previous frame
+      m_scene->ClearInstances();
+      m_surfaceToInstanceIndex.clear();
+
+      uint32_t instancesCreated = 0;
+      uint32_t meshesNotReady = 0;
+
+      // Rebuild instances only for surfaceIds that have transforms this frame
+      for (const auto& [surfaceId, transform] : m_instanceTransforms) {
+        auto meshIt = m_surfaceToMeshIndex.find(surfaceId);
+        if (meshIt == m_surfaceToMeshIndex.end()) {
+          // Mesh not ready yet (async creation in progress)
+          meshesNotReady++;
+          continue;
+        }
+
+        uint32_t meshIndex = meshIt->second;
+
+        // Verify mesh exists
+        if (meshIndex >= m_scene->GetSubdMeshes().size()) {
+          Logger::warn(str::format("RTX MegaGeo: Invalid meshIndex ", meshIndex, " for surfaceId ", surfaceId));
+          continue;
+        }
+
+        // Create instance for this surface with the proper transform
+        Instance instance;
+        instance.meshID = meshIndex;
+        instance.localToWorld = transform;  // Use actual transform, NOT identity
+
+        // Create MeshInfo for instance
+        auto meshInfo = std::make_shared<MeshInfo>();
+        SubdivisionSurface* mesh = m_scene->GetSubdMeshes()[meshIndex];
+        const Shape* shape = mesh ? mesh->GetShape() : nullptr;
+        meshInfo->name = shape ? shape->filepath.string() : "RTXMGSurface";
+        meshInfo->geometryCount = 1;
+
+        auto geomInfo = std::make_shared<GeometryInfo>();
+        geomInfo->globalGeometryIndex = meshIndex;
+        geomInfo->name = meshInfo->name;
+        meshInfo->geometries.push_back(geomInfo);
+
+        instance.meshInstance = std::make_shared<MeshInstance>(meshInfo);
+
+        // Record mapping BEFORE adding (so instanceIndex is correct)
+        uint32_t instanceIndex = static_cast<uint32_t>(m_scene->GetSubdMeshInstances().size());
+        m_surfaceToInstanceIndex[surfaceId] = instanceIndex;
+
+        m_scene->AddInstance(instance);
+        instancesCreated++;
+
+        // Log first few for debugging - show full matrix to verify layout
+#if RTXMG_VERBOSE_LOGGING
+        if (instancesCreated <= 3) {
+          RTXMG_LOG(str::format("RTX MegaGeo: Created instance surfaceId=", surfaceId,
+              " meshIdx=", meshIndex, " instanceIdx=", instanceIndex));
+          // Log full matrix to understand layout (row-major: row3 = translation, column-major: col3 = translation)
+          RTXMG_LOG(str::format("  row0=(", transform.data[0][0], ",", transform.data[0][1], ",", transform.data[0][2], ",", transform.data[0][3], ")"));
+          RTXMG_LOG(str::format("  row1=(", transform.data[1][0], ",", transform.data[1][1], ",", transform.data[1][2], ",", transform.data[1][3], ")"));
+          RTXMG_LOG(str::format("  row2=(", transform.data[2][0], ",", transform.data[2][1], ",", transform.data[2][2], ",", transform.data[2][3], ")"));
+          RTXMG_LOG(str::format("  row3=(", transform.data[3][0], ",", transform.data[3][1], ",", transform.data[3][2], ",", transform.data[3][3], ")"));
+          // Also show what col3 looks like (in case it's column-major)
+          RTXMG_LOG(str::format("  col3=(", transform.data[0][3], ",", transform.data[1][3], ",", transform.data[2][3], ",", transform.data[3][3], ")"));
+        }
+#endif
+      }
+
+      RTXMG_LOG(str::format("RTX MegaGeo: Rebuilt ", instancesCreated, " instances (",
+          meshesNotReady, " meshes not ready)"));
+    } else {
+      RTXMG_LOG("RTX MegaGeo: Scene is null, cannot rebuild instances");
+    }
+
+    // Chrono timing for BuildAccel
+#if RTXMG_CHRONO_TIMING
+    static float s_buildTimeMs = 0.0f;
+    auto buildStart = std::chrono::high_resolution_clock::now();
+#endif
 
     try {
       // Actually call ClusterAccelBuilder::BuildAccel
@@ -498,6 +592,14 @@ namespace dxvk {
       Logger::err("RTX MegaGeo: Failed to build cluster BLAS: unknown error");
       return false;
     }
+
+#if RTXMG_CHRONO_TIMING
+    auto buildEnd = std::chrono::high_resolution_clock::now();
+    auto buildDuration = std::chrono::duration_cast<std::chrono::microseconds>(buildEnd - buildStart);
+    float frameTimeMs = buildDuration.count() * 0.001f;
+    s_buildTimeMs = s_buildTimeMs * 0.9f + frameTimeMs * 0.1f; // Smoothed average
+    Logger::info(str::format(">>> RTXMG CHRONO: BuildAccel frame=", frameTimeMs, "ms smoothed=", s_buildTimeMs, "ms"));
+#endif
 
     // Mark all surfaces as ready
     // Note: BLAS addresses will be patched directly on GPU by AccelManager::patchClusterBlasAddresses()
@@ -533,8 +635,14 @@ namespace dxvk {
     static uint32_t frameLogCounter = 0;
     if ((frameLogCounter++ % 60) == 0) { // Log every 60 frames (~1 second)
       if (m_stats.numClusters > 0) {
+#if RTXMG_CHRONO_TIMING
+        Logger::info(str::format(">>> RTXMG: ", m_stats.numClusters, " clusters, ",
+                                  m_stats.numTriangles, " tris, ", m_surfaces.size(), " surfaces, ",
+                                  s_buildTimeMs, "ms <<<"));
+#else
         Logger::info(str::format(">>> RTXMG ACTIVE: ", m_stats.numClusters, " clusters, ",
                                   m_stats.numTriangles, " triangles from ", m_surfaces.size(), " surfaces <<<"));
+#endif
       } else {
         Logger::warn(str::format(">>> RTXMG: 0 clusters (desired: ", m_stats.numDesiredClusters, ") from ", m_surfaces.size(), " surfaces - CHECK TESSELLATION <<<"));
       }
@@ -630,33 +738,14 @@ namespace dxvk {
           uint32_t meshIndex = static_cast<uint32_t>(m_scene->GetSubdMeshes().size());
           m_scene->AddSubdMesh(surface.subdivSurface.get());
 
-          // Create instance for this surface
-          Instance instance;
-          instance.meshID = meshIndex;  // Use actual index, not surfaceId counter
-          instance.localToWorld = Matrix4(); // Identity transform
-
-          // Create MeshInfo for instance
-          auto meshInfo = std::make_shared<MeshInfo>();
-          const Shape* shape = surface.subdivSurface ? surface.subdivSurface->GetShape() : nullptr;
-          meshInfo->name = shape ? shape->filepath.string() : "RTXMGSurface";
-          meshInfo->geometryCount = 1;
-
-          auto geomInfo = std::make_shared<GeometryInfo>();
-          geomInfo->globalGeometryIndex = instance.meshID;
-          geomInfo->name = meshInfo->name;
-          meshInfo->geometries.push_back(geomInfo);
-
-          instance.meshInstance = std::make_shared<MeshInstance>(meshInfo);
-
-          // Record the mapping from surfaceId to instance index before adding
-          uint32_t instanceIndex = static_cast<uint32_t>(m_scene->GetSubdMeshInstances().size());
-          m_surfaceToInstanceIndex[comp.surfaceId] = instanceIndex;
-          RTXMG_LOG(str::format("RTX MegaGeo: Mapping surfaceId ", comp.surfaceId, " to instance index ", instanceIndex));
-
-          m_scene->AddInstance(instance);
+          // Record the PERSISTENT mapping from surfaceId to mesh index
+          // Instances will be rebuilt each frame in buildClusterBlas based on active transforms
+          m_surfaceToMeshIndex[comp.surfaceId] = meshIndex;
+          RTXMG_LOG(str::format("RTX MegaGeo: Mapping surfaceId ", comp.surfaceId, " to mesh index ", meshIndex));
 
           surface.isReady = true;
 
+          const Shape* shape = surface.subdivSurface ? surface.subdivSurface->GetShape() : nullptr;
           uint32_t numFaces = shape ? shape->nvertsPerFace.size() : 0;
           RTXMG_LOG(str::format("RTX MegaGeo: Integrated completed surface ", comp.surfaceId,
                                    " (", numFaces, " faces)"));

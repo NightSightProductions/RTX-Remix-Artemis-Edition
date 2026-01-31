@@ -68,13 +68,37 @@ namespace dxvk {
     VkDevice m_vkDevice;  // Needed for cleanup
   };
 
-  // NVRHI IBindingSet implementation storing resource bindings
+  // NVRHI IBindingSet implementation with pre-built VkDescriptorSet
+  // Matches the native NVRHI-Vulkan approach: descriptor set is built once at creation,
+  // then bound with a single vkCmdBindDescriptorSets call at dispatch time.
   class NvrhiDxvkBindingSet : public nvrhi::IBindingSet {
   public:
     NvrhiDxvkBindingSet(const nvrhi::BindingSetDesc& desc, nvrhi::IBindingLayout* layout)
       : m_desc(desc)
       , m_layout(layout)
+      , m_descriptorPool(VK_NULL_HANDLE)
+      , m_descriptorSet(VK_NULL_HANDLE)
+      , m_vkDevice(VK_NULL_HANDLE)
+      , m_ownsPool(false)
     {
+    }
+
+    ~NvrhiDxvkBindingSet() {
+      if (m_vkDevice != VK_NULL_HANDLE && m_descriptorSet != VK_NULL_HANDLE) {
+        if (m_ownsPool) {
+          // If we own the pool, destroy it (which implicitly frees all sets)
+          if (m_descriptorPool != VK_NULL_HANDLE) {
+            vkDestroyDescriptorPool(m_vkDevice, m_descriptorPool, nullptr);
+          }
+        } else {
+          // If using shared pool, just free the descriptor set back to the pool
+          if (m_descriptorPool != VK_NULL_HANDLE) {
+            vkFreeDescriptorSets(m_vkDevice, m_descriptorPool, 1, &m_descriptorSet);
+          }
+        }
+        m_descriptorPool = VK_NULL_HANDLE;
+        m_descriptorSet = VK_NULL_HANDLE;
+      }
     }
 
     nvrhi::Object getNativeObject(nvrhi::ObjectType type) override {
@@ -84,9 +108,26 @@ namespace dxvk {
     const nvrhi::BindingSetDesc& getDesc() const { return m_desc; }
     nvrhi::IBindingLayout* getLayout() const { return m_layout; }
 
+    // Set the pre-built descriptor set (called by device during createBindingSet)
+    // ownsPool: if true, this binding set owns the pool and will destroy it on destruction
+    //           if false, pool is shared and we only free the descriptor set
+    void setDescriptorSet(VkDescriptorPool pool, VkDescriptorSet set, VkDevice device, bool ownsPool = false) {
+      m_descriptorPool = pool;
+      m_descriptorSet = set;
+      m_vkDevice = device;
+      m_ownsPool = ownsPool;
+    }
+
+    VkDescriptorSet getDescriptorSet() const { return m_descriptorSet; }
+    bool hasDescriptorSet() const { return m_descriptorSet != VK_NULL_HANDLE; }
+
   private:
     nvrhi::BindingSetDesc m_desc;
     nvrhi::IBindingLayout* m_layout;
+    VkDescriptorPool m_descriptorPool;
+    VkDescriptorSet m_descriptorSet;
+    VkDevice m_vkDevice;  // Needed for cleanup
+    bool m_ownsPool;      // Whether we own the pool or it's shared
   };
 
   // NVRHI IComputePipeline implementation wrapping DXVK compute pipeline
@@ -97,7 +138,28 @@ namespace dxvk {
       const nvrhi::ComputePipelineDesc& desc)
       : m_shader(shader)
       , m_desc(desc)
+      , m_pipeline(VK_NULL_HANDLE)
+      , m_pipelineLayout(VK_NULL_HANDLE)
+      , m_descriptorSetLayout(VK_NULL_HANDLE)
+      , m_vkDevice(VK_NULL_HANDLE)
     {
+    }
+
+    ~NvrhiDxvkComputePipeline() {
+      if (m_vkDevice != VK_NULL_HANDLE) {
+        if (m_pipeline != VK_NULL_HANDLE) {
+          vkDestroyPipeline(m_vkDevice, m_pipeline, nullptr);
+          m_pipeline = VK_NULL_HANDLE;
+        }
+        if (m_pipelineLayout != VK_NULL_HANDLE) {
+          vkDestroyPipelineLayout(m_vkDevice, m_pipelineLayout, nullptr);
+          m_pipelineLayout = VK_NULL_HANDLE;
+        }
+        if (m_descriptorSetLayout != VK_NULL_HANDLE) {
+          vkDestroyDescriptorSetLayout(m_vkDevice, m_descriptorSetLayout, nullptr);
+          m_descriptorSetLayout = VK_NULL_HANDLE;
+        }
+      }
     }
 
     nvrhi::Object getNativeObject(nvrhi::ObjectType type) override {
@@ -107,9 +169,25 @@ namespace dxvk {
     const nvrhi::ComputePipelineDesc& getDesc() const { return m_desc; }
     const Rc<DxvkShader>& getShader() const { return m_shader; }
 
+    // Native Vulkan pipeline and layout for MegaGeo shaders
+    void setVkPipeline(VkPipeline pipeline, VkPipelineLayout layout, VkDescriptorSetLayout dsLayout, VkDevice device) {
+      m_pipeline = pipeline;
+      m_pipelineLayout = layout;
+      m_descriptorSetLayout = dsLayout;
+      m_vkDevice = device;
+    }
+    VkPipeline getVkPipeline() const { return m_pipeline; }
+    VkPipelineLayout getPipelineLayout() const { return m_pipelineLayout; }
+    VkDescriptorSetLayout getDescriptorSetLayout() const { return m_descriptorSetLayout; }
+    bool hasVkPipeline() const { return m_pipeline != VK_NULL_HANDLE; }
+
   private:
     Rc<DxvkShader> m_shader;
     nvrhi::ComputePipelineDesc m_desc;
+    VkPipeline m_pipeline;
+    VkPipelineLayout m_pipelineLayout;
+    VkDescriptorSetLayout m_descriptorSetLayout;
+    VkDevice m_vkDevice;
   };
 
 } // namespace dxvk

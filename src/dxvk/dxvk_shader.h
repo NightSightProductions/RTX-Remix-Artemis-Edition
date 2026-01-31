@@ -300,6 +300,11 @@ namespace dxvk {
      */
     void generateShaderKey();
 
+    // RTX MegaGeo: Get decompressed SPIR-V code for native pipeline creation
+    SpirvCodeBuffer getCode() const {
+      return m_code.decompress();
+    }
+
   private:
     
     VkShaderStageFlagBits m_stage;

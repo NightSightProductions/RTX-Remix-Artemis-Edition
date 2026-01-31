@@ -376,7 +376,10 @@ float CalculateEdgeVisibility(uint32_t iLane, uint32_t waveSampleOffset, float v
             {
                 float3 nobj = cross(t0, t1);
                 float3 nworld = normalize(transformByLocalToWorld(float4(nobj, 0.f)));
-                float cosTheta = dot(normalize(pworld[i] - g_Params.cameraPos), nworld);
+                // Use view direction from world-to-clip matrix (camera at origin in translated world)
+                // The view direction to a point is just -normalize(point) when camera is at origin
+                float3 viewDir = -normalize(pworld[i]);
+                float cosTheta = dot(viewDir, nworld);
                 float backfaceFactor = smoothstep(.6f, 1.f, cosTheta);
 
                 visibility *= (1.f - backfaceFactor);
@@ -464,21 +467,43 @@ void WaveEvaluateBSplinePatch8(uint32_t iWave,
 #endif
 }
 
-float CalculateEdgeRates(LimitFrame limitFrame)
+// Global debug counter to limit log spam
+static uint32_t g_edgeRateLogCount = 0;
+
+// Project world position to screen pixels
+// Returns screen position, sets valid=false if behind camera
+float2 worldToScreen(float3 worldPos, out bool valid)
+{
+    float4 clipPos = mul(g_Params.matWorldToClip, float4(worldPos, 1.0f));
+
+    // Check if point is behind camera (w <= 0) or too close
+    if (clipPos.w <= 0.001f)
+    {
+        valid = false;
+        return float2(0, 0);
+    }
+
+    valid = true;
+    // Perspective divide to NDC (-1 to 1)
+    float2 ndc = clipPos.xy / clipPos.w;
+    // Convert to screen pixels
+    float2 screen = (ndc * 0.5f + 0.5f) * g_Params.viewportSize;
+    return screen;
+}
+
+float CalculateEdgeRates(LimitFrame limitFrame, uint32_t iSurface, uint32_t iLane)
 {
 #if TESS_MODE == TESS_MODE_SPHERICAL_PROJECTION
-    const float3 poi = transformByLocalToWorld(float4(limitFrame.p, 1.0f));
-    const float distance = max(length(poi - g_Params.cameraPos), 0.01f);
-    float edgeRate = float(g_Params.viewportSize.y) * g_Params.fineTessellationRate / distance;
-    return edgeRate;
+    // Not used for true screen-space - kept for compatibility
+    return g_Params.fineTessellationRate;
 #elif TESS_MODE == TESS_MODE_WORLD_SPACE_EDGE_LENGTH
     float diagonalLength = length(g_Params.aabb.Extent());
     return g_Params.fineTessellationRate * 1000.f / diagonalLength;
 #endif
-    return -1; // should not Get here; uniform tess mode doesn't call this function
+    return -1;
 }
 
-uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, float visibility, float visibilityRateMultiplier)
+uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, uint32_t iSurface, float visibility, float visibilityRateMultiplier)
 {
     uint32_t waveSampleOffset = kNumWaveSurfaceUVSamples * iWave;
 #if TESS_MODE == TESS_MODE_UNIFORM
@@ -492,36 +517,68 @@ uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, float visibility, 
     }
     return 0;
 #else
-    float segmentRate = iLane < 4 ? CalculateEdgeRates(samples[waveSampleOffset + 2 * iLane + 1]) : .0f;
+    // TRUE SCREEN-SPACE TESSELLATION
+    // Transform points to world space first
     if (iLane < kNumWaveSurfaceUVSamples)
     {
         samples[waveSampleOffset + iLane].p = transformByLocalToWorld(float4(samples[waveSampleOffset + iLane].p, 1.0));
     }
-    float edgeLength = length(samples[waveSampleOffset + (iLane + 1) % kNumWaveSurfaceUVSamples].p - samples[waveSampleOffset + iLane % kNumWaveSurfaceUVSamples].p);
 
-    float finalEdgeLength = edgeLength;
-    float edgeLength2 = edgeLength;
-    if (iLane < 8)
+    // Project to screen space and compute edge length in PIXELS
+    bool valid0, valid1;
+    float2 screenPos0 = worldToScreen(samples[waveSampleOffset + iLane % kNumWaveSurfaceUVSamples].p, valid0);
+    float2 screenPos1 = worldToScreen(samples[waveSampleOffset + (iLane + 1) % kNumWaveSurfaceUVSamples].p, valid1);
+
+    // If either point is behind camera, use fallback tessellation
+    float edgeLengthPixels = 0.0f;
+    if (valid0 && valid1)
     {
-        edgeLength2 = edgeLength + WaveReadLaneAt(edgeLength, iLane + 1);
-
-        // Get the edge lengths starting at the corner vertices (in 2*iLane threads).
-        // if (2 * iLane < kNumWaveSurfaceUVSamples)
-        {
-            finalEdgeLength = WaveReadLaneAt(edgeLength2, 2 * iLane);
-        }
+        edgeLengthPixels = length(screenPos1 - screenPos0);
+        // Sanity check - clamp huge values that might cause issues
+        edgeLengthPixels = min(edgeLengthPixels, 10000.0f);
+    }
+    else
+    {
+        // Fallback: use minimum tessellation for offscreen/behind-camera edges
+        edgeLengthPixels = g_Params.fineTessellationRate; // Will result in 1 segment
     }
 
+    // Accumulate edge segment lengths (each edge spans 2 sample segments)
+    float finalEdgeLengthPixels = edgeLengthPixels;
+    float edgeLength2 = edgeLengthPixels;
+    if (iLane < 8)
+    {
+        edgeLength2 = edgeLengthPixels + WaveReadLaneAt(edgeLengthPixels, iLane + 1);
+        // Get the edge lengths starting at the corner vertices (in 2*iLane threads)
+        finalEdgeLengthPixels = WaveReadLaneAt(edgeLength2, 2 * iLane);
+    }
+
+    // Apply visibility
     float edgeVisibility = CalculateEdgeVisibility(iLane, waveSampleOffset, visibility);
-    segmentRate *= (visibilityRateMultiplier + edgeVisibility * (1.f - visibilityRateMultiplier));
+    float visibilityFactor = (visibilityRateMultiplier + edgeVisibility * (1.f - visibilityRateMultiplier));
 
-#ifdef MAX_EDGES
-    return iLane < 4 ? min(MAX_EDGES, max(1u, (uint32_t)(round(edgeLength * segmentRate)))) : 0;
-#else
-    float edgeSegments = round(finalEdgeLength * segmentRate);
+    // TRUE SCREEN-SPACE: tessellate based on pixel coverage
+    // Use a fixed 16 pixels per segment for reasonable tessellation
+    // (fineTessellationRate=0.05 is meant for distance-based, not pixel-based)
+    const float pixelsPerSegment = 16.0f;
+    float edgeSegments = (finalEdgeLengthPixels / pixelsPerSegment) * visibilityFactor;
 
-    return iLane < 4 ? ((uint16_t)max(1.0, edgeSegments)) : 0;
-#endif
+    // Clamp to reasonable range
+    edgeSegments = clamp(edgeSegments, 1.0f, 64.0f);
+
+    // Debug logging for first surface, edge 0
+    if (iSurface == 0 && iLane == 0)
+    {
+        float3 worldP0 = samples[waveSampleOffset + 0].p;
+        float3 worldP1 = samples[waveSampleOffset + 1].p;
+        SHADER_DEBUG_FORCE(float4(worldP0.x, worldP0.y, worldP0.z, 1111.0f));
+        SHADER_DEBUG_FORCE(float4(screenPos0.x, screenPos0.y, float(valid0), 2222.0f));
+        SHADER_DEBUG_FORCE(float4(screenPos1.x, screenPos1.y, float(valid1), 3333.0f));
+        SHADER_DEBUG_FORCE(float4(edgeLengthPixels, finalEdgeLengthPixels, pixelsPerSegment, 4444.0f));
+        SHADER_DEBUG_FORCE(float4(edgeSegments, g_Params.viewportSize.x, g_Params.viewportSize.y, 5555.0f));
+    }
+
+    return iLane < 4 ? ((uint16_t)round(edgeSegments)) : 0;
 
 #endif
 }
@@ -822,7 +879,7 @@ void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
 
     const float tessFactor = g_Params.coarseTessellationRate / g_Params.fineTessellationRate;
 
-    uint16_t edgeSegments = EvaluateEdgeSegments(iWave, iLane, visibility, tessFactor);
+    uint16_t edgeSegments = EvaluateEdgeSegments(iWave, iLane, iSurface, visibility, tessFactor);
 
     GridSampler rSampler;
     rSampler.edgeSegments[0] = WaveReadLaneAt(edgeSegments, 0);
