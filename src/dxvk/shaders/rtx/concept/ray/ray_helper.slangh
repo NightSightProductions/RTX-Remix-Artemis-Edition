@@ -44,9 +44,15 @@ struct RayHitInfo
   bool frontHit;
 };
 
-uint calculateSurfaceIndex(RayHitInfo rayHitInfo) 
+uint calculateSurfaceIndex(RayHitInfo rayHitInfo)
 {
-  return (rayHitInfo.customIndex & CUSTOM_INDEX_SURFACE_MASK) + rayHitInfo.geometryIndex;    
+  // RTX MegaGeo: For cluster surfaces, geometryIndex contains the clusterIndex (for shader lookup),
+  // NOT a geometry offset. So we skip adding it to the surface index for cluster surfaces.
+  uint baseIndex = rayHitInfo.customIndex & CUSTOM_INDEX_SURFACE_MASK;
+  if (rayHitInfo.customIndex & CUSTOM_INDEX_IS_CLUSTER_SURFACE) {
+    return baseIndex;  // Cluster surface: use surface index directly, geometryIndex is clusterIndex
+  }
+  return baseIndex + rayHitInfo.geometryIndex;  // Traditional geometry: add geometry offset
 }
 
 uint calculateMaterialType(RayHitInfo rayHitInfo) 

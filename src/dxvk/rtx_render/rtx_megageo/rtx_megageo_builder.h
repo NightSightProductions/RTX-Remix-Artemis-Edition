@@ -374,6 +374,26 @@ namespace dxvk {
     uint32_t getClusterCount() const;
 
     /**
+     * \brief Get the cluster vertex positions buffer
+     *
+     * Returns the buffer containing tessellated vertex positions for all clusters.
+     * Used for surface interaction vertex lookup.
+     *
+     * \return NVRHI buffer handle or nullptr if not initialized
+     */
+    nvrhi::BufferHandle getClusterVertexPositionsBuffer() const;
+
+    /**
+     * \brief Get the cluster vertex normals buffer
+     *
+     * Returns the buffer containing tessellated vertex normals for all clusters.
+     * Used for surface interaction normal lookup.
+     *
+     * \return NVRHI buffer handle or nullptr if not initialized
+     */
+    nvrhi::BufferHandle getClusterVertexNormalsBuffer() const;
+
+    /**
      * \brief Process completed async subdivision surface creations
      *
      * Called once per frame to integrate subdivision surfaces that were

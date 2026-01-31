@@ -608,6 +608,19 @@ namespace dxvk {
       RTXMG_LOG("RTX MegaGeo: Cluster BLAS built successfully");
       RTXMG_LOG(str::format("RTX MegaGeo: blasPtrsBuffer available: ", (m_clusterAccels->blasPtrsBuffer.Get() != nullptr)));
 
+      // Log buffer sizes for debugging GPU crashes
+      Logger::info(str::format("RTX MegaGeo: Buffer sizes - clusterShadingData: ",
+          m_clusterAccels->clusterShadingDataBuffer.GetBytes(), " bytes (",
+          m_clusterAccels->clusterShadingDataBuffer.GetNumElements(), " elements)"));
+      Logger::info(str::format("RTX MegaGeo: Buffer sizes - clusterVertexPositions: ",
+          m_clusterAccels->clusterVertexPositionsBuffer.GetBytes(), " bytes (",
+          m_clusterAccels->clusterVertexPositionsBuffer.GetNumElements(), " elements)"));
+      Logger::info(str::format("RTX MegaGeo: Buffer sizes - clusterVertexNormals: ",
+          m_clusterAccels->clusterVertexNormalsBuffer.GetBytes(), " bytes (",
+          m_clusterAccels->clusterVertexNormalsBuffer.GetNumElements(), " elements)"));
+      Logger::info(str::format("RTX MegaGeo: numClusters=", m_clusterStats.allocated.m_numClusters,
+          " numTriangles=", m_clusterStats.allocated.m_numTriangles));
+
       // Mark all surfaces as ready - BLAS addresses will be patched on GPU
       for (auto& [id, surface] : m_surfaces) {
         if (surface.isDirty && surface.subdivSurface) {
@@ -700,6 +713,20 @@ namespace dxvk {
 
   uint32_t RtxMegaGeoBuilder::getClusterCount() const {
     return m_stats.numClusters;
+  }
+
+  nvrhi::BufferHandle RtxMegaGeoBuilder::getClusterVertexPositionsBuffer() const {
+    if (!m_clusterAccels) {
+      return nullptr;
+    }
+    return m_clusterAccels->clusterVertexPositionsBuffer.Get();
+  }
+
+  nvrhi::BufferHandle RtxMegaGeoBuilder::getClusterVertexNormalsBuffer() const {
+    if (!m_clusterAccels) {
+      return nullptr;
+    }
+    return m_clusterAccels->clusterVertexNormalsBuffer.Get();
   }
 
   void RtxMegaGeoBuilder::processCompletedSurfaces() {

@@ -939,8 +939,24 @@ namespace dxvk {
     currentInstance.surface.texcoordOffset = blas.modifiedGeometryData.texcoordBuffer.offsetFromSlice();
     currentInstance.surface.texcoordStride = blas.modifiedGeometryData.texcoordBuffer.stride();
     currentInstance.surface.previousPositionBufferIndex = blas.modifiedGeometryData.previousPositionBufferIndex;
-    currentInstance.surface.indexBufferIndex = blas.modifiedGeometryData.indexBufferIndex;
-    currentInstance.surface.indexStride = blas.modifiedGeometryData.indexBuffer.stride();
+    // RTX Mega Geometry: ClusterBlas instances don't use the original index buffer - MegaGeo generates its own cluster geometry.
+    // Setting indexBufferIndex to invalid prevents surface_interaction shader from reading destroyed buffers.
+    // Also mark the surface as a cluster surface so the shader uses the cluster vertex buffers instead.
+    if (blas.blasType == BlasEntry::Type::ClusterBlas) {
+      currentInstance.surface.indexBufferIndex = kSurfaceInvalidBufferIndex;
+      currentInstance.surface.indexStride = 0;
+      currentInstance.surface.isClusterSurface = true;
+      // Log cluster surface setup for debugging
+      static uint32_t s_clusterSurfaceCount = 0;
+      if ((s_clusterSurfaceCount++ % 100) == 0) {
+        Logger::info(str::format("RTX MegaGeo: Cluster surface instance created, instanceVectorId=",
+            currentInstance.m_instanceVectorId, " surfaceIndex=", currentInstance.getSurfaceIndex()));
+      }
+    } else {
+      currentInstance.surface.indexBufferIndex = blas.modifiedGeometryData.indexBufferIndex;
+      currentInstance.surface.indexStride = blas.modifiedGeometryData.indexBuffer.stride();
+      currentInstance.surface.isClusterSurface = false;
+    }
   }
 
   // Returns true if the instance was modified

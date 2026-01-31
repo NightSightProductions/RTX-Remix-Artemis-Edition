@@ -383,6 +383,13 @@ namespace dxvk {
 
   static void trackBlasBuildResources(Rc<DxvkContext> ctx, DxvkBarrierSet& execBarriers, const BlasEntry* blasEntry) {
     ScopedCpuProfileZone();
+
+    // RTX Mega Geometry: ClusterBlas uses MegaGeo's own buffers, not the original geometry buffers.
+    // Don't track the original buffers for ClusterBlas to avoid keeping destroyed buffers alive.
+    if (blasEntry->blasType == BlasEntry::Type::ClusterBlas) {
+      return;
+    }
+
     ctx->getCommandList()->trackResource<DxvkAccess::Read>(blasEntry->modifiedGeometryData.positionBuffer.buffer());
     ctx->getCommandList()->trackResource<DxvkAccess::Read>(blasEntry->modifiedGeometryData.indexBuffer.buffer());
 
@@ -564,6 +571,14 @@ namespace dxvk {
       // RTX Mega Geometry: Cluster-based BLASes are built separately via RtxMegaGeoBuilder
       // They still need to be added to the TLAS, but skip the traditional BLAS building logic
       if (blasEntry->isClusterBlas()) {
+        // Cluster surfaces need a valid surface index for shader lookup
+        // Without this, the shader would try to read from surfaces[65535] causing GPU page faults
+        if (instance->getSurfaceIndex() == BINDING_INDEX_INVALID) {
+          instance->setSurfaceIndex(m_reorderedSurfaces.size());
+          m_reorderedSurfaces.push_back(instance);
+          m_reorderedSurfacesFirstIndexOffset.push_back(0);
+        }
+
         // Add directly to TLAS - the BLAS address will be patched on GPU later
         if (instance->surface.instancesToObject == nullptr) {
           addBlas(instance, blasEntry, nullptr);
@@ -869,6 +884,14 @@ namespace dxvk {
     blasInstance.instanceCustomIndex =
       (blasInstance.instanceCustomIndex & ~uint32_t(CUSTOM_INDEX_SURFACE_MASK)) |
       uint32_t(m_reorderedSurfaces.size()) & uint32_t(CUSTOM_INDEX_SURFACE_MASK);
+
+    // RTX MegaGeo: Set cluster surface flag so shader knows not to add geometryIndex to surfaceIndex
+    if (isClusterBlas) {
+      blasInstance.instanceCustomIndex |= CUSTOM_INDEX_IS_CLUSTER_SURFACE;
+      // Note: Cluster vertices are stored in LOCAL space by fill_clusters.
+      // The TLAS instance transform (inherited from the RtInstance) transforms rays to local space.
+      // The shader must transform vertex positions by surface.objectToWorld when reading them.
+    }
 
     if (instanceToObject) {
       // The D3D matrix on input, needs to be transposed before feeding to the VK API (left/right handed conversion)

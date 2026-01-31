@@ -27,6 +27,7 @@
 #include "rtx/concept/ray/ray.h"
 #include "rtx/pass/common_bindings.slangh"
 #include "rtx/utility/debug_view_indices.h"
+#include "rtx/concept/surface/cluster_surface_interaction.slangh"
 
 // Surface Interaction Constants
 
@@ -193,10 +194,221 @@ void calcSpritesheetValues(
   uvBias = vec2(frame % spriteSheetCols, frame / spriteSheetCols) * uvSize;
 }
 
+// RTX Mega Geometry: Create surface interaction from cluster geometry hit
+SurfaceInteraction surfaceInteractionCreateCluster<let GenerateTangents : bool>(
+  Surface surface, RayInteraction rayInteraction, Ray ray,
+  uint footprintMode = kFootprintFromRayDirection)
+{
+  SurfaceInteraction surfaceInteraction;
+
+  // Get cluster ID from rayInteraction.geometryIndex (populated from RayHitInfo during ray tracing)
+  // For cluster surfaces, geometryIndex contains the cluster ID set during CLAS construction
+  uint32_t clusterId = rayInteraction.geometryIndex;
+
+  // DEBUG: Bounds check - if clusterId looks invalid, use fallback
+  // Max reasonable cluster count is ~1 million for safety
+  const uint32_t kMaxClusterId = 1000000;
+  if (clusterId >= kMaxClusterId)
+  {
+    // Return a minimal valid surface interaction to avoid crash
+    surfaceInteraction.position = ray.origin + ray.direction * rayInteraction.hitDistance;
+    surfaceInteraction.triangleNormal = f16vec3(0.0, 1.0, 0.0);
+    surfaceInteraction.interpolatedNormal = f16vec3(0.0, 1.0, 0.0);
+    calcOrthonormalBasis(surfaceInteraction.interpolatedNormal, surfaceInteraction.interpolatedTangent, surfaceInteraction.interpolatedBitangent);
+    surfaceInteraction.triangleTangent = surfaceInteraction.interpolatedTangent;
+    surfaceInteraction.triangleBitangent = surfaceInteraction.interpolatedBitangent;
+    surfaceInteraction.textureCoordinates = vec2(0.0);
+    surfaceInteraction.textureGradientX = vec2(0.0);
+    surfaceInteraction.textureGradientY = vec2(0.0);
+    surfaceInteraction.vertexColor = f16vec4(1.0);
+    surfaceInteraction.motion = vec3(0.0);
+    surfaceInteraction.triangleArea = 1.0;
+    surfaceInteraction.positionError = 0.0;
+    return surfaceInteraction;
+  }
+
+  ClusterShadingData clusterData = clusterShadingData[clusterId];
+
+  // Compute barycentrics
+  const vec3 bary = uintToBarycentrics(rayInteraction.barycentricCoordinates);
+
+  // Get local vertex indices for this triangle within the cluster
+  uint3 localVtxIndices = clusterGetVertexIndices(clusterId, rayInteraction.primitiveIndex, clusterShadingData);
+
+  // Convert to global vertex indices using the cluster's vertex offset
+  uint3 globalVtxIndices = localVtxIndices + clusterData.m_vertexOffset;
+
+  // DEBUG: Bounds check vertex indices - max reasonable is ~10 million vertices
+  const uint32_t kMaxVertexIndex = 10000000;
+  if (globalVtxIndices[0] >= kMaxVertexIndex || globalVtxIndices[1] >= kMaxVertexIndex || globalVtxIndices[2] >= kMaxVertexIndex)
+  {
+    // Return a minimal valid surface interaction to avoid crash
+    surfaceInteraction.position = ray.origin + ray.direction * rayInteraction.hitDistance;
+    surfaceInteraction.triangleNormal = f16vec3(0.0, 1.0, 0.0);
+    surfaceInteraction.interpolatedNormal = f16vec3(0.0, 1.0, 0.0);
+    calcOrthonormalBasis(surfaceInteraction.interpolatedNormal, surfaceInteraction.interpolatedTangent, surfaceInteraction.interpolatedBitangent);
+    surfaceInteraction.triangleTangent = surfaceInteraction.interpolatedTangent;
+    surfaceInteraction.triangleBitangent = surfaceInteraction.interpolatedBitangent;
+    surfaceInteraction.textureCoordinates = vec2(0.0);
+    surfaceInteraction.textureGradientX = vec2(0.0);
+    surfaceInteraction.textureGradientY = vec2(0.0);
+    surfaceInteraction.vertexColor = f16vec4(1.0);
+    surfaceInteraction.motion = vec3(0.0);
+    surfaceInteraction.triangleArea = 1.0;
+    surfaceInteraction.positionError = 0.0;
+    return surfaceInteraction;
+  }
+
+  // Load vertex positions from cluster vertex buffer (stored in LOCAL/object space)
+  // Must transform to world space using surface.objectToWorld
+  vec3 localPositions[3];
+  localPositions[0] = clusterVertexPositions[globalVtxIndices[0]];
+  localPositions[1] = clusterVertexPositions[globalVtxIndices[1]];
+  localPositions[2] = clusterVertexPositions[globalVtxIndices[2]];
+
+  // Transform positions from local to world space
+  vec3 positions[3];
+  positions[0] = mul(surface.objectToWorld, vec4(localPositions[0], 1.0f));
+  positions[1] = mul(surface.objectToWorld, vec4(localPositions[1], 1.0f));
+  positions[2] = mul(surface.objectToWorld, vec4(localPositions[2], 1.0f));
+
+  // Load vertex normals from cluster vertex buffer (stored in LOCAL/object space)
+  vec3 localNormals[3];
+  localNormals[0] = clusterVertexNormals[globalVtxIndices[0]];
+  localNormals[1] = clusterVertexNormals[globalVtxIndices[1]];
+  localNormals[2] = clusterVertexNormals[globalVtxIndices[2]];
+
+  // Transform normals from local to world space using normalObjectToWorld (handles non-uniform scale correctly)
+  vec3 normals[3];
+  normals[0] = normalize(mul(surface.normalObjectToWorld, localNormals[0]));
+  normals[1] = normalize(mul(surface.normalObjectToWorld, localNormals[1]));
+  normals[2] = normalize(mul(surface.normalObjectToWorld, localNormals[2]));
+
+  // Calculate the approximate position error
+  surfaceInteraction.positionError = max(
+    calculatePositionError(positions[0]),
+    max(calculatePositionError(positions[1]),
+        calculatePositionError(positions[2])));
+
+  // Compute world position from transformed positions
+  const vec3 hitPosition = interpolateHitAttribute(positions, bary);
+  surfaceInteraction.position = hitPosition;
+  surfaceInteraction.positionError = max(surfaceInteraction.positionError, calculatePositionError(hitPosition));
+
+  // Compute triangle normal
+  const vec3 ab = positions[1] - positions[0];
+  const vec3 ac = positions[2] - positions[0];
+  const vec3 worldTriangleVector = cross(ab, ac);
+  const vec3 worldTriangleNormal = safeNormalize(worldTriangleVector, vec3(0.0f, 0.0f, 1.0f));
+  const float worldTwoTriangleArea = dot(worldTriangleVector, worldTriangleNormal);
+  surfaceInteraction.triangleArea = worldTwoTriangleArea * 0.5;
+
+  const f16vec3 triangleNormal = f16vec3(worldTriangleNormal);
+  const bool triangleNormalSameDirection = dot(triangleNormal, rayInteraction.viewDirection) >= float16_t(0.0);
+  surfaceInteraction.triangleNormal = triangleNormalSameDirection ? triangleNormal : -triangleNormal;
+
+  // Compute interpolated normal from cluster vertex normals (now in world space after transform)
+  const vec3 worldInterpolatedNormal = safeNormalize(interpolateHitAttribute(normals, bary), triangleNormal);
+  const f16vec3 sanitizedWorldInterpolatedNormal = sanitize(worldInterpolatedNormal, triangleNormal);
+  const f16vec3 interpolatedNormal = f16vec3(normalize(sanitizedWorldInterpolatedNormal));
+  const bool interpolatedNormalSameDirection = dot(interpolatedNormal, surfaceInteraction.triangleNormal) >= float16_t(0.0);
+  const f16vec3 flippedInterpolatedNormal = interpolatedNormalSameDirection ? interpolatedNormal : -interpolatedNormal;
+  surfaceInteraction.interpolatedNormal = getBentNormal(surfaceInteraction.triangleNormal, flippedInterpolatedNormal, ray.direction);
+
+  // No motion for cluster surfaces for now (tessellation is recomputed each frame)
+  surfaceInteraction.motion = vec3(0.0);
+
+  // Compute texture coordinates from cluster shading data
+  float2 surfaceUVs[3];
+  clusterGetSurfaceUV(surfaceUVs, clusterId, clusterData, rayInteraction.primitiveIndex);
+  const float2 surfaceUV = bary.x * surfaceUVs[0] + bary.y * surfaceUVs[1] + bary.z * surfaceUVs[2];
+  const vec2 interpolatedTextureCoordinates = clusterGetTexcoord(clusterData, surfaceUV);
+  surfaceInteraction.textureCoordinates = sanitize(interpolatedTextureCoordinates, vec2(0.0f, 0.0f));
+
+  if (GenerateTangents)
+  {
+    // Convert surface UVs to vec2 array for tangent generation
+    vec2 texcoords[3];
+    texcoords[0] = clusterGetTexcoord(clusterData, surfaceUVs[0]);
+    texcoords[1] = clusterGetTexcoord(clusterData, surfaceUVs[1]);
+    texcoords[2] = clusterGetTexcoord(clusterData, surfaceUVs[2]);
+
+    genTangSpace(
+      texcoords, positions, surfaceInteraction.interpolatedNormal,
+      surfaceInteraction.interpolatedTangent, surfaceInteraction.interpolatedBitangent,
+      surfaceInteraction.rawTangent, surfaceInteraction.rawBitangent);
+
+    f16vec4 interpolatedToTriangle = quaternionCreateOrientation(surfaceInteraction.interpolatedNormal, surfaceInteraction.triangleNormal);
+    surfaceInteraction.triangleTangent = quaternionTransformVector(interpolatedToTriangle, surfaceInteraction.interpolatedTangent);
+    surfaceInteraction.triangleBitangent = quaternionTransformVector(interpolatedToTriangle, surfaceInteraction.interpolatedBitangent);
+  }
+  else
+  {
+    calcOrthonormalBasis(
+      surfaceInteraction.interpolatedNormal,
+      surfaceInteraction.interpolatedTangent,
+      surfaceInteraction.interpolatedBitangent);
+
+    calcOrthonormalBasis(
+      surfaceInteraction.triangleNormal,
+      surfaceInteraction.triangleTangent,
+      surfaceInteraction.triangleBitangent);
+  }
+
+  // Compute texture gradients
+  if (footprintMode != kFootprintFromTextureCoordDiff)
+  {
+    vec2 texcoords[3];
+    texcoords[0] = clusterGetTexcoord(clusterData, surfaceUVs[0]);
+    texcoords[1] = clusterGetTexcoord(clusterData, surfaceUVs[1]);
+    texcoords[2] = clusterGetTexcoord(clusterData, surfaceUVs[2]);
+
+    const vec3 positionOffset = surfaceInteraction.position - ray.origin;
+    const f16vec3 direction = footprintMode == kFootprintFromRayDirection ? ray.direction : normalize(positionOffset);
+    const float16_t coneRadius = footprintMode == kFootprintFromRayDirection ? rayInteraction.coneRadius : rayInteraction.coneRadius + length(positionOffset) * ray.spreadAngle;
+
+    computeAnisotropicEllipseAxes(
+      hitPosition, f16vec3(worldTriangleNormal), worldTwoTriangleArea, direction,
+      coneRadius, positions, texcoords, surfaceInteraction.textureCoordinates,
+      surfaceInteraction.textureGradientX, surfaceInteraction.textureGradientY);
+
+    if (footprintMode == kFootprintFromRayOriginClamped)
+    {
+      vec2 dUV1 = texcoords[1] - texcoords[0];
+      vec2 dUV2 = texcoords[2] - texcoords[0];
+      float dUVCross = abs(dUV1.x * dUV2.y - dUV2.x * dUV1.y);
+      float radius = dUVCross / (length(dUV1) + length(dUV2) + length(dUV2 - dUV1));
+      float maxFootprint = radius * 1.5;
+      surfaceInteraction.textureGradientX *= min(1.0, maxFootprint / length(surfaceInteraction.textureGradientX));
+      surfaceInteraction.textureGradientY *= min(1.0, maxFootprint / length(surfaceInteraction.textureGradientY));
+    }
+  }
+  else
+  {
+    vec2 texcoords[3];
+    texcoords[0] = clusterGetTexcoord(clusterData, surfaceUVs[0]);
+    texcoords[1] = clusterGetTexcoord(clusterData, surfaceUVs[1]);
+    texcoords[2] = clusterGetTexcoord(clusterData, surfaceUVs[2]);
+    surfaceInteraction.textureGradientX = (texcoords[1] - texcoords[0]) / 3.0f;
+    surfaceInteraction.textureGradientY = (texcoords[2] - texcoords[0]) / 3.0f;
+  }
+
+  // Default vertex color for cluster surfaces
+  surfaceInteraction.vertexColor = f16vec4(1.0, 1.0, 1.0, 1.0);
+
+  return surfaceInteraction;
+}
+
 SurfaceInteraction surfaceInteractionCreate<let GenerateTangents : bool>(
   Surface surface, RayInteraction rayInteraction, Ray ray,
   bool usePreviousPositions = false, uint footprintMode = kFootprintFromRayDirection)
 {
+  // RTX Mega Geometry: Use cluster-specific path for cluster surfaces
+  if (surface.isClusterSurface)
+  {
+    return surfaceInteractionCreateCluster<GenerateTangents>(surface, rayInteraction, ray, footprintMode);
+  }
+
   // Compute vertex indicies
 
   uint idx[3];

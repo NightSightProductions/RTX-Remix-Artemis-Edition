@@ -137,7 +137,8 @@
 
 
 // Custom Index encoding
-#define CUSTOM_INDEX_IS_VIEW_MODEL     (1 << 23)
-#define CUSTOM_INDEX_MATERIAL_TYPE_BIT (21)
-#define CUSTOM_INDEX_SURFACE_MASK      ((1 << CUSTOM_INDEX_MATERIAL_TYPE_BIT) - 1)
+#define CUSTOM_INDEX_IS_VIEW_MODEL       (1 << 23)
+#define CUSTOM_INDEX_IS_CLUSTER_SURFACE  (1 << 22)  // RTX MegaGeo: Cluster surface flag - skip geometryIndex in surfaceIndex calculation
+#define CUSTOM_INDEX_MATERIAL_TYPE_BIT   (20)       // Adjusted from 21 to make room for cluster flag
+#define CUSTOM_INDEX_SURFACE_MASK        ((1 << CUSTOM_INDEX_MATERIAL_TYPE_BIT) - 1)
 

@@ -727,10 +727,12 @@ namespace dxvk {
     std::vector<VkDescriptorBufferInfo> bufferInfos;
     std::vector<VkDescriptorImageInfo> imageInfos;
     std::vector<VkWriteDescriptorSet> writes;
+    std::vector<Rc<DxvkImageView>> imageViews;  // Keep image views alive until vkUpdateDescriptorSets
 
     bufferInfos.reserve(desc.bindings.size());
     imageInfos.reserve(desc.bindings.size());
     writes.reserve(desc.bindings.size());
+    imageViews.reserve(desc.bindings.size());
 
     for (const auto& item : desc.bindings) {
       if (item.resourceHandle == nullptr) continue;
@@ -836,6 +838,8 @@ namespace dxvk {
 
           Rc<DxvkImageView> imageView = m_device->createImageView(dxvkImage, viewInfo);
           if (imageView != nullptr) {
+            imageViews.push_back(imageView);  // Keep alive until vkUpdateDescriptorSets
+
             VkDescriptorImageInfo imageInfo = {};
             imageInfo.imageView = imageView->handle();
             imageInfo.imageLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
@@ -881,6 +885,8 @@ namespace dxvk {
 
           Rc<DxvkImageView> imageView = m_device->createImageView(dxvkImage, viewInfo);
           if (imageView != nullptr) {
+            imageViews.push_back(imageView);  // Keep alive until vkUpdateDescriptorSets
+
             VkDescriptorImageInfo imageInfo = {};
             imageInfo.imageView = imageView->handle();
             imageInfo.imageLayout = VK_IMAGE_LAYOUT_GENERAL;

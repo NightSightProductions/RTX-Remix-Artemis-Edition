@@ -118,3 +118,10 @@ RWStructuredBuffer<uint32_t> SamplerFeedbackBuffer;
 
 layout(binding = BINDING_CLUSTER_SHADING_DATA_BUFFER)
 StructuredBuffer<ClusterShadingData> clusterShadingData;
+
+// RTX Mega Geometry: Cluster vertex buffers for tessellated geometry
+layout(binding = BINDING_CLUSTER_VERTEX_POSITIONS_BUFFER)
+StructuredBuffer<float3> clusterVertexPositions;
+
+layout(binding = BINDING_CLUSTER_VERTEX_NORMALS_BUFFER)
+StructuredBuffer<float3> clusterVertexNormals;

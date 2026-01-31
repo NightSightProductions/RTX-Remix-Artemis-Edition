@@ -300,6 +300,15 @@ struct Surface
     set { data0b.z = newValue ? packedFlagSet(data0b.z, 1 << 1) : packedFlagUnset(data0b.z, 1 << 1); }
   }
 
+  // Note: Indicates this surface is from RTX MegaGeo cluster geometry.
+  // Cluster surfaces require special handling in surface interaction as vertex data
+  // comes from cluster vertex buffers instead of the original geometry buffers.
+  property bool isClusterSurface
+  {
+    get { return packedFlagGet(data0b.z, 1 << 2); }
+    set { data0b.z = newValue ? packedFlagSet(data0b.z, 1 << 2) : packedFlagUnset(data0b.z, 1 << 2); }
+  }
+
   property uint16_t hashPacked
   {
     get { return data0b.w; }

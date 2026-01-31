@@ -55,6 +55,8 @@ RayInteraction rayInteractionCreate(Ray ray, RayHitInfo rayHitInfo)
   rayInteraction.surfaceIndex = calculateSurfaceIndex(rayHitInfo);
   rayInteraction.materialType = calculateMaterialType(rayHitInfo);
   rayInteraction.frontHit = rayHitInfo.frontHit;
+  // RTX Mega Geometry: Preserve geometry index for cluster surfaces (contains cluster ID)
+  rayInteraction.geometryIndex = rayHitInfo.geometryIndex;
 
   return rayInteraction;
 }

@@ -1348,21 +1348,90 @@ namespace dxvk {
     bindResourceSampler(BINDING_VALUE_NOISE_SAMPLER, linearSampler);
     bindResourceBuffer(BINDING_SAMPLER_READBACK_BUFFER, DxvkBufferSlice(samplerFeedbackBuffer, 0, samplerFeedbackBuffer.ptr() ? samplerFeedbackBuffer->info().size : 0));
 
-    // Bind cluster shading data buffer for RTX Mega Geometry debug views
+    // Bind cluster buffers for RTX Mega Geometry
+    // Note: These bindings must always have valid buffers since they're in common_bindings.slangh.
+    // Use surfaceMapping as a placeholder when the real buffers aren't available.
+    bool clusterShadingDataBound = false;
+    bool clusterVertexPositionsBound = false;
+    bool clusterVertexNormalsBound = false;
+
     RtxMegaGeoBuilder* megaGeoBuilder = getSceneManager().getAccelManager().getMegaGeoBuilder();
+    static uint32_t s_diagCount = 0;
+    bool logDiag = ((s_diagCount++ % 100) == 0);
+
     if (megaGeoBuilder) {
+      // Cluster shading data buffer
       nvrhi::BufferHandle clusterShadingDataBufferHandle = megaGeoBuilder->getClusterShadingDataBuffer();
       if (clusterShadingDataBufferHandle) {
-        // Convert NVRHI buffer to Dxvk buffer
         NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(clusterShadingDataBufferHandle.Get());
         if (nvrhiBuffer) {
           const Rc<DxvkBuffer>& clusterShadingDataBuffer = nvrhiBuffer->getDxvkBuffer();
           if (clusterShadingDataBuffer.ptr()) {
             bindResourceBuffer(BINDING_CLUSTER_SHADING_DATA_BUFFER,
                              DxvkBufferSlice(clusterShadingDataBuffer, 0, clusterShadingDataBuffer->info().size));
+            clusterShadingDataBound = true;
+          } else if (logDiag) {
+            Logger::warn("RTX MegaGeo: clusterShadingData - getDxvkBuffer() returned null");
+          }
+        } else if (logDiag) {
+          Logger::warn("RTX MegaGeo: clusterShadingData - NvrhiDxvkBuffer cast failed");
+        }
+      } else if (logDiag) {
+        Logger::warn("RTX MegaGeo: getClusterShadingDataBuffer() returned null");
+      }
+    } else if (logDiag) {
+      Logger::warn("RTX MegaGeo: megaGeoBuilder is null");
+    }
+
+    if (megaGeoBuilder) {
+
+      // Cluster vertex positions buffer
+      nvrhi::BufferHandle clusterVertexPositionsHandle = megaGeoBuilder->getClusterVertexPositionsBuffer();
+      if (clusterVertexPositionsHandle) {
+        NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(clusterVertexPositionsHandle.Get());
+        if (nvrhiBuffer) {
+          const Rc<DxvkBuffer>& clusterVertexPositionsBuffer = nvrhiBuffer->getDxvkBuffer();
+          if (clusterVertexPositionsBuffer.ptr()) {
+            bindResourceBuffer(BINDING_CLUSTER_VERTEX_POSITIONS_BUFFER,
+                             DxvkBufferSlice(clusterVertexPositionsBuffer, 0, clusterVertexPositionsBuffer->info().size));
+            clusterVertexPositionsBound = true;
           }
         }
       }
+
+      // Cluster vertex normals buffer
+      nvrhi::BufferHandle clusterVertexNormalsHandle = megaGeoBuilder->getClusterVertexNormalsBuffer();
+      if (clusterVertexNormalsHandle) {
+        NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(clusterVertexNormalsHandle.Get());
+        if (nvrhiBuffer) {
+          const Rc<DxvkBuffer>& clusterVertexNormalsBuffer = nvrhiBuffer->getDxvkBuffer();
+          if (clusterVertexNormalsBuffer.ptr()) {
+            bindResourceBuffer(BINDING_CLUSTER_VERTEX_NORMALS_BUFFER,
+                             DxvkBufferSlice(clusterVertexNormalsBuffer, 0, clusterVertexNormalsBuffer->info().size));
+            clusterVertexNormalsBound = true;
+          }
+        }
+      }
+    }
+
+    // Bind placeholder buffers for any cluster bindings that weren't bound
+    // This prevents page faults when shaders reference these bindings
+    // Use surfaceBuffer as placeholder (always valid, just needs a non-null GPU address)
+    if (!clusterShadingDataBound) {
+      bindResourceBuffer(BINDING_CLUSTER_SHADING_DATA_BUFFER, DxvkBufferSlice(surfaceBuffer, 0, surfaceBuffer->info().size));
+    }
+    if (!clusterVertexPositionsBound) {
+      bindResourceBuffer(BINDING_CLUSTER_VERTEX_POSITIONS_BUFFER, DxvkBufferSlice(surfaceBuffer, 0, surfaceBuffer->info().size));
+    }
+    if (!clusterVertexNormalsBound) {
+      bindResourceBuffer(BINDING_CLUSTER_VERTEX_NORMALS_BUFFER, DxvkBufferSlice(surfaceBuffer, 0, surfaceBuffer->info().size));
+    }
+
+    // Log binding status for debugging
+    static uint32_t s_frameCount = 0;
+    if ((s_frameCount++ % 100) == 0) { // Log every 100 frames to avoid spam
+      Logger::info(str::format("RTX MegaGeo Bindings: shadingData=", clusterShadingDataBound,
+          " vertexPos=", clusterVertexPositionsBound, " vertexNormals=", clusterVertexNormalsBound));
     }
   }
 

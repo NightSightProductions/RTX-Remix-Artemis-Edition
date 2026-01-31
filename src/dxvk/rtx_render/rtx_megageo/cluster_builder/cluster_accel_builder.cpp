@@ -1434,8 +1434,11 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - HiZ textures initialized");
         }
 
-        // Use cached binding set if zbuffer hasn't changed, otherwise create and cache new one
-        if (m_cachedHizBuffer == m_tessellatorConfig.zbuffer && m_cachedHizBindingSet)
+        // Use cached binding set if zbuffer hasn't changed AND we're in the same frame
+        // (ZBuffer textures can be recreated between frames even if the pointer is the same)
+        if (m_cachedHizBuffer == m_tessellatorConfig.zbuffer &&
+            m_cachedHizFrame == m_currentFrameIndex &&
+            m_cachedHizBindingSet)
         {
             hizBindingSet = m_cachedHizBindingSet;
             RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - reusing cached HiZ binding set");
@@ -1451,6 +1454,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             }
             m_cachedHizBindingSet = m_device->createBindingSet(hizSetDesc, m_computeClusterTilingHizBL);
             m_cachedHizBuffer = m_tessellatorConfig.zbuffer;
+            m_cachedHizFrame = m_currentFrameIndex;
             hizBindingSet = m_cachedHizBindingSet;
         }
     }
@@ -1824,30 +1828,125 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
     if (maxVerticesChanged)
         Logger::info(str::format("  maxVertices: ", oldMaxVertices, " -> ", maxVertices));
 
-    // Use deferred destruction instead of waitForIdle() to avoid GPU stalls
-    // Old buffers are queued and destroyed after kDeferredDestructionFrames
+    // ==========================================================================
+    // DEFERRED DESTRUCTION - NO waitForIdle() anywhere!
+    // ==========================================================================
+    // All old buffers are queued for destruction after kDeferredDestructionFrames.
+    // This completely eliminates GPU stalls from buffer reallocation.
+
+    // Collect ALL buffers that need deferred destruction into one struct
+    DeferredBuffers deferred;
+    deferred.frameQueued = m_currentFrameIndex;
+    bool hasBuffersToDefer = false;
+
+    // Instance-related buffers (numInstancesChanged)
+    if (numInstancesChanged)
+    {
+        if (m_copyClusterOffsetParamsBuffer)
+        {
+            deferred.copyClusterOffsetParams = m_copyClusterOffsetParamsBuffer;
+            m_copyClusterOffsetParamsBuffer = nullptr;
+            hasBuffersToDefer = true;
+        }
+        if (m_clusterOffsetCountsBuffer.GetBuffer())
+        {
+            deferred.clusterOffsetCounts = std::move(m_clusterOffsetCountsBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (m_fillClustersDispatchIndirectBuffer.GetBuffer())
+        {
+            deferred.fillClustersDispatchIndirect = std::move(m_fillClustersDispatchIndirectBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (m_blasFromClasIndirectArgsBuffer.GetBuffer())
+        {
+            deferred.blasFromClasIndirectArgs = std::move(m_blasFromClasIndirectArgsBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (accels.blasPtrsBuffer.GetBuffer())
+        {
+            deferred.blasPtrs = std::move(accels.blasPtrsBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (accels.blasSizesBuffer.GetBuffer())
+        {
+            deferred.blasSizes = std::move(accels.blasSizesBuffer);
+            hasBuffersToDefer = true;
+        }
+    }
+
+    // Scene patch buffers (sceneSubdPatchesChanged)
+    if (sceneSubdPatchesChanged && m_gridSamplersBuffer.GetBuffer())
+    {
+        deferred.gridSamplers = std::move(m_gridSamplersBuffer);
+        hasBuffersToDefer = true;
+    }
+
+    // Cluster buffers (numClustersChanged)
+    if (numClustersChanged)
+    {
+        if (m_clustersBuffer.GetBuffer())
+        {
+            deferred.clusters = std::move(m_clustersBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (m_clasIndirectArgDataBuffer.GetBuffer())
+        {
+            deferred.clasIndirectArgData = std::move(m_clasIndirectArgDataBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (accels.clusterShadingDataBuffer.GetBuffer())
+        {
+            deferred.clusterShadingData = std::move(accels.clusterShadingDataBuffer);
+            hasBuffersToDefer = true;
+        }
+        if (accels.clasPtrsBuffer.GetBuffer())
+        {
+            deferred.clasPtrs = std::move(accels.clasPtrsBuffer);
+            hasBuffersToDefer = true;
+        }
+    }
+
+    // BLAS buffer (numClustersChanged || numInstancesChanged)
+    if ((numClustersChanged || numInstancesChanged) && accels.blasBuffer.GetBuffer())
+    {
+        deferred.blasBuffer = std::move(accels.blasBuffer);
+        hasBuffersToDefer = true;
+    }
+
+    // CLAS buffer (clasBytesChanged)
+    if (clasBytesChanged && accels.clasBuffer.GetBuffer())
+    {
+        deferred.clasBuffer = std::move(accels.clasBuffer);
+        hasBuffersToDefer = true;
+    }
+
+    // Vertex buffers (maxVerticesChanged or enableVertexNormalsChanged)
+    if (maxVerticesChanged && accels.clusterVertexPositionsBuffer.GetBuffer())
+    {
+        deferred.clusterVertexPositions = std::move(accels.clusterVertexPositionsBuffer);
+        hasBuffersToDefer = true;
+    }
+
+    if ((maxVerticesChanged || enableVertexNormalsChanged) && accels.clusterVertexNormalsBuffer.GetBuffer())
+    {
+        deferred.clusterVertexNormals = std::move(accels.clusterVertexNormalsBuffer);
+        hasBuffersToDefer = true;
+    }
+
+    // Queue all deferred buffers at once
+    if (hasBuffersToDefer)
+    {
+        m_deferredDestructionQueue.push_back(std::move(deferred));
+    }
+
+    // ==========================================================================
+    // CREATE NEW BUFFERS (old ones are safely in deferred queue)
+    // ==========================================================================
 
     if (numInstancesChanged)
     {
-        // Queue old buffers for deferred destruction (GPU may still be using them)
-        if (m_copyClusterOffsetParamsBuffer || m_clusterOffsetCountsBuffer.GetBuffer())
-        {
-            DeferredBuffers deferred;
-            deferred.frameQueued = m_currentFrameIndex;
-            deferred.copyClusterOffsetParams = m_copyClusterOffsetParamsBuffer;
-            deferred.clusterOffsetCounts = std::move(m_clusterOffsetCountsBuffer);
-            deferred.fillClustersDispatchIndirect = std::move(m_fillClustersDispatchIndirectBuffer);
-            deferred.blasFromClasIndirectArgs = std::move(m_blasFromClasIndirectArgsBuffer);
-            deferred.blasPtrs = std::move(accels.blasPtrsBuffer);
-            deferred.blasSizes = std::move(accels.blasSizesBuffer);
-            m_deferredDestructionQueue.push_back(std::move(deferred));
-        }
-
-        // Clear handles (buffers are now owned by deferred queue)
-        m_copyClusterOffsetParamsBuffer = nullptr;
-
         // Use a simple constant buffer instead of volatile - Vulkan has 64KB uniform buffer limit
-        // Since we call writeBuffer before each dispatch, we don't need multiple versions
         nvrhi::BufferDesc cbDesc;
         cbDesc.byteSize = 256; // CopyClusterOffsetParams is 16 bytes, align to 256 for constant buffer
         cbDesc.debugName = "CopyClusterOffsetParams";
@@ -1857,11 +1956,12 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
         m_copyClusterOffsetParamsBuffer = m_device->createBuffer(cbDesc);
 
         m_clusterOffsetCountsBuffer.Create(m_numInstances * ClusterDispatchType::NumTypes, "ClusterOffsets", m_device.Get());
+
         nvrhi::BufferDesc dispatchIndirectDesc =
         {
-            .byteSize = m_numInstances * ClusterDispatchType::NumTypes * m_fillClustersDispatchIndirectBuffer.GetElementBytes(),
+            .byteSize = m_numInstances * ClusterDispatchType::NumTypes * sizeof(uint3),
             .debugName = "FillClustersIndirectArgs",
-            .structStride = uint32_t(m_fillClustersDispatchIndirectBuffer.GetElementBytes()),
+            .structStride = uint32_t(sizeof(uint3)),
             .canHaveUAVs = true,
             .isDrawIndirectArgs = true,
             .initialState = nvrhi::ResourceStates::IndirectArgument,
@@ -1869,7 +1969,6 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
         };
         m_fillClustersDispatchIndirectBuffer.Create(dispatchIndirectDesc, m_device.Get());
 
-        // Create and fill out the instantiate args buffer from addressesBuffer
         // Align structStride to 16 bytes for Vulkan minStorageBufferOffsetAlignment
         uint32_t indirectArgElementSize = sizeof(cluster::IndirectArgs);
         uint32_t indirectArgAlignedStride = (indirectArgElementSize + 15) & ~15;
@@ -1887,30 +1986,15 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
         accels.blasSizesBuffer.Create(m_numInstances, "BlasSizes", m_device.Get());
     }
 
-    // For buffers without deferred destruction, we need waitForIdle before release
-    // Instance buffers above use deferred destruction, but these don't yet
-    bool needsWaitForIdle = sceneSubdPatchesChanged || numClustersChanged || clasBytesChanged || maxVerticesChanged || enableVertexNormalsChanged;
-    if (needsWaitForIdle)
-    {
-        m_device->waitForIdle();
-    }
-
     if (sceneSubdPatchesChanged)
     {
-        m_gridSamplersBuffer.Release();
         m_gridSamplersBuffer.Create(m_sceneSubdPatches, "GridSamplers", m_device.Get());
     }
 
     if (numClustersChanged)
     {
-        m_clustersBuffer.Release();
-        m_clasIndirectArgDataBuffer.Release();
-        accels.clusterShadingDataBuffer.Release();
-        accels.clasPtrsBuffer.Release();
-
         m_clustersBuffer.Create(m_maxClusters, "clusters", m_device.Get());
         m_clasIndirectArgDataBuffer.Create(m_maxClusters, "indirect arg data", m_device.Get());
-
         accels.clusterShadingDataBuffer.Create(m_maxClusters, "cluster shading data", m_device.Get());
         accels.clasPtrsBuffer.Create(m_maxClusters, "ClasAddresses", m_device.Get());
     }
@@ -1920,7 +2004,6 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
     if (numClustersChanged || numInstancesChanged)
     {
         RTXMG_LOG(str::format("RTX MegaGeo: UpdateMemoryAllocations - creating BLAS buffers, m_numInstances=", m_numInstances, " m_maxClusters=", m_maxClusters));
-        accels.blasBuffer.Release();
 
         m_createBlasParams =
         {
@@ -1966,7 +2049,6 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
         {
             Logger::err("RTX MegaGeo: UpdateMemoryAllocations - cannot create blasBuffer with size 0!");
         }
-        // Note: scratch buffer is allocated on-demand by nvrhi adapter (matching sample behavior)
     }
     else
     {
@@ -1975,8 +2057,6 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
 
     if (clasBytesChanged)
     {
-        accels.clasBuffer.Release();
-
         nvrhi::BufferDesc clasDataDesc =
         {
             .byteSize = m_maxClasBytes,
@@ -1991,13 +2071,11 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
 
     if (maxVerticesChanged)
     {
-        accels.clusterVertexPositionsBuffer.Release();
         accels.clusterVertexPositionsBuffer.Create(m_maxVertices, "cluster vertex positions", m_device.Get());
     }
-        
+
     if (maxVerticesChanged || enableVertexNormalsChanged)
     {
-        accels.clusterVertexNormalsBuffer.Release();
         accels.clusterVertexNormalsBuffer.Create(m_tessellatorConfig.enableVertexNormals ? m_maxVertices : 1, "cluster vertex normals", m_device.Get());
     }
 }

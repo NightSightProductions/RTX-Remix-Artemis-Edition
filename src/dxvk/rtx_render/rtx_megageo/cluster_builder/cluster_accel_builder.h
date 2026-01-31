@@ -282,6 +282,7 @@ protected:
     nvrhi::BindingSetHandle m_dummyHizBindingSet;           // Dummy HiZ binding set when zbuffer is null
     nvrhi::BindingSetHandle m_cachedHizBindingSet;          // Cached HiZ binding set when zbuffer available
     const ZBuffer* m_cachedHizBuffer = nullptr;              // Track which zbuffer the cached set was created for
+    uint32_t m_cachedHizFrame = UINT32_MAX;                  // Track which frame the cached set was created for
     nvrhi::ComputePipelineHandle m_computeClusterTilingPSOs[ComputeClusterTilingPermutation::kCount];
 
     // Dummy HiZ textures for when HiZ culling is disabled
@@ -337,16 +338,37 @@ protected:
     uint32_t m_currentFrameIndex = 0;
 
     // Deferred destruction - keep old buffers alive for N frames to avoid use-after-free
-    // This avoids calling waitForIdle() which kills performance
+    // This completely avoids calling waitForIdle() which kills performance
     static constexpr uint32_t kDeferredDestructionFrames = 3;
     struct DeferredBuffers {
         uint32_t frameQueued = 0;
+
+        // Instance-related buffers (numInstancesChanged)
         nvrhi::BufferHandle copyClusterOffsetParams;
         RTXMGBuffer<uint2> clusterOffsetCounts;
         RTXMGBuffer<uint3> fillClustersDispatchIndirect;
         RTXMGBuffer<nvrhi::rt::cluster::IndirectArgs> blasFromClasIndirectArgs;
         RTXMGBuffer<nvrhi::GpuVirtualAddress> blasPtrs;
         RTXMGBuffer<uint32_t> blasSizes;
+
+        // Scene patch buffers (sceneSubdPatchesChanged)
+        RTXMGBuffer<GridSampler> gridSamplers;
+
+        // Cluster buffers (numClustersChanged)
+        RTXMGBuffer<Cluster> clusters;
+        RTXMGBuffer<nvrhi::rt::cluster::IndirectInstantiateTemplateArgs> clasIndirectArgData;
+        RTXMGBuffer<ClusterShadingData> clusterShadingData;
+        RTXMGBuffer<nvrhi::GpuVirtualAddress> clasPtrs;
+
+        // CLAS buffer (clasBytesChanged)
+        RTXMGBuffer<uint8_t> clasBuffer;
+
+        // Vertex buffers (maxVerticesChanged or enableVertexNormalsChanged)
+        RTXMGBuffer<float3> clusterVertexPositions;
+        RTXMGBuffer<float3> clusterVertexNormals;
+
+        // BLAS buffer (numClustersChanged || numInstancesChanged)
+        RTXMGBuffer<uint8_t> blasBuffer;
     };
     std::vector<DeferredBuffers> m_deferredDestructionQueue;
     void ProcessDeferredDestruction(uint32_t currentFrame);

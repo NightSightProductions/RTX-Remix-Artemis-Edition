@@ -453,26 +453,54 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         throw;
     }
 
+    dxvk::Logger::info("SubdivSurface: Creating topology quality buffer");
     m_topologyQualityBuffer = CreateAndUploadBuffer<uint16_t>(
         topologyQuality, "topology quality", commandList);
+    dxvk::Logger::info("SubdivSurface: Topology quality buffer created");
 
     // TODO: Add bindless descriptor creation if needed for RTX Remix integration
     // m_topologyQualityDescriptor = descriptorTable->CreateDescriptorHandle(
     //     nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_topologyQualityBuffer));
 
     // setup for texcoords - always create like the sample does
+    dxvk::Logger::info("SubdivSurface: Creating texcoord surface table");
+    dxvk::Logger::info(dxvk::str::format("SubdivSurface: refiner numFVarChannels=", refiner->GetNumFVarChannels()));
+    dxvk::Logger::info(dxvk::str::format("SubdivSurface: shape uvs size=", m_shape->uvs.size()));
+
     Tmr::LinearSurfaceTableFactory tableFactoryFvar;
     constexpr int const fvarChannel = 0;
-    m_texcoord_surface_table =
-        tableFactoryFvar.Create(*refiner, fvarChannel, m_surface_table.get());
 
+    // Check if we have fvar channel data
+    if (refiner->GetNumFVarChannels() == 0) {
+        dxvk::Logger::warn("SubdivSurface: No fvar channels, skipping texcoord surface table");
+        m_texcoord_surface_table = nullptr;
+    } else {
+        try {
+            m_texcoord_surface_table =
+                tableFactoryFvar.Create(*refiner, fvarChannel, m_surface_table.get());
+            dxvk::Logger::info("SubdivSurface: Texcoord surface table created");
+        } catch (const std::exception& e) {
+            dxvk::Logger::err(dxvk::str::format("SubdivSurface: Exception creating texcoord surface table: ", e.what()));
+            m_texcoord_surface_table = nullptr;
+        } catch (...) {
+            dxvk::Logger::err("SubdivSurface: Unknown exception creating texcoord surface table");
+            m_texcoord_surface_table = nullptr;
+        }
+    }
+
+    dxvk::Logger::info("SubdivSurface: Calling InitDeviceData");
     InitDeviceData(commandList);
+    dxvk::Logger::info("SubdivSurface: InitDeviceData complete");
 
+    dxvk::Logger::info("SubdivSurface: Creating texcoords buffer");
     m_texcoordsBuffer =
         CreateAndUploadBuffer(m_shape->uvs, "base texcoords", commandList);
+    dxvk::Logger::info("SubdivSurface: Texcoords buffer created");
 
+    dxvk::Logger::info("SubdivSurface: Creating positions buffer");
     m_positionsBuffer = CreateAndUploadBuffer(m_shape->verts, "SubdPosedPositions", commandList);
     m_aabb = m_shape->aabb;
+    dxvk::Logger::info("SubdivSurface: Positions buffer created");
 
     if (keyFrameShapes.size() > 0)
     {
@@ -550,8 +578,15 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
             hasLimitCount, " have limit, ", noLimitCount, " no limit"));
     }
 
-    // Always copy texcoord descriptors - matching sample behavior
-    std::vector<Tmr::LinearSurfaceDescriptor> sortedTexcoordDescriptors = m_texcoord_surface_table->descriptors;
+    // Copy texcoord descriptors if available
+    std::vector<Tmr::LinearSurfaceDescriptor> sortedTexcoordDescriptors;
+    if (m_texcoord_surface_table) {
+        sortedTexcoordDescriptors = m_texcoord_surface_table->descriptors;
+    } else {
+        // No texcoords - create empty descriptors matching surface count
+        dxvk::Logger::warn("SubdivSurface: No texcoord surface table, creating empty descriptors");
+        sortedTexcoordDescriptors.resize(m_surfaceCount);
+    }
     auto surfaceToGeometryIndex = quadrangulateFaceToSubshape(*m_shape, m_surfaceCount);
 
     assert(m_surfaceCount == sortedDescriptors.size());
@@ -717,18 +752,27 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
 
     m_surfaceToGeometryIndexBuffer = CreateAndUploadBuffer<uint16_t>(surfaceToGeometryIndex, "surfaceToGeometryIndex", commandList);
 
-    // Always create texcoord device data - matching sample behavior
+    // Create texcoord device data
     m_texcoordDeviceData.surfaceDescriptors =
         CreateAndUploadBuffer<Tmr::LinearSurfaceDescriptor>(
             sortedTexcoordDescriptors, "texture coordinate surface descriptors", commandList);
 
-    m_texcoordDeviceData.controlPointIndices = CreateAndUploadBuffer<Vtr::Index>(
-        m_texcoord_surface_table->controlPointIndices, "texture coordinate control point indices", commandList);
+    if (m_texcoord_surface_table) {
+        m_texcoordDeviceData.controlPointIndices = CreateAndUploadBuffer<Vtr::Index>(
+            m_texcoord_surface_table->controlPointIndices, "texture coordinate control point indices", commandList);
+    } else {
+        // No texcoords - create empty buffer
+        std::vector<Vtr::Index> emptyIndices;
+        m_texcoordDeviceData.controlPointIndices = CreateAndUploadBuffer<Vtr::Index>(
+            emptyIndices, "texture coordinate control point indices (empty)", commandList);
+    }
 
     m_texcoordDeviceData.patchPointsOffsets = CreateAndUploadBuffer<uint32_t>(
         texcoordPatchPointsOffsets, "texture coordinate patch points offsets", commandList);
 
-    m_texcoordDeviceData.patchPoints = CreateBuffer(texcoordPatchPointsOffsets.back(), sizeof(Vector2),
+    m_texcoordDeviceData.patchPoints = CreateBuffer(
+        texcoordPatchPointsOffsets.empty() ? 0 : texcoordPatchPointsOffsets.back(),
+        sizeof(Vector2),
         "texture coordinate patch points", commandList->getDevice());
 }
 

@@ -1,0 +1,188 @@
+/*
+* Copyright (c) 2024-2025, NVIDIA CORPORATION. All rights reserved.
+*
+* Permission is hereby granted, free of charge, to any person obtaining a
+* copy of this software and associated documentation files (the "Software"),
+* to deal in the Software without restriction, including without limitation
+* the rights to use, copy, modify, merge, publish, distribute, sublicense,
+* and/or sell copies of the Software, and to permit persons to whom the
+* Software is furnished to do so, subject to the following conditions:
+*
+* The above copyright notice and this permission notice shall be included in
+* all copies or substantial portions of the Software.
+*
+* THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+* IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+* FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.  IN NO EVENT SHALL
+* THE AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+* LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING
+* FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
+* DEALINGS IN THE SOFTWARE.
+*/
+#pragma once
+
+// RTX Mega Geometry - Cluster Surface Interaction Utilities
+// Provides functions for resolving vertex attributes from cluster geometry hits.
+// Based on the RTXMG sample code.
+
+#include "rtx/pass/rtx_megageo/cluster_builder/cluster.h"
+
+// Note: Cluster ID is now passed via RayInteraction.geometryIndex
+// For cluster surfaces, geometryIndex contains the cluster ID set during CLAS construction
+// (see compute_cluster_tiling.comp.slang where geometryIndexOffsetPacked = clusterIndex)
+// The RayHitInfo.geometryIndex is populated from GeometryIndex() (trace ray) or
+// rayQuery.CommittedGeometryIndex() (ray query), which works in all shader stages.
+
+// Get cluster edge size from cluster shading data
+uint16_t2 clusterGetEdgeSize(uint32_t clusterId, StructuredBuffer<ClusterShadingData> shadingData)
+{
+    ClusterShadingData data = shadingData[clusterId];
+    return uint16_t2(data.m_clusterSizeX, data.m_clusterSizeY);
+}
+
+// Convert 1D index to 2D grid index
+inline uint16_t2 index2D(uint32_t indexLinear, uint16_t lineStride)
+{
+    return uint16_t2(uint16_t(indexLinear % lineStride), uint16_t(indexLinear / lineStride));
+}
+
+// Get vertex indices for a cluster triangle.
+// Cluster triangles are arranged in a grid of quads, each quad split into 2 triangles.
+// The vertex indices are computed from the primitive index within the cluster.
+uint3 clusterGetVertexIndices(uint32_t clusterId, uint32_t primId, StructuredBuffer<ClusterShadingData> shadingData)
+{
+    const uint16_t triID = (uint16_t)primId;
+
+    // vertex quad ordering:
+    // 23
+    // 01
+    // triangle ordering: left edge first -- 032+013 (diagonal:03) or 012+132 (diagonal:12)
+    // 21 .5    or   2. 54
+    // 0. 34    or   01 .3
+    // vx,vy are row-major vertex indices in range [0..sx][0..sy] sx,sy are cluster edge size
+    // if vx,vy are the lower left corner vtx idxs, then diagonal:03 == ((vx & 1) == (vy & 1))
+
+    uint16_t2 clusterEdgeSize = clusterGetEdgeSize(clusterId, shadingData);
+
+    const uint16_t qs = clusterEdgeSize.x;      // quad stride
+    const uint16_t vs = clusterEdgeSize.x + 1;  // vert stride
+    const uint16_t qid = triID >> 1;             // quad id
+    const uint16_t qx = qid % qs;               // quad x
+    const uint16_t qy = qid / qs;               // quad y
+    const uint16_t vid = qy * vs + qx;           // lower-left vertex id
+    const bool diag03 = ((qx & 1) == (qy & 1)); // is diag 0-3 (true) or 1-2 (false)
+
+    const uint16_t df = uint16_t(diag03) << 1 | uint16_t(triID & 1);
+
+    uint3 indices;
+    switch (df)
+    {
+    case 0: indices = uint3(vid, vid + 1, vid + vs); break;
+    case 1: indices = uint3(vid + 1, vid + 1 + vs, vid + vs); break;
+    case 2: indices = uint3(vid, vid + 1 + vs, vid + vs); break;
+    case 3: indices = uint3(vid, vid + 1, vid + 1 + vs); break;
+    default: indices = uint3(0, 0, 0); break;
+    }
+
+    return indices;
+}
+
+// Compute surface UV coordinates for the three vertices of a cluster triangle.
+// This maps from cluster-local coordinates to the parametric surface coordinates.
+void clusterGetSurfaceUV(out float2 uvs[3], uint32_t clusterId, ClusterShadingData clusterData, uint primId)
+{
+    const uint3 localVtxIDs = clusterGetVertexIndices(clusterId, primId, clusterShadingData);
+
+    const uint16_t2 clusterSize = uint16_t2(clusterData.m_clusterSizeX, clusterData.m_clusterSizeY);
+    const uint16_t2 clusterOffset = clusterData.m_clusterOffset;
+    const uint16_t4 edgeSegments = clusterData.m_edgeSegments;
+
+    GridSampler sampler;
+    sampler.edgeSegments = edgeSegments;
+
+    // offset local i,j index to surface index
+    uint16_t2 vertexIndex2d = index2D(localVtxIDs.x, clusterSize.x + 1) + clusterOffset;
+    uvs[0] = sampler.UV(vertexIndex2d, ClusterPattern::REGULAR);
+    vertexIndex2d = index2D(localVtxIDs.y, clusterSize.x + 1) + clusterOffset;
+    uvs[1] = sampler.UV(vertexIndex2d, ClusterPattern::REGULAR);
+    vertexIndex2d = index2D(localVtxIDs.z, clusterSize.x + 1) + clusterOffset;
+    uvs[2] = sampler.UV(vertexIndex2d, ClusterPattern::REGULAR);
+}
+
+// Get interpolated texture coordinate for a cluster hit.
+// Uses bilinear interpolation from the 4 corner texcoords stored in ClusterShadingData.
+float2 clusterGetTexcoord(ClusterShadingData clusterData, float2 surfaceUV)
+{
+    const float u = surfaceUV.x;
+    const float v = surfaceUV.y;
+
+    // Bilinear interpolation from 4 corner texcoords
+    float2 texcoord = clusterData.m_texcoords[0] * (1.0f - u) * (1.0f - v)
+        + clusterData.m_texcoords[1] * u * (1.0f - v)
+        + clusterData.m_texcoords[2] * u * v
+        + clusterData.m_texcoords[3] * (1.0f - u) * v;
+
+    return texcoord;
+}
+
+// Structure to hold cluster geometry sample results
+struct ClusterGeometrySample
+{
+    float3 vertexPositions[3];
+    float3 vertexNormals[3];
+    float2 texcoord;
+    float3 barycentrics;
+    float2 surfaceUV;
+    uint32_t clusterId;
+    uint32_t surfaceIndex;
+};
+
+// Sample cluster geometry at a ray hit.
+// Returns vertex positions, normals, and interpolated texcoord.
+// Note: clusterId should be obtained from RayInteraction.geometryIndex
+ClusterGeometrySample clusterSampleGeometry(
+    uint32_t clusterId,
+    uint32_t primitiveIndex,
+    float2 hitBarycentrics,
+    StructuredBuffer<ClusterShadingData> shadingData,
+    StructuredBuffer<float3> vertexPositions,
+    StructuredBuffer<float3> vertexNormals)
+{
+    ClusterGeometrySample result;
+
+    result.clusterId = clusterId;
+
+    // Get cluster shading data
+    ClusterShadingData clusterData = shadingData[clusterId];
+    result.surfaceIndex = clusterData.m_surfaceId;
+
+    // Compute barycentrics
+    result.barycentrics.yz = hitBarycentrics;
+    result.barycentrics.x = 1.0 - (result.barycentrics.y + result.barycentrics.z);
+
+    // Get local vertex indices for this triangle within the cluster
+    uint3 localVtxIndices = clusterGetVertexIndices(clusterId, primitiveIndex, shadingData);
+
+    // Convert to global vertex indices using the cluster's vertex offset
+    uint3 globalVtxIndices = localVtxIndices + clusterData.m_vertexOffset;
+
+    // Load vertex positions from cluster vertex buffer
+    result.vertexPositions[0] = vertexPositions[globalVtxIndices[0]];
+    result.vertexPositions[1] = vertexPositions[globalVtxIndices[1]];
+    result.vertexPositions[2] = vertexPositions[globalVtxIndices[2]];
+
+    // Load vertex normals from cluster vertex buffer
+    result.vertexNormals[0] = vertexNormals[globalVtxIndices[0]];
+    result.vertexNormals[1] = vertexNormals[globalVtxIndices[1]];
+    result.vertexNormals[2] = vertexNormals[globalVtxIndices[2]];
+
+    // Compute surface UV coordinates
+    float2 uvs[3];
+    clusterGetSurfaceUV(uvs, clusterId, clusterData, primitiveIndex);
+    result.surfaceUV = result.barycentrics.x * uvs[0] + result.barycentrics.y * uvs[1] + result.barycentrics.z * uvs[2];
+
+    // Interpolate texcoord from surface UV
+    result.texcoord = clusterGetTexcoord(clusterData, result.surfaceUV);
+
+    return result;
+}

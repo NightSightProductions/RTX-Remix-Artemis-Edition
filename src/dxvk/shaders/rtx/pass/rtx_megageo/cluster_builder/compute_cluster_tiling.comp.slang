@@ -589,7 +589,9 @@ void GathererWriteCluster(Cluster cluster, uint32_t clusterIndex, GridSampler gr
 
     nvrhi::rt::cluster::IndirectInstantiateTemplateArgs indirectArgs = (nvrhi::rt::cluster::IndirectInstantiateTemplateArgs)0;
     indirectArgs.clusterIdOffset = clusterIndex;
-    indirectArgs.geometryIndexOffsetPacked = localGeometryIndex; // Lower 24 bits = geometryIndex, upper 8 bits = reserved (0)
+    // Use clusterIndex as geometry index so we can retrieve it via GeometryIndex() in hit shaders
+    // The original surface ID is available via ClusterShadingData.m_surfaceId
+    indirectArgs.geometryIndexOffsetPacked = clusterIndex; // Lower 24 bits = clusterIndex for shader lookup
     indirectArgs.clusterTemplate = templateAddress;
     indirectArgs.vertexBuffer.startAddress = vertexBufferAddress;
     indirectArgs.vertexBuffer.strideInBytes = sizeof(float3);
