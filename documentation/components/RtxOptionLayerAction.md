@@ -57,17 +57,29 @@ The priority for the option layer\. Numbers are rounded to the nearest positive 
 **Value Constraints:**
 
 - **Minimum Value:** 101\.0
-- **Maximum Value:** \-2147483648\.0
+- **Maximum Value:** 10000000\.0
 
 ## State Properties
 
 | Property | Display Name | Type | IO Type | Default Value | Optional |
 |----------|--------------|------|---------|---------------|----------|
 | holdsReference |  | Bool | State | false | No | 
+| cachedConfigPath |  | AssetPath | State | "" | No | 
+| cachedPriority |  | Float | State | 0\.0 | No | 
 
 ### 
 
 True if the component is holding a reference to the RtxOptionLayer\.
+
+
+### 
+
+Cached config path from when the layer was acquired\.
+
+
+### 
+
+Cached priority from when the layer was acquired\.
 
 
 ## Usage Notes
