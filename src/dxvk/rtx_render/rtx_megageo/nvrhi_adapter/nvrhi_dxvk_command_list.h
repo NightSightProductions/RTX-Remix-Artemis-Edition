@@ -23,6 +23,7 @@
 
 #include <memory>
 #include <vector>
+#include <unordered_map>
 #include "nvrhi_types.h"
 #include "nvrhi_dxvk_device.h"
 #include "nvrhi_scratch_manager.h"
@@ -31,6 +32,13 @@
 #include "../hiz/hiz_buffer_constants.h"
 
 namespace dxvk {
+
+  // Buffer barrier tracking for automatic barrier system
+  struct BufferBarrier {
+    nvrhi::IBuffer* buffer;
+    nvrhi::ResourceStates stateBefore;
+    nvrhi::ResourceStates stateAfter;
+  };
 
   // NVRHI ICommandList implementation using DxvkContext
   class NvrhiDxvkCommandList : public nvrhi::ICommandList {
@@ -164,6 +172,16 @@ namespace dxvk {
     void translateClusterOperation(
       const nvrhi::rt::cluster::OperationDesc& nvrhiDesc,
       VkClusterAccelerationStructureCommandsInfoNV& vkCmds);
+
+    // Automatic barrier system (matching sample's NVRHI behavior)
+    bool m_EnableAutomaticBarriers = true;
+    std::unordered_map<nvrhi::IBuffer*, nvrhi::ResourceStates> m_BufferStates;
+    std::vector<BufferBarrier> m_PendingBufferBarriers;
+
+    // Automatic barrier methods
+    void requireBufferState(nvrhi::IBuffer* buffer, nvrhi::ResourceStates state);
+    void setResourceStatesForBindingSet(nvrhi::IBindingSet* bindingSet);
+    void commitBarriers();
   };
 
 } // namespace dxvk

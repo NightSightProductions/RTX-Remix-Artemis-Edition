@@ -1357,9 +1357,18 @@ namespace dxvk {
 
     RtxMegaGeoBuilder* megaGeoBuilder = getSceneManager().getAccelManager().getMegaGeoBuilder();
     static uint32_t s_diagCount = 0;
+    static uint32_t s_nullCount = 0;
+    static uint32_t s_validCount = 0;
     bool logDiag = ((s_diagCount++ % 100) == 0);
 
     if (megaGeoBuilder) {
+      s_validCount++;
+      // Check if buffers are actually valid
+      nvrhi::BufferHandle shadingBuf = megaGeoBuilder->getClusterShadingDataBuffer();
+      if (logDiag) {
+        Logger::info(str::format("RTX MegaGeo bindCommon: megaGeoBuilder valid, shadingBuffer=",
+          (void*)shadingBuf.Get(), " validCount=", s_validCount, " nullCount=", s_nullCount));
+      }
       // Cluster shading data buffer
       nvrhi::BufferHandle clusterShadingDataBufferHandle = megaGeoBuilder->getClusterShadingDataBuffer();
       if (clusterShadingDataBufferHandle) {
@@ -1379,8 +1388,11 @@ namespace dxvk {
       } else if (logDiag) {
         Logger::warn("RTX MegaGeo: getClusterShadingDataBuffer() returned null");
       }
-    } else if (logDiag) {
-      Logger::warn("RTX MegaGeo: megaGeoBuilder is null");
+    } else {
+      s_nullCount++;
+      if (logDiag) {
+        Logger::warn(str::format("RTX MegaGeo: megaGeoBuilder is null, validCount=", s_validCount, " nullCount=", s_nullCount));
+      }
     }
 
     if (megaGeoBuilder) {

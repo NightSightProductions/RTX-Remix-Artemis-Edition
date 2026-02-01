@@ -201,9 +201,10 @@ SurfaceInteraction surfaceInteractionCreateCluster<let GenerateTangents : bool>(
 {
   SurfaceInteraction surfaceInteraction;
 
-  // Get cluster ID from rayInteraction.geometryIndex (populated from RayHitInfo during ray tracing)
-  // For cluster surfaces, geometryIndex contains the cluster ID set during CLAS construction
-  uint32_t clusterId = rayInteraction.geometryIndex;
+  // Get cluster ID for ClusterShadingData lookup
+  // NOTE: We set geometryIndexOffset = clusterIndex in compute_cluster_tiling.hlsl,
+  // so GeometryIndex() returns the correct cluster index for ClusterShadingData lookup.
+  uint32_t clusterId = rayInteraction.clusterId;
 
   // DEBUG: Bounds check - if clusterId looks invalid, use fallback
   // Max reasonable cluster count is ~1 million for safety

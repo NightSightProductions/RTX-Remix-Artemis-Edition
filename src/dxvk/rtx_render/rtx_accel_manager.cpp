@@ -881,9 +881,13 @@ namespace dxvk {
       blasInstance.accelerationStructureReference = blasEntry->getBlasAddress();
     }
 
+    // RTX MegaGeo: For cluster surfaces, use the pre-assigned surface index (set before addBlas call)
+    // For non-cluster surfaces, use m_reorderedSurfaces.size() which will be the index after we add it below
+    uint32_t surfaceIndexForCustomIndex = isClusterBlas ? instance->getSurfaceIndex() : uint32_t(m_reorderedSurfaces.size());
+
     blasInstance.instanceCustomIndex =
       (blasInstance.instanceCustomIndex & ~uint32_t(CUSTOM_INDEX_SURFACE_MASK)) |
-      uint32_t(m_reorderedSurfaces.size()) & uint32_t(CUSTOM_INDEX_SURFACE_MASK);
+      (surfaceIndexForCustomIndex & uint32_t(CUSTOM_INDEX_SURFACE_MASK));
 
     // RTX MegaGeo: Set cluster surface flag so shader knows not to add geometryIndex to surfaceIndex
     if (isClusterBlas) {
@@ -913,8 +917,11 @@ namespace dxvk {
 
     // Append the instance to the reordered surface list
     // Note: this happens *after* the instance is appended, because the size of m_reorderedSurfaces is used above
-    m_reorderedSurfaces.push_back(instance);
-    m_reorderedSurfacesFirstIndexOffset.push_back(0);
+    // RTX MegaGeo: Skip for cluster surfaces - they're already added in prepareSceneData before addBlas is called
+    if (!isClusterBlas) {
+      m_reorderedSurfaces.push_back(instance);
+      m_reorderedSurfacesFirstIndexOffset.push_back(0);
+    }
   }
 
   void AccelManager::createBlasBuffersAndInstances(Rc<DxvkContext> ctx, 

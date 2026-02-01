@@ -508,7 +508,10 @@ void GathererWriteCluster(Cluster cluster, uint32_t clusterIndex, GridSampler gr
 
     nvrhi::rt::cluster::IndirectInstantiateTemplateArgs indirectArgs = (nvrhi::rt::cluster::IndirectInstantiateTemplateArgs)0;
     indirectArgs.clusterIdOffset = clusterIndex;
-    indirectArgs.geometryIndexOffset = localGeometryIndex;
+    // RTX Remix FIX: Use clusterIndex instead of localGeometryIndex for geometryIndexOffset
+    // This ensures GeometryIndex() in ray tracing shaders returns the correct cluster index
+    // for ClusterShadingData lookup. (Sample uses ClusterIdNV built-in, but we use GeometryIndex)
+    indirectArgs.geometryIndexOffset = clusterIndex;
     indirectArgs.clusterTemplate = templateAddress;
     indirectArgs.vertexBuffer.startAddress = vertexBufferAddress;
     indirectArgs.vertexBuffer.strideInBytes = sizeof(float3);

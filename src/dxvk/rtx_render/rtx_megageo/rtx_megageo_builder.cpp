@@ -464,6 +464,10 @@ namespace dxvk {
     config.enableLogging = false;  // DISABLED - causes GPU readback stalls (~1 second per frame)
     config.zbuffer = m_zBuffer.get();
     config.camera = &m_tessellationCamera;
+    // CRITICAL: Set isolation level for subdivision - 0 means no tessellation!
+    // Sample defaults to kMaxIsolationLevel (6). Higher = more subdivision detail.
+    // Using 3 instead of 6 to reduce triangle count and avoid performance issues
+    config.isolationLevel = 3;
 
     // Set viewport size from depth buffer - CRITICAL for tessellation rate calculations
     // Without this, viewportSize is {0,0} and edge tessellation rates are all 0, causing clusters=0
@@ -620,6 +624,77 @@ namespace dxvk {
           m_clusterAccels->clusterVertexNormalsBuffer.GetNumElements(), " elements)"));
       Logger::info(str::format("RTX MegaGeo: numClusters=", m_clusterStats.allocated.m_numClusters,
           " numTriangles=", m_clusterStats.allocated.m_numTriangles));
+
+      // DIAGNOSTIC: Log per-surface info to identify rendering issues
+      Logger::info("=== RTXMG SURFACE DIAGNOSTICS ===");
+      for (auto& [id, surface] : m_surfaces) {
+        if (surface.subdivSurface) {
+          const Shape* shape = surface.subdivSurface->GetShape();
+          const box3& aabb = surface.subdivSurface->m_aabb;
+          uint32_t numSurfaces = surface.subdivSurface->SurfaceCount();
+          uint32_t numVertices = surface.subdivSurface->NumVertices();
+
+          // Check if surface has valid geometry
+          bool hasValidGeometry = (numSurfaces > 0 && numVertices > 0);
+
+          // Check AABB validity - look for degenerate or suspicious bounds
+          float extentX = aabb.m_maxs[0] - aabb.m_mins[0];
+          float extentY = aabb.m_maxs[1] - aabb.m_mins[1];
+          float extentZ = aabb.m_maxs[2] - aabb.m_mins[2];
+          bool aabbDegenerate = (extentX <= 0.0f || extentY <= 0.0f || extentZ <= 0.0f);
+          bool aabbHuge = (extentX > 10000.0f || extentY > 10000.0f || extentZ > 10000.0f);
+          bool aabbTiny = (extentX < 0.001f && extentY < 0.001f && extentZ < 0.001f);
+
+          // Check for NaN/Inf in AABB
+          bool aabbInvalid = std::isnan(aabb.m_mins[0]) || std::isnan(aabb.m_maxs[0]) ||
+                            std::isinf(aabb.m_mins[0]) || std::isinf(aabb.m_maxs[0]);
+
+          // Check transform for this surface
+          auto transformIt = m_instanceTransforms.find(id);
+          bool hasTransform = (transformIt != m_instanceTransforms.end());
+
+          // Log warning for problematic surfaces
+          if (!hasValidGeometry || aabbDegenerate || aabbHuge || aabbTiny || aabbInvalid || !hasTransform) {
+            Logger::warn(str::format("RTXMG DIAG: Surface ", id, " ISSUES:"));
+            if (!hasValidGeometry) Logger::warn(str::format("  - No geometry: surfaces=", numSurfaces, " verts=", numVertices));
+            if (aabbDegenerate) Logger::warn("  - AABB degenerate (zero or negative extent)");
+            if (aabbHuge) Logger::warn(str::format("  - AABB huge: extent=(", extentX, ",", extentY, ",", extentZ, ")"));
+            if (aabbTiny) Logger::warn(str::format("  - AABB tiny: extent=(", extentX, ",", extentY, ",", extentZ, ")"));
+            if (aabbInvalid) Logger::warn("  - AABB contains NaN/Inf");
+            if (!hasTransform) Logger::warn("  - No transform this frame (won't render)");
+            Logger::warn(str::format("  AABB: min=(", aabb.m_mins[0], ",", aabb.m_mins[1], ",", aabb.m_mins[2],
+                ") max=(", aabb.m_maxs[0], ",", aabb.m_maxs[1], ",", aabb.m_maxs[2], ")"));
+          } else {
+            // Log healthy surfaces too for comparison
+            Logger::info(str::format("RTXMG DIAG: Surface ", id, " OK: ", numSurfaces, " patches, ", numVertices, " verts, extent=(",
+                extentX, ",", extentY, ",", extentZ, ")"));
+          }
+
+          // Check control point positions against AABB (sample first few)
+          if (shape && shape->verts.size() > 0) {
+            uint32_t outOfBoundsCount = 0;
+            float maxOutOfBounds = 0.0f;
+            for (size_t i = 0; i < std::min(shape->verts.size(), size_t(100)); ++i) {
+              const Vector3& v = shape->verts[i];
+              bool outX = (v.x < aabb.m_mins[0] - 0.01f || v.x > aabb.m_maxs[0] + 0.01f);
+              bool outY = (v.y < aabb.m_mins[1] - 0.01f || v.y > aabb.m_maxs[1] + 0.01f);
+              bool outZ = (v.z < aabb.m_mins[2] - 0.01f || v.z > aabb.m_maxs[2] + 0.01f);
+              if (outX || outY || outZ) {
+                outOfBoundsCount++;
+                float distX = std::max(aabb.m_mins[0] - v.x, v.x - aabb.m_maxs[0]);
+                float distY = std::max(aabb.m_mins[1] - v.y, v.y - aabb.m_maxs[1]);
+                float distZ = std::max(aabb.m_mins[2] - v.z, v.z - aabb.m_maxs[2]);
+                maxOutOfBounds = std::max(maxOutOfBounds, std::max(distX, std::max(distY, distZ)));
+              }
+            }
+            if (outOfBoundsCount > 0) {
+              Logger::warn(str::format("RTXMG DIAG: Surface ", id, " has ", outOfBoundsCount,
+                  " control points outside AABB (max dist=", maxOutOfBounds, ")"));
+            }
+          }
+        }
+      }
+      Logger::info("=== END RTXMG DIAGNOSTICS ===");
 
       // Mark all surfaces as ready - BLAS addresses will be patched on GPU
       for (auto& [id, surface] : m_surfaces) {

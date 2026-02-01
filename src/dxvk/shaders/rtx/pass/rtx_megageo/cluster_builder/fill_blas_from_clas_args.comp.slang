@@ -47,12 +47,12 @@ void main(uint3 threadIdx : SV_DispatchThreadID)
 
     uint2 offsetCount = InClusterOffsetCounts[instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType::All];
 
-    // Initialize to zero like the sample to avoid uninitialized memory
+    // Initialize to zero, then set required fields
     nvrhi::rt::cluster::IndirectArgs args = (nvrhi::rt::cluster::IndirectArgs)0;
     args.clusterCount = offsetCount.y;
-    // Note: clusterReferencesStride is left as 0 to match sample behavior
-    // D3D12 NVRHI calls this 'reserved' (must be 0), Vulkan uses it as stride
-    // 0 value means tightly packed (driver uses default sizeof(VkDeviceAddress))
+    // Vulkan spec requires clusterReferencesStride >= 8 (VUID-...clusterReferencesStride-10486)
+    // The stride is the distance between consecutive VkDeviceAddress entries in the CLAS pointer array
+    args.clusterReferencesStride = 8;  // sizeof(VkDeviceAddress) = 8
     args.clusterAddresses = cb.clasAddressesBaseAddress + uint64_t(8) * offsetCount.x;  // sizeof(GpuVirtualAddress) = 8
     InOutBlasFromClasArgs[instanceIndex] = args;
 }

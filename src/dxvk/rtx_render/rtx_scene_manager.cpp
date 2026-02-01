@@ -2402,6 +2402,56 @@ namespace dxvk {
     Logger::info(str::format("RTX MegaGeo: Extracting subdivision surface - ",
                              validQuadCount, " valid quads, ", vertexCount, " vertices"));
 
+    // DIAGNOSTIC: Log input mesh data for debugging geometry corruption
+    {
+      // Compute input AABB
+      Vector3 inputMin = controlPoints[0];
+      Vector3 inputMax = controlPoints[0];
+      for (uint32_t i = 1; i < vertexCount; ++i) {
+        const Vector3& v = controlPoints[i];
+        inputMin.x = std::min(inputMin.x, v.x);
+        inputMin.y = std::min(inputMin.y, v.y);
+        inputMin.z = std::min(inputMin.z, v.z);
+        inputMax.x = std::max(inputMax.x, v.x);
+        inputMax.y = std::max(inputMax.y, v.y);
+        inputMax.z = std::max(inputMax.z, v.z);
+      }
+      Vector3 extent(inputMax.x - inputMin.x, inputMax.y - inputMin.y, inputMax.z - inputMin.z);
+      Vector3 center((inputMin.x + inputMax.x) * 0.5f, (inputMin.y + inputMax.y) * 0.5f, (inputMin.z + inputMax.z) * 0.5f);
+
+      Logger::info(str::format("RTXMG INPUT DIAG: AABB min=(", inputMin.x, ",", inputMin.y, ",", inputMin.z,
+          ") max=(", inputMax.x, ",", inputMax.y, ",", inputMax.z, ")"));
+      Logger::info(str::format("RTXMG INPUT DIAG: extent=(", extent.x, ",", extent.y, ",", extent.z,
+          ") center=(", center.x, ",", center.y, ",", center.z, ")"));
+
+      // Log first few vertices
+      uint32_t numToLog = std::min(vertexCount, 5u);
+      for (uint32_t i = 0; i < numToLog; ++i) {
+        Logger::info(str::format("RTXMG INPUT DIAG: v[", i, "]=(", controlPoints[i].x, ",", controlPoints[i].y, ",", controlPoints[i].z, ")"));
+      }
+
+      // Log first few face indices
+      uint32_t facesToLog = std::min(validQuadCount, 3u);
+      for (uint32_t f = 0; f < facesToLog; ++f) {
+        uint32_t baseIdx = f * 4;
+        Logger::info(str::format("RTXMG INPUT DIAG: face[", f, "] indices=[",
+            faceVertexIndices[baseIdx], ",", faceVertexIndices[baseIdx+1], ",",
+            faceVertexIndices[baseIdx+2], ",", faceVertexIndices[baseIdx+3], "]"));
+      }
+
+      // Check for suspicious values
+      uint32_t nanCount = 0, infCount = 0, zeroCount = 0;
+      for (uint32_t i = 0; i < vertexCount; ++i) {
+        const Vector3& v = controlPoints[i];
+        if (std::isnan(v.x) || std::isnan(v.y) || std::isnan(v.z)) nanCount++;
+        if (std::isinf(v.x) || std::isinf(v.y) || std::isinf(v.z)) infCount++;
+        if (v.x == 0.0f && v.y == 0.0f && v.z == 0.0f) zeroCount++;
+      }
+      if (nanCount > 0) Logger::err(str::format("RTXMG INPUT DIAG: ", nanCount, " vertices have NaN!"));
+      if (infCount > 0) Logger::err(str::format("RTXMG INPUT DIAG: ", infCount, " vertices have Inf!"));
+      if (zeroCount > vertexCount / 2) Logger::warn(str::format("RTXMG INPUT DIAG: ", zeroCount, "/", vertexCount, " vertices are at origin (suspicious)"));
+    }
+
     // Create subdivision surface in RtxMegaGeoBuilder
     uint32_t surfaceId = 0;
     if (!megaGeoBuilder->createSubdivisionSurface(desc, surfaceId)) {

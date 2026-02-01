@@ -89,9 +89,11 @@ struct RayInteraction : MinimalRayInteraction
   uint16_t surfaceIndex = 0u;
   uint8_t materialType = 0u;
   uint8_t frontHit = 0u; // Todo: Pack this into some other value to not take up extra space
-  // RTX Mega Geometry: For cluster surfaces, geometryIndex contains the cluster ID
-  // which is needed to look up cluster shading data in surfaceInteractionCreateCluster
+  // geometryIndex: Standard geometry index from BLAS (used for traditional triangle geometry)
   uint geometryIndex = 0u;
+  // RTX Mega Geometry: Cluster ID from ClusterIdNV built-in (NOT the same as geometryIndex!)
+  // This is the correct index for ClusterShadingData lookup
+  uint clusterId = 0xFFFFFFFF;
 };
 
 struct GBufferMemoryMinimalRayInteraction

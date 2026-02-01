@@ -846,8 +846,45 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
         uint32_t firstGeometryIndex = donutMeshInfo.geometries[0]->globalGeometryIndex;
 
         const auto& subd = *subdMeshes[instance.meshID];
-        
+
         const uint32_t surfaceCount = subd.SurfaceCount();
+
+        // DEBUG: Validate all buffers before binding
+        {
+            bool hasNullBuffer = false;
+            if (!subd.m_positionsBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_positionsBuffer is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_vertexDeviceData.surfaceDescriptors) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_vertexDeviceData.surfaceDescriptors is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_vertexDeviceData.controlPointIndices) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_vertexDeviceData.controlPointIndices is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_vertexDeviceData.patchPointsOffsets) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_vertexDeviceData.patchPointsOffsets is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_vertexDeviceData.patchPoints) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_vertexDeviceData.patchPoints is NULL!"); hasNullBuffer = true; }
+            if (!subd.GetTopologyMap()) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.GetTopologyMap() is NULL!"); hasNullBuffer = true; }
+            else {
+                if (!subd.GetTopologyMap()->plansBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: TopologyMap->plansBuffer is NULL!"); hasNullBuffer = true; }
+                if (!subd.GetTopologyMap()->subpatchTreesArraysBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: TopologyMap->subpatchTreesArraysBuffer is NULL!"); hasNullBuffer = true; }
+                if (!subd.GetTopologyMap()->patchPointIndicesArraysBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: TopologyMap->patchPointIndicesArraysBuffer is NULL!"); hasNullBuffer = true; }
+                if (!subd.GetTopologyMap()->stencilMatrixArraysBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: TopologyMap->stencilMatrixArraysBuffer is NULL!"); hasNullBuffer = true; }
+            }
+            if (!subd.m_surfaceToGeometryIndexBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_surfaceToGeometryIndexBuffer is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_texcoordDeviceData.surfaceDescriptors) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_texcoordDeviceData.surfaceDescriptors is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_texcoordDeviceData.controlPointIndices) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_texcoordDeviceData.controlPointIndices is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_texcoordDeviceData.patchPointsOffsets) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_texcoordDeviceData.patchPointsOffsets is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_texcoordDeviceData.patchPoints) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_texcoordDeviceData.patchPoints is NULL!"); hasNullBuffer = true; }
+            if (!subd.m_texcoordsBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: subd.m_texcoordsBuffer is NULL!"); hasNullBuffer = true; }
+            if (!accels.clusterVertexPositionsBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: accels.clusterVertexPositionsBuffer is NULL!"); hasNullBuffer = true; }
+            if (!accels.clusterShadingDataBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: accels.clusterShadingDataBuffer is NULL!"); hasNullBuffer = true; }
+            if (!accels.clusterVertexNormalsBuffer) { dxvk::Logger::err("RTX MegaGeo DEBUG: accels.clusterVertexNormalsBuffer is NULL!"); hasNullBuffer = true; }
+
+            if (hasNullBuffer) {
+                dxvk::Logger::err(dxvk::str::format("RTX MegaGeo DEBUG: Skipping instance ", instanceIndex, " due to NULL buffers"));
+                continue;
+            }
+
+            // Log buffer info for first instance only
+            if (instanceIndex == 0) {
+                dxvk::Logger::info(dxvk::str::format("RTX MegaGeo DEBUG: Instance 0 buffers OK, surfaceCount=", surfaceCount,
+                    " surfaceOffset=", surfaceOffset, " gridSamplerStride=", m_gridSamplersBuffer.GetElementBytes()));
+            }
+        }
 
         if (m_tessellatorConfig.debugSurfaceIndex >= 0 &&
             m_tessellatorConfig.debugClusterIndex >= 0 &&
@@ -978,7 +1015,8 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
         if (m_tessellatorConfig.enableMonolithicClusterBuild)
         {
             RTXMG_LOG("RTX MegaGeo: FillInstanceClusters - monolithic mode");
-            FillClustersPermutation shaderPermutation = { subd.m_hasDisplacementMaterial, m_tessellatorConfig.enableVertexNormals, ShaderPermutationSurfaceType::All };
+            // TEMPORARY: Force disable displacement - geometry/material buffers are not populated in RTX Remix
+            FillClustersPermutation shaderPermutation = { false /*subd.m_hasDisplacementMaterial*/, m_tessellatorConfig.enableVertexNormals, ShaderPermutationSurfaceType::All };
             state.setPipeline(GetFillClustersPSO(shaderPermutation));
             commandList->setComputeState(state);
             uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType::Limit) * fillElementSize;
@@ -996,7 +1034,8 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             RTXMG_LOG("RTX MegaGeo: FillInstanceClusters - permutation mode");
             for (uint32_t i = 0; i <= uint32_t(ShaderPermutationSurfaceType::Limit); i++)
             {
-                FillClustersPermutation shaderPermutation = { subd.m_hasDisplacementMaterial, m_tessellatorConfig.enableVertexNormals, ShaderPermutationSurfaceType(i) };
+                // TEMPORARY: Force disable displacement - geometry/material buffers are not populated in RTX Remix
+                FillClustersPermutation shaderPermutation = { false /*subd.m_hasDisplacementMaterial*/, m_tessellatorConfig.enableVertexNormals, ShaderPermutationSurfaceType(i) };
                 RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - GetFillClustersPSO permutation ", i));
                 state.setPipeline(GetFillClustersPSO(shaderPermutation));
                 commandList->setComputeState(state);
@@ -1465,7 +1504,8 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     }
 
     RTXMG_LOG("RTX MegaGeo: ComputeInstanceClusterTiling - creating shaderPermutation");
-    ComputeClusterTilingPermutation shaderPermutation(subdivisionSurface.m_hasDisplacementMaterial,
+    // TEMPORARY: Force disable displacement - geometry/material buffers are not populated in RTX Remix
+    ComputeClusterTilingPermutation shaderPermutation(false /*subdivisionSurface.m_hasDisplacementMaterial*/,
         m_tessellatorConfig.enableFrustumVisibility,
         m_tessellatorConfig.tessMode,
         m_tessellatorConfig.visMode,
@@ -1715,7 +1755,12 @@ void ClusterAccelBuilder::BuildBlasFromClas(ClusterAccels& accels, const Instanc
     RTXMG_LOG(str::format("RTX MegaGeo: BuildBlasFromClas - m_blasFromClasIndirectArgsBuffer ptr=", (void*)m_blasFromClasIndirectArgsBuffer.Get()));
 
     nvrhi::GpuVirtualAddress clasPtrsBaseAddress = accels.clasPtrsBuffer.GetGpuVirtualAddress();
-    RTXMG_LOG(str::format("RTX MegaGeo: BuildBlasFromClas - clasPtrsBaseAddress=", std::hex, clasPtrsBaseAddress));
+
+    // Always log critical addresses for debugging GPU crashes
+    Logger::info(str::format("RTX MegaGeo: BuildBlasFromClas - clasPtrsBaseAddress=0x", std::hex, clasPtrsBaseAddress,
+        " numInstances=", std::dec, numInstances,
+        " clasPtrsBuffer.size=", accels.clasPtrsBuffer.GetBytes(),
+        " clusterOffsetCountsBuffer.size=", m_clusterOffsetCountsBuffer.GetBytes()));
 
     if (clasPtrsBaseAddress == 0) {
         Logger::err("RTX MegaGeo: BuildBlasFromClas - clasPtrsBaseAddress is NULL!");
@@ -1744,6 +1789,12 @@ void ClusterAccelBuilder::BuildBlasFromClas(ClusterAccels& accels, const Instanc
     if (blasPtrsAddr == 0) Logger::err("RTX MegaGeo: BuildBlasFromClas - blasPtrsAddr is NULL!");
     if (blasBufferAddr == 0) Logger::err("RTX MegaGeo: BuildBlasFromClas - blasBufferAddr is NULL!");
     // Note: scratch buffer is now allocated on-demand by the nvrhi adapter if needed
+
+    // CRITICAL: Add barrier after FillBlasFromClasArgs compute shader writes to m_blasFromClasIndirectArgsBuffer
+    // The BLAS build cluster operation reads this buffer for indirect args. Without this barrier,
+    // the cluster operation may read stale/uninitialized data.
+    commandList->bufferBarrier(m_blasFromClasIndirectArgsBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::ShaderResource);
+    RTXMG_LOG("RTX MegaGeo: BuildBlasFromClas - barrier after FillBlasFromClasArgs");
 
     //// Build Operation
     cluster::OperationDesc createBlasDesc =

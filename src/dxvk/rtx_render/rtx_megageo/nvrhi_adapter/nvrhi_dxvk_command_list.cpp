@@ -77,6 +77,10 @@ namespace dxvk {
     // so it's safe to release the binding set references (and thus their descriptor sets)
     m_inFlightBindingSets.clear();
 
+    // Clear automatic barrier tracking state
+    m_BufferStates.clear();
+    m_PendingBufferBarriers.clear();
+
     RTXMG_LOG("RTX MegaGeo: clearState - done");
   }
 
@@ -120,6 +124,12 @@ namespace dxvk {
       // Don't write past buffer end - this causes heap corruption
       size = (offset < bufferSize) ? (bufferSize - offset) : 0;
       if (size == 0) return;
+    }
+
+    // Automatic barrier: buffer is being written (CopyDest)
+    if (m_EnableAutomaticBarriers) {
+      requireBufferState(buffer, nvrhi::ResourceStates::CopyDest);
+      commitBarriers();
     }
 
     // Cache data for small constant buffers (used for push constants)
@@ -211,6 +221,12 @@ namespace dxvk {
     if (dxvkBuffer == nullptr) {
       Logger::err("RTX MegaGeo: clearBufferUInt - null DxvkBuffer");
       return;
+    }
+
+    // Automatic barrier: buffer is being written (CopyDest)
+    if (m_EnableAutomaticBarriers) {
+      requireBufferState(buffer, nvrhi::ResourceStates::CopyDest);
+      commitBarriers();
     }
 
     // Clear buffer with uint32 value
@@ -365,6 +381,21 @@ namespace dxvk {
   }
 
   void NvrhiDxvkCommandList::setComputeState(const nvrhi::ComputeState& state) {
+    // Automatic barrier tracking for binding sets (matching sample's NVRHI)
+    if (m_EnableAutomaticBarriers) {
+      for (const auto& bindingSet : state.bindingSets) {
+        setResourceStatesForBindingSet(bindingSet.Get());
+      }
+
+      // Track indirect params buffer state
+      if (state.indirectParamsBuffer) {
+        requireBufferState(state.indirectParamsBuffer.Get(), nvrhi::ResourceStates::IndirectArgument);
+      }
+    }
+
+    // Commit barriers before binding new state
+    commitBarriers();
+
     m_computeState = state;
     bindComputeResources(state);
   }
@@ -521,13 +552,6 @@ namespace dxvk {
         }
       }
 
-      // Emit barrier for resource synchronization
-      m_context->emitMemoryBarrier(0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-
       // Bind pre-built descriptor sets with vkCmdBindDescriptorSets
       // Also handle push constants for constant buffers
       if (!m_pendingDescriptorSets.empty()) {
@@ -591,17 +615,15 @@ namespace dxvk {
         bindUAVArrayDescriptorSet();
       }
 
+      // Commit any pending barriers right before dispatch
+      commitBarriers();
+
       // Call vkCmdDispatch directly
       m_device->getDxvkDevice()->vkd()->vkCmdDispatch(cmdBuffer, x, y, z);
       RTXMG_LOG(str::format("RTX MegaGeo: dispatch(", x, ", ", y, ", ", z, ") with special bindings"));
     } else {
       // Normal dispatch path through DXVK
-      // Ensure all prior writes are visible to this shader read
-      m_context->emitMemoryBarrier(0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      // Automatic barriers already committed in setComputeState
       m_context->dispatch(x, y, z);
     }
   }
@@ -661,13 +683,6 @@ namespace dxvk {
         }
       }
 
-      // Emit barrier for resource synchronization
-      m_context->emitMemoryBarrier(0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
-
       // Bind pre-built descriptor sets with vkCmdBindDescriptorSets
       if (!m_pendingDescriptorSets.empty()) {
         for (const auto& pending : m_pendingDescriptorSets) {
@@ -704,17 +719,15 @@ namespace dxvk {
         bindUAVArrayDescriptorSet();
       }
 
+      // Commit any pending barriers right before dispatch
+      commitBarriers();
+
       // Call vkCmdDispatchIndirect directly
       auto bufferSlice = argBufferSlice.getSliceHandle(0, sizeof(VkDispatchIndirectCommand));
       m_device->getDxvkDevice()->vkd()->vkCmdDispatchIndirect(cmdBuffer, bufferSlice.handle, bufferSlice.offset);
       RTXMG_LOG("RTX MegaGeo: dispatchIndirect with special bindings");
     } else {
-      // Ensure all prior writes are visible to this shader read
-      m_context->emitMemoryBarrier(0,
-        VK_PIPELINE_STAGE_TRANSFER_BIT | VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_TRANSFER_WRITE_BIT | VK_ACCESS_SHADER_WRITE_BIT,
-        VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
-        VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT);
+      // Automatic barriers already committed in setComputeState
       // Note: Pass 0 here because the buffer slice (argBufferSlice) was already created
       // with the offset at line 527. DXVK's dispatchIndirect adds this offset to the bound
       // buffer, so passing the offset again would double it.
@@ -738,9 +751,27 @@ namespace dxvk {
 
     const nvrhi::rt::cluster::OperationDesc& desc = nvrhiDesc;
 
-    // NO pre-barriers needed - matching sample behavior
-    // All buffers have keepInitialState=true, so NVRHI's state tracker doesn't insert barriers
-    // DXVK handles synchronization internally
+    // Automatic barrier tracking for cluster operation buffers
+    // NOTE: The sample uses ShaderResource for indirect args (not IndirectArgument) and
+    // UnorderedAccess for addresses buffer (not AccelStructBuildInput). Match the sample exactly.
+    if (m_EnableAutomaticBarriers) {
+      if (desc.inIndirectArgsBuffer) {
+        requireBufferState(desc.inIndirectArgsBuffer, nvrhi::ResourceStates::ShaderResource);
+      }
+      if (desc.inIndirectArgCountBuffer) {
+        requireBufferState(desc.inIndirectArgCountBuffer, nvrhi::ResourceStates::ShaderResource);
+      }
+      if (desc.inOutAddressesBuffer) {
+        requireBufferState(desc.inOutAddressesBuffer, nvrhi::ResourceStates::UnorderedAccess);
+      }
+      if (desc.outSizesBuffer) {
+        requireBufferState(desc.outSizesBuffer, nvrhi::ResourceStates::UnorderedAccess);
+      }
+      if (desc.outAccelerationStructuresBuffer) {
+        requireBufferState(desc.outAccelerationStructuresBuffer, nvrhi::ResourceStates::AccelStructWrite);
+      }
+      commitBarriers();
+    }
 
     // Diagnostic logging for crash investigation
     Logger::info(str::format("RTX MegaGeo: executeMultiIndirectClusterOperation - scratchSize=", desc.scratchSizeInBytes));
@@ -831,6 +862,180 @@ namespace dxvk {
     RTXMG_LOG("RTX MegaGeo: executeMultiIndirectClusterOperation - Complete");
   }
 
+  // Automatic barrier system implementation (matching sample's NVRHI behavior)
+  void NvrhiDxvkCommandList::requireBufferState(nvrhi::IBuffer* buffer, nvrhi::ResourceStates state) {
+    if (!buffer) return;
+
+    NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(buffer);
+    const nvrhi::BufferDesc& desc = nvrhiBuffer->getDesc();
+
+    // CPU-visible buffers can't change state (matching sample's NVRHI behavior)
+    if (desc.cpuAccess != nvrhi::CpuAccessMode::None) {
+      return;
+    }
+
+    // Get current state
+    nvrhi::ResourceStates currentState;
+    auto it = m_BufferStates.find(buffer);
+    if (it != m_BufferStates.end()) {
+      currentState = it->second;
+    } else {
+      // First time seeing this buffer - use its initial state from the desc
+      currentState = desc.initialState;
+    }
+
+    // If state is different, record a barrier
+    if (currentState != state) {
+      Logger::info(str::format("RTX MegaGeo: AUTO BARRIER buffer ", (void*)buffer,
+        " from ", (uint32_t)currentState, " to ", (uint32_t)state));
+      m_PendingBufferBarriers.push_back({buffer, currentState, state});
+      m_BufferStates[buffer] = state;
+    }
+  }
+
+  void NvrhiDxvkCommandList::setResourceStatesForBindingSet(nvrhi::IBindingSet* bindingSet) {
+    if (!bindingSet) return;
+
+    // Cast to NvrhiDxvkBindingSet to access getDesc()
+    NvrhiDxvkBindingSet* nvrhiBindingSet = static_cast<NvrhiDxvkBindingSet*>(bindingSet);
+    const nvrhi::BindingSetDesc& desc = nvrhiBindingSet->getDesc();
+
+    for (const auto& binding : desc.bindings) {
+      switch (binding.type) {
+        case nvrhi::BindingSetItem::Type::TypedBuffer_SRV:
+        case nvrhi::BindingSetItem::Type::StructuredBuffer_SRV:
+        case nvrhi::BindingSetItem::Type::RawBuffer_SRV:
+          if (binding.resourceHandle) {
+            requireBufferState(static_cast<nvrhi::IBuffer*>(binding.resourceHandle), nvrhi::ResourceStates::ShaderResource);
+          }
+          break;
+
+        case nvrhi::BindingSetItem::Type::TypedBuffer_UAV:
+        case nvrhi::BindingSetItem::Type::StructuredBuffer_UAV:
+        case nvrhi::BindingSetItem::Type::RawBuffer_UAV:
+          if (binding.resourceHandle) {
+            requireBufferState(static_cast<nvrhi::IBuffer*>(binding.resourceHandle), nvrhi::ResourceStates::UnorderedAccess);
+          }
+          break;
+
+        case nvrhi::BindingSetItem::Type::ConstantBuffer:
+          if (binding.resourceHandle) {
+            requireBufferState(static_cast<nvrhi::IBuffer*>(binding.resourceHandle), nvrhi::ResourceStates::ConstantBuffer);
+          }
+          break;
+
+        default:
+          // Textures, samplers, etc. - not handling here
+          break;
+      }
+    }
+  }
+
+  void NvrhiDxvkCommandList::commitBarriers() {
+    if (m_PendingBufferBarriers.empty()) return;
+
+    VkCommandBuffer cmdBuffer = m_context->getCmdBuffer(DxvkCmdBuffer::ExecBuffer);
+
+    std::vector<VkBufferMemoryBarrier> bufferBarriers;
+    VkPipelineStageFlags srcStages = 0;
+    VkPipelineStageFlags dstStages = 0;
+
+    for (const auto& barrier : m_PendingBufferBarriers) {
+      nvrhi::Object nativeObj = barrier.buffer->getNativeObject(nvrhi::ObjectType::VK_Buffer);
+      if (nativeObj.pointer == nullptr) continue;
+
+      NvrhiDxvkBuffer* nvrhiBuffer = static_cast<NvrhiDxvkBuffer*>(barrier.buffer);
+      Rc<DxvkBuffer> dxvkBuffer = nvrhiBuffer->getDxvkBuffer();
+      if (dxvkBuffer == nullptr) continue;
+
+      VkBufferMemoryBarrier vkBarrier = {};
+      vkBarrier.sType = VK_STRUCTURE_TYPE_BUFFER_MEMORY_BARRIER;
+      vkBarrier.buffer = dxvkBuffer->getSliceHandle().handle;
+      vkBarrier.offset = 0;
+      vkBarrier.size = VK_WHOLE_SIZE;
+      vkBarrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+      vkBarrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+
+      // Translate source state
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::UnorderedAccess) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        srcStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::ShaderResource) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_SHADER_READ_BIT;
+        srcStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::ConstantBuffer) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_UNIFORM_READ_BIT;
+        srcStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::CopySource) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_TRANSFER_READ_BIT;
+        srcStages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::CopyDest) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_TRANSFER_WRITE_BIT;
+        srcStages |= VK_PIPELINE_STAGE_TRANSFER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::AccelStructBuildInput) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        srcStages |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+      }
+      if (static_cast<uint32_t>(barrier.stateBefore & nvrhi::ResourceStates::AccelStructWrite) != 0) {
+        vkBarrier.srcAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        srcStages |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+      }
+
+      // Translate destination state
+      if (static_cast<uint32_t>(barrier.stateAfter & nvrhi::ResourceStates::UnorderedAccess) != 0) {
+        vkBarrier.dstAccessMask |= VK_ACCESS_SHADER_READ_BIT | VK_ACCESS_SHADER_WRITE_BIT;
+        dstStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateAfter & nvrhi::ResourceStates::ShaderResource) != 0) {
+        vkBarrier.dstAccessMask |= VK_ACCESS_SHADER_READ_BIT;
+        dstStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateAfter & nvrhi::ResourceStates::ConstantBuffer) != 0) {
+        vkBarrier.dstAccessMask |= VK_ACCESS_UNIFORM_READ_BIT;
+        dstStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateAfter & nvrhi::ResourceStates::IndirectArgument) != 0) {
+        vkBarrier.dstAccessMask |= VK_ACCESS_INDIRECT_COMMAND_READ_BIT;
+        dstStages |= VK_PIPELINE_STAGE_DRAW_INDIRECT_BIT;
+      }
+      if (static_cast<uint32_t>(barrier.stateAfter & nvrhi::ResourceStates::AccelStructBuildInput) != 0) {
+        vkBarrier.dstAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR;
+        dstStages |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+      }
+      if (static_cast<uint32_t>(barrier.stateAfter & nvrhi::ResourceStates::AccelStructWrite) != 0) {
+        vkBarrier.dstAccessMask |= VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR;
+        dstStages |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+      }
+
+      bufferBarriers.push_back(vkBarrier);
+    }
+
+    if (!bufferBarriers.empty()) {
+      // Default stages if none were set
+      if (srcStages == 0) srcStages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+      if (dstStages == 0) dstStages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
+
+      Logger::info(str::format("RTX MegaGeo: COMMITTING ", bufferBarriers.size(), " buffer barriers, srcStages=0x",
+        std::hex, srcStages, " dstStages=0x", dstStages));
+
+      m_device->getDxvkDevice()->vkd()->vkCmdPipelineBarrier(
+        cmdBuffer,
+        srcStages,
+        dstStages,
+        0,  // dependencyFlags
+        0, nullptr,  // memory barriers
+        static_cast<uint32_t>(bufferBarriers.size()), bufferBarriers.data(),  // buffer barriers
+        0, nullptr);  // image barriers
+    }
+
+    m_PendingBufferBarriers.clear();
+  }
+
   void NvrhiDxvkCommandList::bufferBarrier(
     nvrhi::IBuffer* buffer,
     nvrhi::ResourceStates stateBefore,
@@ -888,6 +1093,11 @@ namespace dxvk {
     if (static_cast<uint32_t>(stateAfter & nvrhi::ResourceStates::AccelStructBuildInput) != 0) {
       dstAccess.set(DxvkAccess::Read);
       dstStages |= VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
+    }
+    if (static_cast<uint32_t>(stateAfter & nvrhi::ResourceStates::ShaderResource) != 0) {
+      dstAccess.set(DxvkAccess::Read);
+      // ShaderResource can be used by compute or accel struct operations
+      dstStages |= VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR;
     }
 
     // Emit memory barrier (DXVK doesn't have emitBufferBarrier, use memory barrier instead)
@@ -1457,10 +1667,10 @@ namespace dxvk {
         blasInput.maxTotalClusterCount = desc.params.blas.maxTotalClasCount;
         blasInput.maxClusterCountPerAccelerationStructure = desc.params.blas.maxClasPerBlasCount;
         input.opInput.pClustersBottomLevel = &blasInput;
-        RTXMG_LOG(str::format("RTX MegaGeo: BlasBuild maxTotalClusterCount=", blasInput.maxTotalClusterCount,
-                                 " maxClusterCountPerAS=", blasInput.maxClusterCountPerAccelerationStructure));
-        RTXMG_LOG(str::format("RTX MegaGeo: blasInput.sType=", blasInput.sType, " blasInput.pNext=", (void*)blasInput.pNext,
-                                 " opInput.pClustersBottomLevel=", (void*)input.opInput.pClustersBottomLevel));
+        // Always log BlasBuild parameters for crash debugging
+        Logger::info(str::format("RTX MegaGeo: BlasBuild maxTotalClusterCount=", blasInput.maxTotalClusterCount,
+                                 " maxClusterCountPerAS=", blasInput.maxClusterCountPerAccelerationStructure,
+                                 " maxArgCount=", input.maxAccelerationStructureCount));
         break;
 
       case nvrhi::rt::cluster::OperationType::ClasBuildTemplates:
@@ -1498,8 +1708,10 @@ namespace dxvk {
       vkCmds.srcInfosArray.deviceAddress = argsBuffer->getGpuVirtualAddress() + desc.inIndirectArgsOffsetInBytes;
       vkCmds.srcInfosArray.stride = argsBuffer->getDesc().structStride;
       vkCmds.srcInfosArray.size = argsBuffer->getDesc().byteSize - desc.inIndirectArgsOffsetInBytes;
-      RTXMG_LOG(str::format("RTX MegaGeo: srcInfosArray addr=", vkCmds.srcInfosArray.deviceAddress,
-                               " stride=", vkCmds.srcInfosArray.stride, " size=", vkCmds.srcInfosArray.size));
+      // Always log for crash debugging
+      Logger::info(str::format("RTX MegaGeo: ", opTypeName, " srcInfosArray addr=0x", std::hex, vkCmds.srcInfosArray.deviceAddress,
+                               " stride=", std::dec, vkCmds.srcInfosArray.stride, " size=", vkCmds.srcInfosArray.size,
+                               " (numElements=", vkCmds.srcInfosArray.stride > 0 ? vkCmds.srcInfosArray.size / vkCmds.srcInfosArray.stride : 0, ")"));
     } else {
       Logger::warn("RTX MegaGeo: inIndirectArgsBuffer is NULL");
     }
@@ -1512,8 +1724,9 @@ namespace dxvk {
       // Use buffer's structStride instead of hardcoding sizeof(VkDeviceAddress)
       vkCmds.dstAddressesArray.stride = addressesBuffer->getDesc().structStride;
       vkCmds.dstAddressesArray.size = addressesBuffer->getDesc().byteSize - desc.inOutAddressesOffsetInBytes;
-      RTXMG_LOG(str::format("RTX MegaGeo: dstAddressesArray addr=", vkCmds.dstAddressesArray.deviceAddress,
-                               " stride=", vkCmds.dstAddressesArray.stride, " size=", vkCmds.dstAddressesArray.size));
+      // Always log for crash debugging
+      Logger::info(str::format("RTX MegaGeo: ", opTypeName, " dstAddressesArray addr=0x", std::hex, vkCmds.dstAddressesArray.deviceAddress,
+                               " stride=", std::dec, vkCmds.dstAddressesArray.stride, " size=", vkCmds.dstAddressesArray.size));
     } else {
       // Explicitly zero the array for GetSizes mode
       vkCmds.dstAddressesArray.deviceAddress = 0;
