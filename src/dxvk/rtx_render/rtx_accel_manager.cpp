@@ -571,6 +571,25 @@ namespace dxvk {
       // RTX Mega Geometry: Cluster-based BLASes are built separately via RtxMegaGeoBuilder
       // They still need to be added to the TLAS, but skip the traditional BLAS building logic
       if (blasEntry->isClusterBlas()) {
+        // Check if megaGeoBuilder has valid buffers before adding cluster instances
+        // Without valid buffers, the shader would read garbage vertex data causing geometry distortion
+        RtxMegaGeoBuilder* megaGeo = getMegaGeoBuilder();
+        bool hasValid = megaGeo && megaGeo->hasValidBuffers();
+
+        // Log every 100 frames
+        static uint32_t s_clusterCheckFrame = 0;
+        if ((s_clusterCheckFrame++ % 100) == 0) {
+          Logger::info(str::format("RTX MegaGeo TLAS: isCluster=1 megaGeo=", megaGeo ? "valid" : "null",
+                                   " hasValidBuffers=", hasValid, " surfaceId=", blasEntry->megaGeoSurfaceId));
+        }
+
+        if (!hasValid) {
+          // Skip this cluster instance until buffers are ready
+          // The instance will be added in a future frame when buffers are valid
+          ONCE(Logger::info("RTX MegaGeo TLAS: SKIPPING cluster instance - buffers not ready"));
+          continue;
+        }
+
         // Cluster surfaces need a valid surface index for shader lookup
         // Without this, the shader would try to read from surfaces[65535] causing GPU page faults
         if (instance->getSurfaceIndex() == BINDING_INDEX_INVALID) {
@@ -580,13 +599,22 @@ namespace dxvk {
         }
 
         // Add directly to TLAS - the BLAS address will be patched on GPU later
+        static uint32_t s_clusterAddCount = 0;
         if (instance->surface.instancesToObject == nullptr) {
           addBlas(instance, blasEntry, nullptr);
+          s_clusterAddCount++;
         } else {
           for (auto& instanceToObject : *instance->surface.instancesToObject) {
             addBlas(instance, blasEntry, &instanceToObject);
+            s_clusterAddCount++;
           }
         }
+
+        // Log how many cluster instances have been added
+        if ((s_clusterAddCount % 500) == 1) {
+          Logger::info(str::format("RTX MegaGeo TLAS: Added ", s_clusterAddCount, " cluster instances to TLAS"));
+        }
+
         continue; // Skip traditional BLAS building (geometry fill, dynamic/merged decision, etc.)
       }
 

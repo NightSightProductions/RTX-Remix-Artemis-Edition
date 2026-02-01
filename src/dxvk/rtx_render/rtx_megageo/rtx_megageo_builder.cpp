@@ -38,6 +38,7 @@
 // Enable chrono timing for performance profiling (set to 1 to enable)
 #define RTXMG_CHRONO_TIMING 1
 #include "nvrhi_adapter/nvrhi_dxvk_texture.h"
+#include "nvrhi_adapter/nvrhi_dxvk_buffer.h"
 #include "scene/rtxmg_scene.h"
 #include "scene/instance.h"
 #include "subdivision/subdivision_surface.h"
@@ -802,6 +803,36 @@ namespace dxvk {
       return nullptr;
     }
     return m_clusterAccels->clusterVertexNormalsBuffer.Get();
+  }
+
+  // Helper to check if an NVRHI buffer has a valid underlying DxvkBuffer
+  static bool isNvrhiBufferReady(nvrhi::IBuffer* buffer) {
+    if (!buffer) return false;
+    NvrhiDxvkBuffer* nvrhiBuf = static_cast<NvrhiDxvkBuffer*>(buffer);
+    if (!nvrhiBuf) return false;
+    const Rc<DxvkBuffer>& dxvkBuf = nvrhiBuf->getDxvkBuffer();
+    return dxvkBuf.ptr() != nullptr;
+  }
+
+  bool RtxMegaGeoBuilder::hasValidBuffers() const {
+    if (!m_clusterAccels) {
+      ONCE(Logger::info("RTX MegaGeo hasValidBuffers: m_clusterAccels is null"));
+      return false;
+    }
+
+    // Check that the underlying DxvkBuffers are actually valid, not just the NVRHI handles
+    // This matches the validation done in rtx_context.cpp when binding buffers
+    bool shadingValid = isNvrhiBufferReady(m_clusterAccels->clusterShadingDataBuffer.Get());
+    bool posValid = isNvrhiBufferReady(m_clusterAccels->clusterVertexPositionsBuffer.Get());
+    bool normValid = isNvrhiBufferReady(m_clusterAccels->clusterVertexNormalsBuffer.Get());
+
+    static uint32_t s_logCounter = 0;
+    if ((s_logCounter++ % 100) == 0) {
+      Logger::info(str::format("RTX MegaGeo hasValidBuffers: shading=", shadingValid,
+                               " pos=", posValid, " norm=", normValid));
+    }
+
+    return shadingValid && posValid && normValid;
   }
 
   void RtxMegaGeoBuilder::processCompletedSurfaces() {

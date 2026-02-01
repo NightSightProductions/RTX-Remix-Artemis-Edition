@@ -194,12 +194,24 @@ namespace dxvk {
       const Vector3 centroid = getBlas()->input.getGeometryData().boundingBox.getTransformedCentroid(firstInstanceObjectToWorld);
       m_spatialCacheHash = m_linkedBlas->getSpatialMap().insert(centroid, firstInstanceObjectToWorld, this);
     }
-    
+
     // The D3D matrix on input, needs to be transposed before feeding to the VK API (left/right handed conversion)
     // NOTE: VkTransformMatrixKHR is 4x3 matrix, and Matrix4 is 4x4
     const auto t = transpose(surface.objectToWorld);
     memcpy(&m_vkInstance.transform, &t, sizeof(VkTransformMatrixKHR));
-    
+
+    // RTX MegaGeo: Debug logging for cluster instance teleport
+    if (m_linkedBlas && m_linkedBlas->isClusterBlas()) {
+      static uint32_t teleportLogCount = 0;
+      if (teleportLogCount < 5) {
+        Logger::info(str::format("RTX MegaGeo teleport: ClusterBlas instance #", teleportLogCount,
+            " input_translation=(", objectToWorld.data[3][0], ",", objectToWorld.data[3][1], ",", objectToWorld.data[3][2], ")",
+            " transposed[0][3]=", t.data[0][3], " transposed[1][3]=", t.data[1][3], " transposed[2][3]=", t.data[2][3],
+            " vkTransform=(", m_vkInstance.transform.matrix[0][3], ",", m_vkInstance.transform.matrix[1][3], ",", m_vkInstance.transform.matrix[2][3], ")"));
+        teleportLogCount++;
+      }
+    }
+
     return false; // freshly teleported instances are always treated as still.
   }
 
@@ -1149,6 +1161,18 @@ namespace dxvk {
 
         // Note: objectToView is aliased on updates, since findSimilarInstance() doesn't discern it
         Matrix4 objectToWorld = drawCall.getTransformData().objectToWorld;
+
+        // RTX MegaGeo: Debug logging for cluster instance transforms
+        if (blas.isClusterBlas() && isFirstUpdateThisFrame) {
+          static uint32_t clusterTransformLogCount = 0;
+          if (clusterTransformLogCount < 5) {
+            Logger::info(str::format("RTX MegaGeo updateInstance: ClusterBlas transform debug #", clusterTransformLogCount,
+                " isFirstUpdateAfterCreation=", (currentInstance.isCreatedThisFrame(m_device->getCurrentFrameId()) && isFirstUpdateThisFrame),
+                " translation=(", objectToWorld.data[3][0], ",", objectToWorld.data[3][1], ",", objectToWorld.data[3][2], ")",
+                " row0=(", objectToWorld.data[0][0], ",", objectToWorld.data[0][1], ",", objectToWorld.data[0][2], ",", objectToWorld.data[0][3], ")"));
+            clusterTransformLogCount++;
+          }
+        }
 
         // Hack for TREX-2272. In Portal, in the GLaDOS chamber, the monitors show a countdown timer with background, and the digits and background are coplanar.
         // We cannot reliably determine the digits material because it's a dynamic texture rendered by vgui that contains all kinds of UI things.

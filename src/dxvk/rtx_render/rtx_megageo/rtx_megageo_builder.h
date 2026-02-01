@@ -394,6 +394,17 @@ namespace dxvk {
     nvrhi::BufferHandle getClusterVertexNormalsBuffer() const;
 
     /**
+     * \brief Check if cluster buffers are ready for rendering
+     *
+     * Returns true if all cluster buffers (shading data, vertex positions,
+     * vertex normals) are valid and ready for shader access. When this
+     * returns false, cluster surfaces should not be added to the TLAS.
+     *
+     * \return true if all buffers are valid, false otherwise
+     */
+    bool hasValidBuffers() const;
+
+    /**
      * \brief Process completed async subdivision surface creations
      *
      * Called once per frame to integrate subdivision surfaces that were

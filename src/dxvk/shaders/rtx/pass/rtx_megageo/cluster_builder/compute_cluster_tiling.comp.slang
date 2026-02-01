@@ -617,6 +617,19 @@ void WriteSurfaceWave(uint32_t iWave, uint32_t iLane, uint32_t iSurface, GridSam
     }
 
     uint16_t2 surfaceSize = rSampler.GridSize();
+
+    // RTX MegaGeo fix: Skip degenerate surfaces with zero size to avoid
+    // GetTemplateIndex underflow crash (0-1 = 0xFFFF = out-of-bounds index)
+    if (surfaceSize.x == 0 || surfaceSize.y == 0)
+    {
+        // Log skipped invisible surface (only lane 0 to avoid spam)
+        if (iLane == 0)
+        {
+            SHADER_DEBUG_FORCE(uint4(0xDEAD0000, iSurface, surfaceSize.x, surfaceSize.y));
+        }
+        return;  // No clusters to generate for invisible/culled surface
+    }
+
     SurfaceTiling surfaceTiling = MakeSurfaceTiling(surfaceSize);
 
     uint32_t clusterCount = 0;

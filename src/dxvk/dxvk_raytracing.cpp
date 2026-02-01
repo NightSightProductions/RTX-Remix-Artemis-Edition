@@ -339,6 +339,16 @@ namespace dxvk {
     rayPipelineInfo.basePipelineIndex = -1;
     rayPipelineInfo.flags = m_shaders.pipelineFlags;
 
+    // RTX Mega Geometry: Enable cluster acceleration structure support for ClusterIdNV built-in
+    VkRayTracingPipelineClusterAccelerationStructureCreateInfoNV clusterInfo = {};
+    clusterInfo.sType = VK_STRUCTURE_TYPE_RAY_TRACING_PIPELINE_CLUSTER_ACCELERATION_STRUCTURE_CREATE_INFO_NV;
+    clusterInfo.pNext = nullptr;
+    clusterInfo.allowClusterAccelerationStructure = VK_TRUE;
+    if (m_pipeMgr->m_device->extensions().nvClusterAccelerationStructure) {
+      rayPipelineInfo.pNext = &clusterInfo;
+      Logger::info("RT Pipeline: Enabling cluster acceleration structure support");
+    }
+
     auto& rtProperties = m_pipeMgr->m_device->properties().khrDeviceRayTracingPipelineProperties;
     THROW_IF_FALSE(rtProperties.maxRayRecursionDepth >= rayPipelineInfo.maxPipelineRayRecursionDepth);
 

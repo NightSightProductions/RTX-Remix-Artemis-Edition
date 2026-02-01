@@ -36,7 +36,16 @@ static const uint32_t kMaxClusterEdgeSegments = 11;
 #ifndef __cplusplus
 uint32_t GetTemplateIndex(uint16_t2 clusterSize)
 {
-    return (clusterSize.y - 1) * kMaxClusterEdgeSegments + (clusterSize.x - 1);
+    // RTX MegaGeo fix: Bounds check to prevent underflow crash when clusterSize is 0
+    // (0 - 1) = 0xFFFF which would create a massive out-of-bounds index
+    if (clusterSize.x == 0 || clusterSize.y == 0)
+    {
+        return 0;  // Return valid template 0 for degenerate case
+    }
+    // Clamp to valid range to prevent out-of-bounds access
+    uint16_t x = min(clusterSize.x, (uint16_t)kMaxClusterEdgeSegments);
+    uint16_t y = min(clusterSize.y, (uint16_t)kMaxClusterEdgeSegments);
+    return (y - 1) * kMaxClusterEdgeSegments + (x - 1);
 }
 
 #endif
