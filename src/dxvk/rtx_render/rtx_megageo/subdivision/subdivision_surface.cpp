@@ -498,6 +498,15 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
     dxvk::Logger::info("SubdivSurface: Texcoords buffer created");
 
     dxvk::Logger::info("SubdivSurface: Creating positions buffer");
+    dxvk::Logger::info(dxvk::str::format("SubdivSurface: m_shape->verts.size()=", m_shape->verts.size()));
+    // DEBUG: Log first few vertex positions
+    for (size_t i = 0; i < std::min(m_shape->verts.size(), size_t(10)); i++) {
+        const auto& v = m_shape->verts[i];
+        dxvk::Logger::info(dxvk::str::format("SubdivSurface: vert[", i, "] = (", v.x, ", ", v.y, ", ", v.z, ")"));
+    }
+    // DEBUG: Log AABB
+    dxvk::Logger::info(dxvk::str::format("SubdivSurface: AABB min=(", m_shape->aabb.m_mins[0], ",", m_shape->aabb.m_mins[1], ",", m_shape->aabb.m_mins[2],
+        ") max=(", m_shape->aabb.m_maxs[0], ",", m_shape->aabb.m_maxs[1], ",", m_shape->aabb.m_maxs[2], ")"));
     m_positionsBuffer = CreateAndUploadBuffer(m_shape->verts, "SubdPosedPositions", commandList);
     m_aabb = m_shape->aabb;
     dxvk::Logger::info("SubdivSurface: Positions buffer created");

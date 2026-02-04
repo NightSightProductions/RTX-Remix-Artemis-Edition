@@ -40,6 +40,18 @@ namespace dxvk {
     nvrhi::ResourceStates stateAfter;
   };
 
+  // Wrapper to hold NVRHI binding sets inside DXVK's lifetime tracker.
+  // When attached to a command list via trackResource(), DXVK keeps the reference
+  // alive until the GPU fence signals that the command buffer has completed.
+  // This matches the sample's referencedResources pattern.
+  class DxvkBindingSetHolder : public DxvkResource {
+  public:
+    DxvkBindingSetHolder(nvrhi::BindingSetHandle bindingSet)
+      : m_bindingSet(std::move(bindingSet)) {}
+  private:
+    nvrhi::BindingSetHandle m_bindingSet;
+  };
+
   // NVRHI ICommandList implementation using DxvkContext
   class NvrhiDxvkCommandList : public nvrhi::ICommandList {
   public:
@@ -162,13 +174,16 @@ namespace dxvk {
     };
     std::vector<PendingDescriptorSetBinding> m_pendingDescriptorSets;
 
-    // Binding sets that need to stay alive until command buffer execution completes
-    // We track them here and transfer to DXVK's command list tracking in dispatch()
-    std::vector<nvrhi::BindingSetHandle> m_inFlightBindingSets;
+    // Binding sets whose descriptor sets must stay alive until the GPU finishes
+    // the command buffer that references them. We wrap each in a DxvkResource and
+    // attach it to DXVK's command list lifetime tracker, which frees them when
+    // the GPU fence signals completion - matching the sample's referencedResources pattern.
+    std::vector<nvrhi::BindingSetHandle> m_pendingBindingSetsForTracking;
 
     void bindComputeResources(const nvrhi::ComputeState& state);
     void bindHiZDescriptorSet(VkPipelineLayout pipelineLayout);  // Binds HiZ descriptor set before dispatch
     void bindUAVArrayDescriptorSet();  // Binds UAV texture array before dispatch
+    void trackPendingBindingSets();  // Transfer binding sets to DXVK's lifetime tracker
     void translateClusterOperation(
       const nvrhi::rt::cluster::OperationDesc& nvrhiDesc,
       VkClusterAccelerationStructureCommandsInfoNV& vkCmds);

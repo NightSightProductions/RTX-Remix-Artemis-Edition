@@ -214,6 +214,8 @@ namespace nvrhi {
     bool isIndexBuffer = false;
     bool isAccelStructBuildInput = false;
     bool isAccelStructStorage = false;
+    bool isVolatile = false;
+    uint32_t maxVersions = 0;
     ResourceStates initialState = ResourceStates::Common;
     bool keepInitialState = false;
   };
@@ -1002,9 +1004,11 @@ namespace nvrhi {
     // Helper to create volatile constant buffer descriptors
     inline BufferDesc CreateVolatileConstantBufferDesc(size_t byteSize, const char* debugName, uint32_t maxVersions) {
       BufferDesc desc;
-      desc.byteSize = byteSize * maxVersions;
+      desc.byteSize = byteSize;
       desc.debugName = debugName;
       desc.isConstantBuffer = true;
+      desc.isVolatile = true;
+      desc.maxVersions = maxVersions;
       desc.initialState = ResourceStates::ConstantBuffer;
       desc.keepInitialState = true;
       return desc;

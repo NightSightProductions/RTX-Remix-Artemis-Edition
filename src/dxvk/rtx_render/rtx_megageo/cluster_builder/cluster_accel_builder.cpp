@@ -25,7 +25,7 @@
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
 // Enable verbose MegaGeo logging for debugging (0=off for performance, 1=on for debugging)
-#define RTXMG_VERBOSE_LOGGING 0
+#define RTXMG_VERBOSE_LOGGING 1
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -113,7 +113,24 @@ ClusterAccelBuilder::ClusterAccelBuilder(
     , m_shaderFactory(rtxContext)
     , m_commonPasses(std::make_shared<donut::engine::CommonRenderPasses>(device))
 {
-    m_tessellationCountersBuffer.Create(kFrameCount, "tesselation counters", m_device.Get());
+    // CRITICAL: tessellation counters buffer is used as srcInfosCount for CLAS operations,
+    // which requires VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+    {
+        size_t byteSize = kFrameCount * sizeof(TessellationCounters);
+        size_t alignedByteSize = (byteSize + 3) & ~3;  // Round up to multiple of 4
+        nvrhi::BufferDesc tessCounterDesc = {
+            .byteSize = alignedByteSize,
+            .debugName = "tessellation counters",
+            .structStride = sizeof(TessellationCounters),
+            .canHaveUAVs = true,
+            .canHaveTypedViews = true,
+            .canHaveRawViews = true,
+            .isAccelStructBuildInput = true,  // Required for srcInfosCount in CLAS operations
+            .initialState = nvrhi::ResourceStates::UnorderedAccess,
+            .keepInitialState = true
+        };
+        m_tessellationCountersBuffer.Create(tessCounterDesc, m_device.Get());
+    }
     m_debugBuffer.Create(512, "ClusterAccelDebug", m_device.Get());
 
     //////////////////////////////////////////////////
@@ -604,15 +621,25 @@ void ClusterAccelBuilder::InitStructuredClusterTemplates(uint32_t maxGeometryCou
         m_templateBuffers.sizesBuffer.Log(commandList);
     }
 
+    // Calculate total size with 128-byte alignment padding for CLAS requirements
+    // Each template must be 128-byte aligned, and we need padding for base address alignment too
     size_t totalTemplateSize = 0;
+    size_t totalAlignedTemplateSize = 0;
     for (uint32_t i = 0; i < kNumTemplates; i++)
     {
         totalTemplateSize += templateSizes[i];
+        // Round up each template to 128-byte alignment
+        totalAlignedTemplateSize += (templateSizes[i] + cluster::kClasByteAlignment - 1) & ~(cluster::kClasByteAlignment - 1);
     }
-    
-    // Create template data buffer based off of totalSize of all templates
+    // Add extra padding for potential base address alignment (up to 127 bytes)
+    size_t bufferSizeWithPadding = totalAlignedTemplateSize + cluster::kClasByteAlignment;
+
+    RTXMG_LOG(str::format("RTX MegaGeo: Template sizes - raw total=", totalTemplateSize,
+        " aligned total=", totalAlignedTemplateSize, " buffer size with padding=", bufferSizeWithPadding));
+
+    // Create template data buffer based off of totalSize of all templates with alignment padding
     nvrhi::BufferDesc destDataDesc = {
-        .byteSize = totalTemplateSize,
+        .byteSize = bufferSizeWithPadding,
         .debugName = "ClusterTemplateData",
         .canHaveUAVs = true,
         .isAccelStructStorage = true,
@@ -633,10 +660,21 @@ void ClusterAccelBuilder::InitStructuredClusterTemplates(uint32_t maxGeometryCou
 
     std::vector<nvrhi::GpuVirtualAddress> addresses(kNumTemplates);
     totalTemplateSize = 0;
+
+    // CRITICAL FIX: Align base address up to 128-byte boundary for CLAS requirements
+    // The buffer itself may not be 128-aligned, so we need to account for this
+    nvrhi::GpuVirtualAddress alignedBaseAddress = (baseAddress + (cluster::kClasByteAlignment - 1)) & ~(nvrhi::GpuVirtualAddress(cluster::kClasByteAlignment - 1));
+    size_t baseAlignmentPadding = alignedBaseAddress - baseAddress;
+
+    RTXMG_LOG(str::format("RTX MegaGeo: Template alignment: baseAddr=", std::hex, baseAddress,
+        " alignedBase=", alignedBaseAddress, " padding=", std::dec, baseAlignmentPadding, " bytes"));
+
     for (size_t i = 0; i < addresses.size(); i++)
     {
-        addresses[i] = baseAddress + totalTemplateSize;
-        totalTemplateSize += templateSizes[i];
+        // Each template address must be 128-byte aligned
+        addresses[i] = alignedBaseAddress + totalTemplateSize;
+        // Round up template size to 128-byte alignment for next template
+        totalTemplateSize += (templateSizes[i] + cluster::kClasByteAlignment - 1) & ~(cluster::kClasByteAlignment - 1);
     }
     RTXMG_LOG(str::format("RTX MegaGeo: InitStructuredClusterTemplates - computed ", addresses.size(), " template addresses"));
 #if RTXMG_VERBOSE_LOGGING
@@ -780,12 +818,18 @@ void ClusterAccelBuilder::BuildStructuredCLASes(ClusterAccels& accels, uint32_t 
     cluster::OperationSizeInfo sizeInfo = m_device->getClusterOperationSizeInfo(instantiateClasParams);
     RTXMG_LOG(str::format("RTX MegaGeo: BuildStructuredCLASes - scratchSizeInBytes=", sizeInfo.scratchSizeInBytes));
 
+    uint64_t countBufferOffset = tessCounterRange.byteOffset + kClusterCountByteOffset;
+    Logger::info(str::format("RTX MegaGeo: BuildStructuredCLASes - countBuffer offset calculation:",
+        " tessCounterRange.byteOffset=", tessCounterRange.byteOffset,
+        " kClusterCountByteOffset=", kClusterCountByteOffset,
+        " TOTAL offset=", countBufferOffset));
+
     cluster::OperationDesc instantiateClasDesc =
     {
         .params = instantiateClasParams,
         .scratchSizeInBytes = sizeInfo.scratchSizeInBytes,
         .inIndirectArgCountBuffer = m_tessellationCountersBuffer,
-        .inIndirectArgCountOffsetInBytes = tessCounterRange.byteOffset + kClusterCountByteOffset,
+        .inIndirectArgCountOffsetInBytes = countBufferOffset,
         .inIndirectArgsBuffer = m_clasIndirectArgDataBuffer,
         .inIndirectArgsOffsetInBytes = 0,
         .inOutAddressesBuffer = accels.clasPtrsBuffer,
@@ -796,8 +840,38 @@ void ClusterAccelBuilder::BuildStructuredCLASes(ClusterAccels& accels, uint32_t 
         .outAccelerationStructuresOffsetInBytes = 0
     };
 
+    // Download and log CLAS indirect args before building
+    {
+        auto clasIndirectArgs = m_clasIndirectArgDataBuffer.Download(commandList);
+        uint32_t numToLog = std::min(uint32_t(clasIndirectArgs.size()), 10u);
+        Logger::info(str::format("RTX MegaGeo: CLAS indirect args before build (first ", numToLog, " of ", clasIndirectArgs.size(), "):"));
+        for (uint32_t i = 0; i < numToLog; ++i) {
+            const auto& arg = clasIndirectArgs[i];
+            bool templateAligned = (arg.clusterTemplate % 128 == 0);
+            bool vertexAligned = (arg.vertexBuffer.startAddress % 16 == 0);
+            Logger::info(str::format("  [", i, "] clusterIdOff=", arg.clusterIdOffset,
+                " geomIdxPacked=", arg.geometryIndexOffsetPacked,
+                " template=0x", std::hex, arg.clusterTemplate, " (128-aligned=", templateAligned ? "YES" : "NO", ")",
+                " vertexAddr=0x", arg.vertexBuffer.startAddress, " (16-aligned=", vertexAligned ? "YES" : "NO", ")",
+                std::dec, " stride=", arg.vertexBuffer.strideInBytes));
+        }
+    }
+
     RTXMG_LOG("RTX MegaGeo: BuildStructuredCLASes - calling executeMultiIndirectClusterOperation");
     commandList->executeMultiIndirectClusterOperation(instantiateClasDesc);
+
+    // Download and log the first few CLAS pointers to diagnose misaligned address errors
+    {
+        auto clasPtrs = accels.clasPtrsBuffer.Download(commandList);
+        uint32_t numToLog = std::min(uint32_t(clasPtrs.size()), 10u);
+        Logger::info(str::format("RTX MegaGeo: CLAS pointers after build (first ", numToLog, " of ", clasPtrs.size(), "):"));
+        for (uint32_t i = 0; i < numToLog; ++i) {
+            bool aligned128 = (clasPtrs[i] % 128 == 0);
+            Logger::info(str::format("  [", i, "] 0x", std::hex, clasPtrs[i], std::dec,
+                " aligned(128)=", aligned128 ? "YES" : "NO"));
+        }
+    }
+
     RTXMG_LOG("RTX MegaGeo: BuildStructuredCLASes - complete");
 }
 
@@ -811,6 +885,10 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
 
     nvrhi::utils::ScopedMarker marker(commandList, "FillInstanceClusters");
     stats::clusterAccelSamplers.fillClustersTime.Start(commandList);
+
+    // NOTE: Do NOT clear vertex buffer here - matching sample behavior
+    // The sample doesn't clear, and clearing can cause issues with barrier ordering
+    // if the CLAS is still using the buffer from the previous frame
 
 #if RTXMG_CHRONO_TIMING
     auto fillStart = std::chrono::high_resolution_clock::now();
@@ -899,6 +977,7 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
         params.isolationLevel = m_tessellatorConfig.isolationLevel;
         params.globalDisplacementScale = m_tessellatorConfig.displacementScale;
         params.clusterPattern = uint32_t(m_tessellatorConfig.clusterPattern);
+        params.disableSubdivision = m_tessellatorConfig.disableSubdivision ? 1 : 0;
         params.firstGeometryIndex = firstGeometryIndex;
         params.debugSurfaceIndex = uint32_t(m_tessellatorConfig.debugSurfaceIndex);
         params.debugClusterIndex = uint32_t(m_tessellatorConfig.debugClusterIndex);
@@ -935,7 +1014,13 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             // Sampler (20)
             .addItem(nvrhi::BindingSetItem::Sampler(0, scene.GetDisplacementSampler()))
             // UAVs (21-24)
-            .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, accels.clusterVertexPositionsBuffer))
+            .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(0, accels.clusterVertexPositionsBuffer));
+
+        // Verify fill_clusters uses the same buffer as compute_cluster_tiling
+        auto fillClustersBufAddr = accels.clusterVertexPositionsBuffer.GetGpuVirtualAddress();
+        RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - binding clusterVertexPositions UAV, gpuAddr=", std::hex, fillClustersBufAddr));
+
+        bindingSetDesc
             .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(1, accels.clusterShadingDataBuffer))
             .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(2, m_debugBuffer))
             .addItem(nvrhi::BindingSetItem::StructuredBuffer_UAV(3, accels.clusterVertexNormalsBuffer))
@@ -1081,6 +1166,28 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             uint numElements = debugOutput.front().payloadType;
             vectorlog::Log(debugOutput, ShaderDebugElement::OutputLambda, vectorlog::FormatOptions{ .wrap = false, .header = false, .elementIndex = false, .startIndex = 1, .count = numElements });
         }
+
+        // DEBUG: Always log first few vertex positions from debug buffer
+        // ShaderDebugElement has: float4 floatData (px,py,pz,uvx), uint4 uintData (surf,cluster,pt,uvy_bits), payloadType, lineNumber
+        {
+            auto debugOutput = m_debugBuffer.Download(commandList);
+            Logger::info("=== DEBUG: Fill Clusters Vertex Positions ===");
+            for (int i = 1; i < 16 && i < (int)debugOutput.size(); i++) { // Start at 1 (skip counter slot)
+                const auto& d = debugOutput[i];
+                float px = d.floatData.x;
+                float py = d.floatData.y;
+                float pz = d.floatData.z;
+                float uvx = d.floatData.w;
+                uint32_t surfIdx = d.uintData.x;
+                uint32_t clustIdx = d.uintData.y;
+                uint32_t ptIdx = d.uintData.z;
+                float uvy = *reinterpret_cast<const float*>(&d.uintData.w);
+                if (d.payloadType != 0) {
+                    Logger::info(str::format("  [", i, "] pos=(", px, ",", py, ",", pz, ") uv=(", uvx, ",", uvy, ") surf=", surfIdx, " cluster=", clustIdx, " pt=", ptIdx));
+                }
+            }
+            Logger::info("=== END DEBUG ===");
+        }
 #if RTXMG_CHRONO_TIMING
         auto instEnd = std::chrono::high_resolution_clock::now();
         dispatchTimeMs += std::chrono::duration_cast<std::chrono::microseconds>(instEnd - afterBinding).count() * 0.001f;
@@ -1186,13 +1293,13 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 #endif
 
     RTXMG_LOG("RTX MegaGeo: params - copying localToWorld");
-    // Use column-major format matching sample's affineToColumnMajor (48 bytes = 3 x float4)
-    // Row 0: (m00, m10, m20, tx) - column 0 of 3x3 + tx
-    // Row 1: (m01, m11, m21, ty) - column 1 of 3x3 + ty
-    // Row 2: (m02, m12, m22, tz) - column 2 of 3x3 + tz
-    params.localToWorld[0] = float4(localToWorld.data[0][0], localToWorld.data[1][0], localToWorld.data[2][0], localToWorld.data[3][0]);
-    params.localToWorld[1] = float4(localToWorld.data[0][1], localToWorld.data[1][1], localToWorld.data[2][1], localToWorld.data[3][1]);
-    params.localToWorld[2] = float4(localToWorld.data[0][2], localToWorld.data[1][2], localToWorld.data[2][2], localToWorld.data[3][2]);
+    // Store in row-major format for use with dot products in shader
+    // Each row is (linear_row + translation_component): dot(row, (x,y,z,1)) = linear*pos + translation
+    // Matrix4::data[i] is row i, data[i][j] is row i, column j
+    // Translation is in column 3 (data[i][3]), NOT row 3 (data[3][i])
+    params.localToWorld[0] = float4(localToWorld.data[0][0], localToWorld.data[0][1], localToWorld.data[0][2], localToWorld.data[0][3]);
+    params.localToWorld[1] = float4(localToWorld.data[1][0], localToWorld.data[1][1], localToWorld.data[1][2], localToWorld.data[1][3]);
+    params.localToWorld[2] = float4(localToWorld.data[2][0], localToWorld.data[2][1], localToWorld.data[2][2], localToWorld.data[2][3]);
 
     // Log localToWorld values sent to shader
     RTXMG_LOG(str::format("RTX MegaGeo: localToWorld[0]=(", params.localToWorld[0].x, ",", params.localToWorld[0].y, ",", params.localToWorld[0].z, ",", params.localToWorld[0].w, ")"));
@@ -1234,34 +1341,33 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     {
         auto& aabb = subdivisionSurface.m_aabb;
 
-        // Start with translation (DXVK Matrix4 is row-major, translation in row 3)
-        float4 translation = float4(localToWorld.data[3][0], localToWorld.data[3][1], localToWorld.data[3][2], 0.0f);
+        // Start with translation (DXVK Matrix4 column-vector convention: translation in column 3)
+        float4 translation = float4(localToWorld.data[0][3], localToWorld.data[1][3], localToWorld.data[2][3], 0.0f);
         params.aabb.m_min = translation;
         params.aabb.m_max = translation;
 
-        // Apply the linear transform (rotation + scale) to bounds
-        // For each axis of the local AABB, compute contribution to world AABB
+        // Apply the linear transform to bounds using the standard AABB transform algorithm
+        // For each output axis i, accumulate contributions from all input axes j
         for (int i = 0; i < 3; i++) {
-            // Get row i of the linear part (columns 0-2 of Matrix4)
-            float rowX = localToWorld.data[i][0];
-            float rowY = localToWorld.data[i][1];
-            float rowZ = localToWorld.data[i][2];
+            for (int j = 0; j < 3; j++) {
+                float m = localToWorld.data[i][j];  // M[i][j] = row i, col j
+                float minVal = aabb.m_mins[j];
+                float maxVal = aabb.m_maxs[j];
 
-            // Scale by local min and max (aabb.m_mins is float[3])
-            float minVal = aabb.m_mins[i];
-            float maxVal = aabb.m_maxs[i];
-            float4 e = float4(minVal * rowX, minVal * rowY, minVal * rowZ, 0.0f);
-            float4 f = float4(maxVal * rowX, maxVal * rowY, maxVal * rowZ, 0.0f);
+                float e = m * minVal;
+                float f = m * maxVal;
 
-            // Accumulate min/max contributions
-            params.aabb.m_min = float4(
-                params.aabb.m_min.x + std::min(e.x, f.x),
-                params.aabb.m_min.y + std::min(e.y, f.y),
-                params.aabb.m_min.z + std::min(e.z, f.z), 0.0f);
-            params.aabb.m_max = float4(
-                params.aabb.m_max.x + std::max(e.x, f.x),
-                params.aabb.m_max.y + std::max(e.y, f.y),
-                params.aabb.m_max.z + std::max(e.z, f.z), 0.0f);
+                if (i == 0) {
+                    params.aabb.m_min.x += std::min(e, f);
+                    params.aabb.m_max.x += std::max(e, f);
+                } else if (i == 1) {
+                    params.aabb.m_min.y += std::min(e, f);
+                    params.aabb.m_max.y += std::max(e, f);
+                } else {
+                    params.aabb.m_min.z += std::min(e, f);
+                    params.aabb.m_max.z += std::max(e, f);
+                }
+            }
         }
 
         // Debug: Log transformed aabb values
@@ -1275,9 +1381,10 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 #endif
     }
 
-    params.enableBackfaceVisibility = m_tessellatorConfig.enableBackfaceVisibility;
-    params.enableFrustumVisibility = m_tessellatorConfig.enableFrustumVisibility;
-    params.enableHiZVisibility = m_tessellatorConfig.enableHiZVisibility && m_tessellatorConfig.zbuffer != nullptr;
+    params.enableBackfaceVisibility = m_tessellatorConfig.enableBackfaceVisibility && !m_tessellatorConfig.disableSubdivision;
+    params.enableFrustumVisibility = m_tessellatorConfig.enableFrustumVisibility && !m_tessellatorConfig.disableSubdivision;
+    // Disable HiZ when subdivision is disabled to avoid descriptor binding issues with NoLimit surfaces
+    params.enableHiZVisibility = m_tessellatorConfig.enableHiZVisibility && m_tessellatorConfig.zbuffer != nullptr && !m_tessellatorConfig.disableSubdivision;
     params.edgeSegments = m_tessellatorConfig.edgeSegments;
     params.globalDisplacementScale = m_tessellatorConfig.displacementScale;
 
@@ -1290,6 +1397,19 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     params.maxVertices = m_maxVertices;
     params.clusterVertexPositionsBaseAddress = accels.clusterVertexPositionsBuffer.GetGpuVirtualAddress();
     params.clasDataBaseAddress = accels.clasBuffer.GetGpuVirtualAddress();
+    params.disableSubdivision = m_tessellatorConfig.disableSubdivision ? 1 : 0;
+
+    // STRUCT ALIGNMENT DEBUG - always log to diagnose shader mismatch
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG sizeof(ComputeClusterTilingParams)=", sizeof(ComputeClusterTilingParams))));
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(disableSubdivision)=", offsetof(ComputeClusterTilingParams, disableSubdivision),
+        " offset(clasDataBaseAddress)=", offsetof(ComputeClusterTilingParams, clasDataBaseAddress),
+        " offset(clusterVertexPositionsBaseAddress)=", offsetof(ComputeClusterTilingParams, clusterVertexPositionsBaseAddress))));
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(globalDisplacementScale)=", offsetof(ComputeClusterTilingParams, globalDisplacementScale),
+        " offset(maxClusters)=", offsetof(ComputeClusterTilingParams, maxClusters),
+        " offset(maxVertices)=", offsetof(ComputeClusterTilingParams, maxVertices),
+        " offset(maxClasBlocks)=", offsetof(ComputeClusterTilingParams, maxClasBlocks))));
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG disableSubdivision VALUE=", params.disableSubdivision,
+        " (config=", m_tessellatorConfig.disableSubdivision ? "true" : "false", ")")));
 
     // Safety check: if clasDataBaseAddress is 0, all CLAS addresses will be invalid
     if (params.clasDataBaseAddress == 0) {
@@ -1339,6 +1459,8 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(14))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(15))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_SRV(16))
+            // HiZ textures - Slang ignores space1 and puts them at t17 in Set 0
+            .addItem(nvrhi::BindingLayoutItem::Texture_SRV(17).setSize(HIZ_MAX_LODS))
             .addItem(nvrhi::BindingLayoutItem::Sampler(0))
             .addItem(nvrhi::BindingLayoutItem::Sampler(1))
             .addItem(nvrhi::BindingLayoutItem::StructuredBuffer_UAV(0))
@@ -1416,7 +1538,18 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(13, subdivisionSurface.m_texcoordDeviceData.surfaceDescriptors))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(14, subdivisionSurface.m_texcoordDeviceData.controlPointIndices))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(15, subdivisionSurface.m_texcoordDeviceData.patchPointsOffsets))
-        .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(16, subdivisionSurface.m_texcoordsBuffer))
+        .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(16, subdivisionSurface.m_texcoordsBuffer));
+    // HiZ textures at binding 17 - Slang ignores space1 and puts them here
+    for (uint32_t i = 0; i < HIZ_MAX_LODS; ++i)
+    {
+        nvrhi::ITexture* hizTex = nullptr;
+        if (m_tessellatorConfig.zbuffer && m_tessellatorConfig.enableHiZVisibility)
+        {
+            hizTex = m_tessellatorConfig.zbuffer->GetHierarchyTexture(i);
+        }
+        bindingSetDesc.addItem(nvrhi::BindingSetItem::Texture_SRV(17, hizTex ? hizTex : m_dummyHiZTextures[i]).setArrayElement(i));
+    }
+    bindingSetDesc
         .addItem(nvrhi::BindingSetItem::Sampler(0, scene.GetDisplacementSampler()))
         .addItem(nvrhi::BindingSetItem::Sampler(1, m_commonPasses->m_LinearClampSampler)) // hiZ sampler
         // UAV bindings
@@ -1572,10 +1705,23 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 
     if (m_tessellatorConfig.enableMonolithicClusterBuild)
     {
-        // Skip no limit surfaces
+        // When subdivision is disabled, process ALL surfaces using bilinear interpolation
+        // When enabled, skip NoLimit surfaces as they don't have valid limit data
         params.surfaceStart = 0;
-        params.surfaceEnd = subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
+        params.surfaceEnd = m_tessellatorConfig.disableSubdivision
+            ? subdivisionSurface.m_surfaceCount
+            : subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
         uint32_t dispatchCount = params.surfaceEnd - params.surfaceStart;
+
+        // Always log this info to help debug subdivision bypass
+        {
+            uint32_t surfaceCount = subdivisionSurface.m_surfaceCount;
+            uint32_t noLimitOffset = subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
+            ONCE(Logger::info(str::format("RTX MegaGeo: disableSubdivision=", m_tessellatorConfig.disableSubdivision ? "YES" : "NO",
+                " surfaceStart=", params.surfaceStart, " surfaceEnd=", params.surfaceEnd,
+                " surfaceCount=", surfaceCount, " NoLimitOffset=", noLimitOffset)));
+        }
+
         RTXMG_LOG(str::format("RTX MegaGeo: Monolithic - surfaceStart=", params.surfaceStart,
             " surfaceEnd=", params.surfaceEnd, " dispatchCount=", dispatchCount,
             " surfaceOffsets=[", subdivisionSurface.m_surfaceOffsets[0], ",",
@@ -1795,6 +1941,22 @@ void ClusterAccelBuilder::BuildBlasFromClas(ClusterAccels& accels, const Instanc
     // the cluster operation may read stale/uninitialized data.
     commandList->bufferBarrier(m_blasFromClasIndirectArgsBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::ShaderResource);
     RTXMG_LOG("RTX MegaGeo: BuildBlasFromClas - barrier after FillBlasFromClasArgs");
+
+    // Download and log the first few BLAS indirect args to diagnose misaligned address errors
+    {
+        auto blasIndirectArgs = m_blasFromClasIndirectArgsBuffer.Download(commandList);
+        uint32_t numToLog = std::min(uint32_t(blasIndirectArgs.size()), numInstances);
+        numToLog = std::min(numToLog, 10u); // Limit to first 10
+        Logger::info(str::format("RTX MegaGeo: BLAS indirect args (first ", numToLog, " of ", numInstances, "):"));
+        for (uint32_t i = 0; i < numToLog; ++i) {
+            const auto& arg = blasIndirectArgs[i];
+            bool aligned128 = (arg.clusterAddresses % 128 == 0);
+            Logger::info(str::format("  [", i, "] clusterCount=", arg.clusterCount,
+                " clusterAddresses=0x", std::hex, arg.clusterAddresses,
+                std::dec, " stride=", arg.clusterReferencesStride,
+                " aligned(128)=", aligned128 ? "YES" : "NO"));
+        }
+    }
 
     //// Build Operation
     cluster::OperationDesc createBlasDesc =
@@ -2122,7 +2284,22 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
 
     if (maxVerticesChanged)
     {
-        accels.clusterVertexPositionsBuffer.Create(m_maxVertices, "cluster vertex positions", m_device.Get());
+        // CRITICAL: clusterVertexPositionsBuffer is read by CLAS instantiation via device address,
+        // which requires VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+        size_t byteSize = m_maxVertices * sizeof(float3);
+        size_t alignedByteSize = (byteSize + 3) & ~3;  // Round up to multiple of 4
+        nvrhi::BufferDesc vertexPosDesc = {
+            .byteSize = alignedByteSize,
+            .debugName = "cluster vertex positions",
+            .structStride = sizeof(float3),
+            .canHaveUAVs = true,
+            .canHaveTypedViews = true,
+            .canHaveRawViews = true,
+            .isAccelStructBuildInput = true,  // Required for CLAS to read via device address
+            .initialState = nvrhi::ResourceStates::UnorderedAccess,
+            .keepInitialState = true
+        };
+        accels.clusterVertexPositionsBuffer.Create(vertexPosDesc, m_device.Get());
     }
 
     if (maxVerticesChanged || enableVertexNormalsChanged)
@@ -2330,6 +2507,23 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     // NOTE: enableLogging block removed - Log()/Download() calls close/reopen command list
     // which destroys bound image views and causes VK_ERROR_DEVICE_LOST in DXVK.
 
+    // CRITICAL: Add UAV barriers after compute_cluster_tiling to ensure:
+    // 1. TessellationCounters atomics are visible
+    // 2. IndirectInstantiateTemplateArgs writes are complete
+    // 3. Cluster data is written before CLAS instantiation reads it
+    // 4. ClusterOffsetCounts written by CopyClusterOffset are visible before FillInstanceClusters reads them
+    // 5. FillClustersDispatchIndirect args are ready before dispatchIndirect uses them
+    RTXMG_LOG("RTX MegaGeo: BuildAccel - adding UAV barriers after ComputeClusterTiling");
+    commandList->bufferBarrier(m_tessellationCountersBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::UnorderedAccess);
+    commandList->bufferBarrier(m_clasIndirectArgDataBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::UnorderedAccess);
+    commandList->bufferBarrier(m_clustersBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::UnorderedAccess);
+    commandList->bufferBarrier(accels.clusterShadingDataBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::UnorderedAccess);
+    // CRITICAL FIX: These two buffers were missing barriers causing FillInstanceClusters to read stale data
+    // m_clusterOffsetCountsBuffer: Written by CopyClusterOffset as UAV, read by FillInstanceClusters as SRV
+    commandList->bufferBarrier(m_clusterOffsetCountsBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::ShaderResource);
+    // m_fillClustersDispatchIndirectBuffer: Written by CopyClusterOffset as UAV, used by dispatchIndirect
+    commandList->bufferBarrier(m_fillClustersDispatchIndirectBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::IndirectArgument);
+
     RTXMG_LOG("RTX MegaGeo: BuildAccel - calling FillInstanceClusters");
     FillInstanceClusters(scene, accels, commandList);
     RTXMG_LOG("RTX MegaGeo: BuildAccel - FillInstanceClusters complete");
@@ -2341,6 +2535,14 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
         chronoSectionStart = chronoNow;
     }
 #endif
+
+    // CRITICAL: Add UAV barrier after FillInstanceClusters to ensure vertex positions
+    // are written before CLAS instantiation reads them via device addresses
+    // Using AccelStructBuildInput state which maps to:
+    // - VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR
+    // - VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR
+    RTXMG_LOG("RTX MegaGeo: BuildAccel - adding UAV barrier for vertex positions (UAV -> AccelStructBuildInput)");
+    commandList->bufferBarrier(accels.clusterVertexPositionsBuffer, nvrhi::ResourceStates::UnorderedAccess, nvrhi::ResourceStates::AccelStructBuildInput);
 
     // Build CLASes for all instances at once
     RTXMG_LOG("RTX MegaGeo: BuildAccel - calling BuildStructuredCLASes");
@@ -2390,15 +2592,14 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     }
 #endif
 
-    // Log ALL counter indices to see which ones have data
-#if RTXMG_VERBOSE_LOGGING
+    // Log ALL counter indices to see which ones have data - always log for debugging
     for (uint32_t i = 0; i < kFrameCount; ++i) {
-        RTXMG_LOG(str::format("RTX MegaGeo: Counter[", i, "] clusters=", counterBufferData[i].clusters,
+        ONCE(Logger::info(str::format("RTX MegaGeo: Counter[", i, "] clusters=", counterBufferData[i].clusters,
                                  " desiredClusters=", counterBufferData[i].desiredClusters,
                                  " desiredTriangles=", counterBufferData[i].desiredTriangles,
-                                 " desiredVertices=", counterBufferData[i].desiredVertices));
+                                 " desiredVertices=", counterBufferData[i].desiredVertices,
+                                 " desiredClasBlocks=", counterBufferData[i].desiredClasBlocks)));
     }
-#endif
 
     // If readIndex has no valid data (0 clusters), find the first index with valid data
     // This handles early frames where previous frame data doesn't exist yet
@@ -2442,6 +2643,37 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     stats.allocated.m_blasScratchSize = m_createBlasSizeInfo.scratchSizeInBytes;
 
     m_buildAccelFrameIndex++;
+
+    // VRAM usage summary - log every 60 frames
+    if ((m_buildAccelFrameIndex % 60) == 1) {
+        size_t vtxPosBuf = accels.clusterVertexPositionsBuffer.GetBytes();
+        size_t vtxNrmBuf = accels.clusterVertexNormalsBuffer.GetBytes();
+        size_t clasBuf = accels.clasBuffer.GetBytes();
+        size_t clustersBuf = m_clustersBuffer.GetBytes();
+        size_t shadingBuf = accels.clusterShadingDataBuffer.GetBytes();
+        size_t clasPtrsBuf = accels.clasPtrsBuffer.GetBytes();
+        size_t blasBuf = accels.blasBuffer.GetBytes();
+        size_t blasPtrsBuf = accels.blasPtrsBuffer.GetBytes();
+        size_t blasSizesBuf = accels.blasSizesBuffer.GetBytes();
+        size_t templateSmallBuf = m_templateBuffers.sizesBuffer.GetBytes() + m_templateBuffers.addressesBuffer.GetBytes() + m_templateBuffers.instantiationSizesBuffer.GetBytes();
+        size_t templateDataBuf = m_templateBuffers.dataBuffer ? m_templateBuffers.dataBuffer->getDesc().byteSize : 0;
+        size_t templateIdxBuf = m_templateBuffers.indexBuffer ? m_templateBuffers.indexBuffer->getDesc().byteSize : 0;
+        size_t templateVtxBuf = m_templateBuffers.vertexBuffer ? m_templateBuffers.vertexBuffer->getDesc().byteSize : 0;
+        size_t templateBuf = templateSmallBuf + templateDataBuf + templateIdxBuf + templateVtxBuf;
+        size_t dispatchBuf = m_fillClustersDispatchIndirectBuffer.GetBytes();
+        size_t offsetCountsBuf = m_clusterOffsetCountsBuffer.GetBytes();
+        size_t blasFromClasArgsBuf = m_blasFromClasIndirectArgsBuffer.GetBytes();
+        size_t tessCountersBuf = m_tessellationCountersBuffer.GetBytes();
+        size_t totalVRAM = vtxPosBuf + vtxNrmBuf + clasBuf + clustersBuf + shadingBuf + clasPtrsBuf + blasBuf + blasPtrsBuf + blasSizesBuf + templateBuf + dispatchBuf + offsetCountsBuf + blasFromClasArgsBuf + tessCountersBuf;
+
+        Logger::info(str::format("RTX MegaGeo VRAM: TOTAL=", totalVRAM / (1024*1024), "MB (",  totalVRAM, " bytes)"));
+        Logger::info(str::format("  vtxPositions=", vtxPosBuf / 1024, "KB vtxNormals=", vtxNrmBuf / 1024, "KB"));
+        Logger::info(str::format("  CLAS=", clasBuf / (1024*1024), "MB clusters=", clustersBuf / 1024, "KB shading=", shadingBuf / 1024, "KB clasPtrs=", clasPtrsBuf / 1024, "KB"));
+        Logger::info(str::format("  BLAS=", blasBuf / (1024*1024), "MB blasPtrs=", blasPtrsBuf / 1024, "KB blasSizes=", blasSizesBuf / 1024, "KB"));
+        Logger::info(str::format("  templates=", templateBuf / 1024, "KB (data=", templateDataBuf / 1024, "KB idx=", templateIdxBuf / 1024, "KB vtx=", templateVtxBuf / 1024, "KB small=", templateSmallBuf / 1024, "KB)"));
+        Logger::info(str::format("  dispatch=", dispatchBuf / 1024, "KB offsetCounts=", offsetCountsBuf / 1024, "KB blasFromClasArgs=", blasFromClasArgsBuf / 1024, "KB tessCounters=", tessCountersBuf / 1024, "KB"));
+        Logger::info(str::format("  maxClusters=", m_maxClusters, " maxVertices=", m_maxVertices, " numInstances=", m_numInstances, " maxClasBytes=", m_maxClasBytes));
+    }
 
     // Log final statistics
     RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel COMPLETE - clusters=", counters.clusters,

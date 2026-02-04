@@ -143,13 +143,8 @@ rtx_mg_lib = static_library('rtx_mg', rtx_mg_sources,
 rtx_mg_cluster_shaders = files([])
 
 # RTX MG Shaders - HIZ
-rtx_mg_hiz_shaders = files([
-  'shaders/hiz/hiz_display.hlsl',
-  'shaders/hiz/hiz_pass1.hlsl',
-  'shaders/hiz/hiz_pass2.hlsl',
-  'shaders/hiz/zbuffer_display.hlsl',
-  'shaders/hiz/zbuffer_minmax.hlsl',
-])
+# Note: All HLSL files removed - actual shaders come from pre-compiled Slang versions in src/dxvk/shaders/rtx/pass/rtx_megageo/hiz/
+rtx_mg_hiz_shaders = files([])
 
 # RTX MG Dependency (to be used by main dxvk build)
 # Note: osd_lite include is NOT exposed to avoid shadowing DXVK's version.h

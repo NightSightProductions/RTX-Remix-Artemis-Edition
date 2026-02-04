@@ -624,8 +624,10 @@ namespace dxvk {
     // NV-DXVK end
 
     // RTX MegaGeo: Enable shader subgroup extended types (required for MegaGeometry shaders)
-    // This feature is promoted to Vulkan 1.2 core, but validation layers check for the extension-style structure
-    if (m_deviceFeatures.extShaderSubgroupExtendedTypes.shaderSubgroupExtendedTypes) {
+    // This feature is promoted to Vulkan 1.2 core, so only add the extension structure when using Vulkan < 1.2
+    // to avoid validation errors about duplicate features in the pNext chain
+    if (VK_VERSION_MINOR(m_deviceInfo.core.properties.apiVersion) < 2 &&
+        m_deviceFeatures.extShaderSubgroupExtendedTypes.shaderSubgroupExtendedTypes) {
       enabledFeatures.extShaderSubgroupExtendedTypes.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
       enabledFeatures.extShaderSubgroupExtendedTypes.pNext = std::exchange(enabledFeatures.core.pNext, &enabledFeatures.extShaderSubgroupExtendedTypes);
       enabledFeatures.extShaderSubgroupExtendedTypes.shaderSubgroupExtendedTypes = VK_TRUE;
@@ -1149,8 +1151,12 @@ namespace dxvk {
 
     // RTX MegaGeo: Query shader subgroup extended types feature (promoted to Vulkan 1.2 core)
     // This is required for MegaGeometry shaders that use subgroup operations with extended types
-    m_deviceFeatures.extShaderSubgroupExtendedTypes.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
-    m_deviceFeatures.extShaderSubgroupExtendedTypes.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extShaderSubgroupExtendedTypes);
+    // Note: Only add this structure if Vulkan version is less than 1.2, as it's already included
+    // in VkPhysicalDeviceVulkan12Features and including both causes validation errors
+    if (VK_VERSION_MINOR(m_deviceInfo.core.properties.apiVersion) < 2) {
+      m_deviceFeatures.extShaderSubgroupExtendedTypes.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SHADER_SUBGROUP_EXTENDED_TYPES_FEATURES;
+      m_deviceFeatures.extShaderSubgroupExtendedTypes.pNext = std::exchange(m_deviceFeatures.core.pNext, &m_deviceFeatures.extShaderSubgroupExtendedTypes);
+    }
 
     m_vki->vkGetPhysicalDeviceFeatures2(m_handle, &m_deviceFeatures.core);
   }

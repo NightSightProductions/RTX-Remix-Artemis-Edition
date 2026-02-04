@@ -43,13 +43,12 @@ struct ComputeClusterTilingParams
     float4x4 matWorldToClip;
     float4 localToWorld[3];  // 3 rows of float4 (row-major 3x4 matrix, 48 bytes)
 
-    float3 cameraPos;
-    float pad1;
+    float4 cameraPos;  // xyz = camera position, w = padding (C++ float3 is 16 bytes, breaks alignment)
 
     Box3 aabb;
 
     uint4 edgeSegments;
-    
+
     uint firstGeometryIndex;
     uint isolationLevel;
     float fineTessellationRate;
@@ -62,11 +61,16 @@ struct ComputeClusterTilingParams
     int enableBackfaceVisibility;
     int enableHiZVisibility;
     int numHiZLODs;
-    
+
     float globalDisplacementScale;
     uint maxClusters;
     uint maxVertices;
     uint maxClasBlocks;
+
+    uint disableSubdivision;  // 1 = bypass stencil evaluation, use bilinear interpolation
+    uint pad3;
+    uint pad4;
+    uint pad5;
 
     nvrhi::GpuVirtualAddress clasDataBaseAddress;
     nvrhi::GpuVirtualAddress clusterVertexPositionsBaseAddress;

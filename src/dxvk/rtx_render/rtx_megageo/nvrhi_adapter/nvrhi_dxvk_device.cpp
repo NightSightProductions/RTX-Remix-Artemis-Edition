@@ -41,10 +41,20 @@ namespace dxvk {
   nvrhi::BufferHandle NvrhiDxvkDevice::createBuffer(const nvrhi::BufferDesc& desc) {
     // Translate NVRHI buffer descriptor to DXVK buffer create info
     DxvkBufferCreateInfo dxvkInfo;
-    dxvkInfo.size = desc.byteSize;
     dxvkInfo.usage = 0;
     dxvkInfo.stages = 0;
     dxvkInfo.access = 0;
+
+    // For volatile constant buffers: allocate byteSize * maxVersions with alignment
+    uint64_t perVersionSize = desc.byteSize;
+    uint32_t maxVersions = desc.maxVersions;
+    if (desc.isVolatile && maxVersions > 0) {
+      // Align per-version size to 256 bytes (minUniformBufferOffsetAlignment is typically 256)
+      perVersionSize = (desc.byteSize + 255) & ~255ull;
+      dxvkInfo.size = perVersionSize * maxVersions;
+    } else {
+      dxvkInfo.size = desc.byteSize;
+    }
 
     // Translate usage flags
     if (desc.isConstantBuffer) {
@@ -112,17 +122,15 @@ namespace dxvk {
     // Determine memory type based on buffer purpose
     VkMemoryPropertyFlags memoryFlags;
 
-    // Readback/upload buffers need HOST_VISIBLE memory so CPU can map and read/write them
-    // Detect by checking cpuAccess mode or CopyDest initial state
-    if (desc.cpuAccess == nvrhi::CpuAccessMode::Read ||
+    if (desc.isVolatile && desc.maxVersions > 0) {
+      // Volatile constant buffers: host-visible for CPU memcpy writes (no GPU commands)
+      memoryFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
+    } else if (desc.cpuAccess == nvrhi::CpuAccessMode::Read ||
         desc.cpuAccess == nvrhi::CpuAccessMode::Write ||
         desc.cpuAccess == nvrhi::CpuAccessMode::ReadWrite ||
         desc.initialState == nvrhi::ResourceStates::CopyDest) {
       memoryFlags = VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT | VK_MEMORY_PROPERTY_HOST_COHERENT_BIT;
     } else {
-      // CRITICAL: For cluster template buffers that need device addresses for GPU ray tracing,
-      // we MUST allocate from pure device-local memory, not HVV (host-visible VRAM).
-      // Using HVV causes low GPU addresses (~218MB) which leads to crashes.
       memoryFlags = VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT;
     }
 
@@ -149,7 +157,17 @@ namespace dxvk {
         " (mod 16 = ", sliceHandle.offset % 16, ")"));
     }
 
-    return new NvrhiDxvkBuffer(desc, dxvkBuffer);
+    NvrhiDxvkBuffer* result = new NvrhiDxvkBuffer(desc, dxvkBuffer);
+
+    if (desc.isVolatile && maxVersions > 0) {
+      result->setVolatile(maxVersions, perVersionSize);
+      ONCE(Logger::info(str::format("RTX MegaGeo: Created volatile CB '",
+        desc.debugName ? desc.debugName : "unnamed",
+        "' perVersion=", perVersionSize, " maxVersions=", maxVersions,
+        " totalSize=", perVersionSize * maxVersions)));
+    }
+
+    return result;
   }
 
   void* NvrhiDxvkDevice::mapBuffer(nvrhi::IBuffer* buffer, nvrhi::CpuAccessMode access) {
@@ -695,12 +713,26 @@ namespace dxvk {
       return bindingSet;
     }
 
-    // Use shared descriptor pool for efficient allocation (matching the sample)
-    // This is a major performance optimization: creating a new VkDescriptorPool per binding set
-    // is extremely slow. Instead, we use a single shared pool and allocate from it.
-    VkDescriptorPool descriptorPool = getSharedDescriptorPool();
-    if (descriptorPool == VK_NULL_HANDLE) {
-      Logger::err("RTX MegaGeo: createBindingSet - failed to get shared descriptor pool");
+    // Create a per-binding-set descriptor pool for thread-safe destruction.
+    // DXVK's lifetime tracker destroys binding sets on its retirement thread,
+    // so sharing a pool would cause threading errors when the recording thread
+    // allocates while the retirement thread frees from the same pool.
+    std::vector<VkDescriptorPoolSize> poolSizes;
+    for (const auto& [type, count] : poolSizeMap) {
+      poolSizes.push_back({ type, count });
+    }
+
+    VkDescriptorPoolCreateInfo poolInfo = {};
+    poolInfo.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_POOL_CREATE_INFO;
+    poolInfo.flags = VK_DESCRIPTOR_POOL_CREATE_FREE_DESCRIPTOR_SET_BIT;
+    poolInfo.maxSets = 1;
+    poolInfo.poolSizeCount = static_cast<uint32_t>(poolSizes.size());
+    poolInfo.pPoolSizes = poolSizes.data();
+
+    VkDescriptorPool descriptorPool = VK_NULL_HANDLE;
+    VkResult poolResult = vkCreateDescriptorPool(m_vkDevice, &poolInfo, nullptr, &descriptorPool);
+    if (poolResult != VK_SUCCESS || descriptorPool == VK_NULL_HANDLE) {
+      Logger::err(str::format("RTX MegaGeo: createBindingSet - failed to create descriptor pool, result=", (int)poolResult));
       return bindingSet;
     }
 
@@ -911,8 +943,8 @@ namespace dxvk {
       vkUpdateDescriptorSets(m_vkDevice, static_cast<uint32_t>(writes.size()), writes.data(), 0, nullptr);
     }
 
-    // Store in binding set (shared pool - set is freed back to pool when binding set is destroyed)
-    bindingSet->setDescriptorSet(descriptorPool, descriptorSet, m_vkDevice, false);
+    // Store in binding set (owns pool - pool is destroyed when binding set is destroyed, thread-safe)
+    bindingSet->setDescriptorSet(descriptorPool, descriptorSet, m_vkDevice, true);
 
     Logger::info(str::format("RTX MegaGeo: createBindingSet - created pre-built descriptor set with ",
       writes.size(), " descriptors for space ", layoutDesc.registerSpace));

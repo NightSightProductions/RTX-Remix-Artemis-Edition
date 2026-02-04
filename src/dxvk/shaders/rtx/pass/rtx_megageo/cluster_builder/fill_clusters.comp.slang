@@ -196,19 +196,28 @@ void FillClustersMain(uint3 threadIdx, uint3 groupIdx)
             float2 uv = rSampler.UV(rCluster.Linear2Idx2D(pointIndex) + rCluster.offset, (ClusterPattern)g_TessParams.clusterPattern);
 
             // always do the non-displaced evaluation first.  Displacement maps will perturb this calculation below
+            LimitFrame limit;
+            if (g_TessParams.disableSubdivision != 0)
+            {
+                // Bypass subdivision: use bilinear interpolation of control points
+                limit = subd.EvaluateBilinear(uv);
+            }
+            else
+            {
 #if SURFACE_TYPE == SURFACE_TYPE_ALL
-            LimitFrame limit = subd.Evaluate(uv);
+                limit = subd.Evaluate(uv);
 #elif SURFACE_TYPE == SURFACE_TYPE_PUREBSPLINE
-        #if ENABLE_GROUP_PUREBSPLINE
-            LimitFrame limit = subd.EvaluatePureBsplinePatchGroupShared(iWave, uv);
-        #else
-            LimitFrame limit = subd.EvaluatePureBsplinePatch(uv);
-        #endif
+            #if ENABLE_GROUP_PUREBSPLINE
+                limit = subd.EvaluatePureBsplinePatchGroupShared(iWave, uv);
+            #else
+                limit = subd.EvaluatePureBsplinePatch(uv);
+            #endif
 #elif SURFACE_TYPE == SURFACE_TYPE_REGULARBSPLINE
-            LimitFrame limit = subd.EvaluateBsplinePatch(uv);
+                limit = subd.EvaluateBsplinePatch(uv);
 #elif SURFACE_TYPE == SURFACE_TYPE_LIMIT
-            LimitFrame limit = subd.EvaluateLimitSurface(uv);
+                limit = subd.EvaluateLimitSurface(uv);
 #endif
+            }
 
 #if DISPLACEMENT_MAPS
             if (displacementTexIndex >= 0)
@@ -226,6 +235,18 @@ void FillClustersMain(uint3 threadIdx, uint3 groupIdx)
 #endif
 
             GathererWriteLimit(limit, rCluster, pointIndex);
+
+            // DEBUG: Log first few vertex positions to debug buffer
+            // ShaderDebugElement has: float4 floatData, uint4 uintData, uint payloadType, uint lineNumber
+            if (clusterIndex < 2 && pointIndex < 4) {
+                uint32_t debugIdx = clusterIndex * 4 + pointIndex + 1; // +1 to skip slot 0 (counter)
+                if (debugIdx < 16) {
+                    u_Debug[debugIdx].floatData = float4(limit.p.x, limit.p.y, limit.p.z, uv.x);
+                    u_Debug[debugIdx].uintData = uint4(iSurface, clusterIndex, pointIndex, asuint(uv.y));
+                    u_Debug[debugIdx].payloadType = 1; // Mark as valid
+                    u_Debug[debugIdx].lineNumber = 0;
+                }
+            }
 
 #if VERTEX_NORMALS
             GathererWriteNormal(limit, rCluster, pointIndex, subd);

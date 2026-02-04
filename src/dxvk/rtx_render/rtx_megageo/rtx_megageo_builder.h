@@ -280,6 +280,14 @@ namespace dxvk {
     VkDeviceAddress getDownloadedBlasAddress(uint32_t rtxmgInstanceIndex) const;
 
     /**
+     * \brief Download BLAS addresses from GPU after BuildAccel
+     *
+     * Downloads blasPtrsBuffer to CPU for direct use in addBlas().
+     * \return true if at least one non-zero BLAS address was downloaded
+     */
+    bool downloadBlasAddresses();
+
+    /**
      * \brief Get tessellation statistics
      *
      * Returns information about the most recent tessellation pass:

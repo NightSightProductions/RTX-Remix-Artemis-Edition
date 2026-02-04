@@ -195,18 +195,20 @@ namespace dxvk {
       m_spatialCacheHash = m_linkedBlas->getSpatialMap().insert(centroid, firstInstanceObjectToWorld, this);
     }
 
-    // The D3D matrix on input, needs to be transposed before feeding to the VK API (left/right handed conversion)
-    // NOTE: VkTransformMatrixKHR is 4x3 matrix, and Matrix4 is 4x4
+    // NOTE: VkTransformMatrixKHR is a 3x4 row-major matrix (3 rows, 4 columns) using column-vector
+    // convention (P' = M * P), with translation in column 3 (matrix[i][3]).
+    // DXVK Matrix4 uses row-vector convention (P' = P * M), with translation in row 3 (data[3]).
+    // Transpose converts between these conventions, moving translation from row 3 to column 3.
+    // This applies to BOTH traditional and cluster geometry - cluster BLAS vertices from fill_clusters
+    // are in object space (same as traditional BLAS vertices), so both need the same transform.
     const auto t = transpose(surface.objectToWorld);
     memcpy(&m_vkInstance.transform, &t, sizeof(VkTransformMatrixKHR));
 
-    // RTX MegaGeo: Debug logging for cluster instance teleport
     if (m_linkedBlas && m_linkedBlas->isClusterBlas()) {
       static uint32_t teleportLogCount = 0;
       if (teleportLogCount < 5) {
         Logger::info(str::format("RTX MegaGeo teleport: ClusterBlas instance #", teleportLogCount,
             " input_translation=(", objectToWorld.data[3][0], ",", objectToWorld.data[3][1], ",", objectToWorld.data[3][2], ")",
-            " transposed[0][3]=", t.data[0][3], " transposed[1][3]=", t.data[1][3], " transposed[2][3]=", t.data[2][3],
             " vkTransform=(", m_vkInstance.transform.matrix[0][3], ",", m_vkInstance.transform.matrix[1][3], ",", m_vkInstance.transform.matrix[2][3], ")"));
         teleportLogCount++;
       }

@@ -27,7 +27,10 @@
 //!end-variants
 
 // Use row-major matrix layout to match CPU struct packing (float3x4 = 48 bytes)
+// Note: Slang doesn't support #pragma pack_matrix, it uses -matrix-layout-column-major compiler flag
+#ifndef __SLANG__
 #pragma pack_matrix(row_major)
+#endif
 
 #include "rtx/pass/rtx_megageo/nvrhi_types.slangh"
 #include "rtx/pass/rtx_megageo/cluster_builder/compute_cluster_tiling_params.h"
@@ -400,25 +403,55 @@ void WaveEvaluateBSplinePatch8(uint32_t iWave,
     uint32_t waveSampleOffset = kNumWaveSurfaceUVSamples * iWave;
 
     // always do the non-displaced evaluation first.  Displacement maps will perturb this calculation below
-#if SURFACE_TYPE == SURFACE_TYPE_ALL
-    if (subd.IsPureBSplinePatch())
+    // Check for subdivision bypass - use bilinear interpolation instead
+    if (g_Params.disableSubdivision != 0)
     {
-        LimitFrame limit = subd.WaveEvaluatePureBsplinePatch8(iLane);
         if (iLane < kNumWaveSurfaceUVSamples)
         {
-            samples[waveSampleOffset + iLane] = limit;
-        }
-    }
-    else if (subd.IsBSplinePatch())
-    {
-        LimitFrame limit = subd.WaveEvaluateBsplinePatch(iLane);
-        if (iLane < kNumWaveSurfaceUVSamples)
-        {
+            LimitFrame limit = subd.EvaluateBilinear(kWaveSurfaceUVSamples[iLane]);
             samples[waveSampleOffset + iLane] = limit;
         }
     }
     else
     {
+#if SURFACE_TYPE == SURFACE_TYPE_ALL
+        if (subd.IsPureBSplinePatch())
+        {
+            LimitFrame limit = subd.WaveEvaluatePureBsplinePatch8(iLane);
+            if (iLane < kNumWaveSurfaceUVSamples)
+            {
+                samples[waveSampleOffset + iLane] = limit;
+            }
+        }
+        else if (subd.IsBSplinePatch())
+        {
+            LimitFrame limit = subd.WaveEvaluateBsplinePatch(iLane);
+            if (iLane < kNumWaveSurfaceUVSamples)
+            {
+                samples[waveSampleOffset + iLane] = limit;
+            }
+        }
+        else
+        {
+            // there is no wave parallel implementation for non-bspline patches falling back to single thread
+            subd.WaveEvaluatePatchPoints(iLane, kComputeClusterTilingLanes);
+            if (iLane < kNumWaveSurfaceUVSamples)
+            {
+                LimitFrame limit = subd.EvaluateLimitSurface(kWaveSurfaceUVSamples[iLane]);
+                samples[waveSampleOffset + iLane] = limit;
+            }
+        }
+#elif SURFACE_TYPE == SURFACE_TYPE_PUREBSPLINE
+        LimitFrame limit = subd.WaveEvaluatePureBsplinePatch8(iLane);
+        if (iLane < kNumWaveSurfaceUVSamples)
+            samples[waveSampleOffset + iLane] = limit;
+#elif SURFACE_TYPE == SURFACE_TYPE_REGULARBSPLINE
+        LimitFrame limit = subd.WaveEvaluateBsplinePatch(iLane);
+        if (iLane < kNumWaveSurfaceUVSamples)
+        {
+            samples[waveSampleOffset + iLane] = limit;
+        }
+#elif SURFACE_TYPE == SURFACE_TYPE_LIMIT
         // there is no wave parallel implementation for non-bspline patches falling back to single thread
         subd.WaveEvaluatePatchPoints(iLane, kComputeClusterTilingLanes);
         if (iLane < kNumWaveSurfaceUVSamples)
@@ -426,26 +459,8 @@ void WaveEvaluateBSplinePatch8(uint32_t iWave,
             LimitFrame limit = subd.EvaluateLimitSurface(kWaveSurfaceUVSamples[iLane]);
             samples[waveSampleOffset + iLane] = limit;
         }
-    }
-#elif SURFACE_TYPE == SURFACE_TYPE_PUREBSPLINE
-    LimitFrame limit = subd.WaveEvaluatePureBsplinePatch8(iLane);
-    if (iLane < kNumWaveSurfaceUVSamples)
-        samples[waveSampleOffset + iLane] = limit;
-#elif SURFACE_TYPE == SURFACE_TYPE_REGULARBSPLINE
-    LimitFrame limit = subd.WaveEvaluateBsplinePatch(iLane);
-    if (iLane < kNumWaveSurfaceUVSamples)
-    {
-        samples[waveSampleOffset + iLane] = limit;
-    }
-#elif SURFACE_TYPE == SURFACE_TYPE_LIMIT
-    // there is no wave parallel implementation for non-bspline patches falling back to single thread
-    subd.WaveEvaluatePatchPoints(iLane, kComputeClusterTilingLanes);
-    if (iLane < kNumWaveSurfaceUVSamples)
-    {
-        LimitFrame limit = subd.EvaluateLimitSurface(kWaveSurfaceUVSamples[iLane]);
-        samples[waveSampleOffset + iLane] = limit;
-    }
 #endif
+    }
 
 #if DISPLACEMENT_MAPS
     uint32_t geometryIndex = t_SurfaceToGeometryIndex[subd.m_surfaceIndex] + g_Params.firstGeometryIndex;
@@ -499,12 +514,17 @@ float CalculateEdgeRates(LimitFrame limitFrame, uint32_t iSurface, uint32_t iLan
 #elif TESS_MODE == TESS_MODE_WORLD_SPACE_EDGE_LENGTH
     float diagonalLength = length(g_Params.aabb.Extent());
     return g_Params.fineTessellationRate * 1000.f / diagonalLength;
+#else // TESS_MODE_UNIFORM or other
+    return g_Params.fineTessellationRate;
 #endif
-    return -1;
 }
 
 uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, uint32_t iSurface, float visibility, float visibilityRateMultiplier)
 {
+    // BYPASS TESSELLATION: Force 8 segments per edge for testing
+    return iLane < 4 ? (uint16_t)8 : (uint16_t)0;
+
+#if 0 // Original tessellation code disabled for bypass testing
     uint32_t waveSampleOffset = kNumWaveSurfaceUVSamples * iWave;
 #if TESS_MODE == TESS_MODE_UNIFORM
     if (iLane < 4)
@@ -581,6 +601,7 @@ uint16_t EvaluateEdgeSegments(uint32_t iWave, uint32_t iLane, uint32_t iSurface,
     return iLane < 4 ? ((uint16_t)round(edgeSegments)) : 0;
 
 #endif
+#endif // End of #if 0 bypass block
 }
 
 void GathererWriteCluster(Cluster cluster, uint32_t clusterIndex, GridSampler gridSampler, uint32_t localGeometryIndex, nvrhi::GpuVirtualAddress templateAddress)
@@ -618,16 +639,14 @@ void WriteSurfaceWave(uint32_t iWave, uint32_t iLane, uint32_t iSurface, GridSam
 
     uint16_t2 surfaceSize = rSampler.GridSize();
 
-    // RTX MegaGeo fix: Skip degenerate surfaces with zero size to avoid
-    // GetTemplateIndex underflow crash (0-1 = 0xFFFF = out-of-bounds index)
+    // Skip degenerate surfaces with zero size
     if (surfaceSize.x == 0 || surfaceSize.y == 0)
     {
-        // Log skipped invisible surface (only lane 0 to avoid spam)
         if (iLane == 0)
         {
             SHADER_DEBUG_FORCE(uint4(0xDEAD0000, iSurface, surfaceSize.x, surfaceSize.y));
         }
-        return;  // No clusters to generate for invisible/culled surface
+        return;
     }
 
     SurfaceTiling surfaceTiling = MakeSurfaceTiling(surfaceSize);
@@ -812,16 +831,6 @@ void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
 
     SHADER_DEBUG_INIT(u_Debug, uint2(g_Params.debugSurfaceIndex, g_Params.debugLaneIndex), uint2(iSurface, iLane));
 
-    // Debug: Log surface info for first lane of first wave only to avoid spam
-    if (iLane == 0 && iWave == 0)
-    {
-        uint32_t field0 = t_VertexSurfaceDescriptors[iSurface].field0;
-        uint32_t hasLimit = t_VertexSurfaceDescriptors[iSurface].HasLimit() ? 1u : 0u;
-        SHADER_DEBUG_FORCE(uint4(iSurface, field0, hasLimit, g_Params.surfaceEnd));
-        // Debug struct alignment: print key fields to find offset mismatch
-        SHADER_DEBUG_FORCE(float4(g_Params.cameraPos.x, g_Params.cameraPos.y, g_Params.cameraPos.z, g_Params.aabb.m_min.x));
-        SHADER_DEBUG_FORCE(uint4(g_Params.firstGeometryIndex, g_Params.isolationLevel, asuint(g_Params.fineTessellationRate), asuint(g_Params.coarseTessellationRate)));
-    }
 
 #if ENABLE_GROUP_ATOMICS
     if (iLane == 0 && iWave == 0)
@@ -909,7 +918,6 @@ void main(uint3 threadIdx : SV_GroupThreadID, uint3 groupIdx : SV_GroupID)
         uint32_t triangles = 2u * (uint32_t)gridSize.x * (uint32_t)gridSize.y;
         SHADER_DEBUG_FORCE(uint4(iSurface, (uint32_t)rSampler.edgeSegments[0] | ((uint32_t)rSampler.edgeSegments[1] << 16),
                                  (uint32_t)rSampler.edgeSegments[2] | ((uint32_t)rSampler.edgeSegments[3] << 16), triangles));
-        // Debug the actual param values
         SHADER_DEBUG_FORCE(float4(g_Params.coarseTessellationRate, g_Params.fineTessellationRate, tessFactor, visibility));
         SHADER_DEBUG_FORCE(float4((float)gridSize.x, (float)gridSize.y, (float)g_Params.viewportSize.x, (float)g_Params.viewportSize.y));
     }

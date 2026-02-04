@@ -66,6 +66,11 @@ struct ComputeClusterTilingParams
     uint maxVertices;
     uint maxClasBlocks;
 
+    uint disableSubdivision;  // 1 = bypass stencil evaluation, use bilinear interpolation
+    uint pad3;
+    uint pad4;
+    uint pad5;
+
     nvrhi::GpuVirtualAddress clasDataBaseAddress;
     nvrhi::GpuVirtualAddress clusterVertexPositionsBaseAddress;
 };

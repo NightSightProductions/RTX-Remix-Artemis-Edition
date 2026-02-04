@@ -20,7 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 // Enable verbose MegaGeo logging for debugging (0=off for performance, 1=on for debugging)
-#define RTXMG_VERBOSE_LOGGING 0
+#define RTXMG_VERBOSE_LOGGING 1
 #if RTXMG_VERBOSE_LOGGING
 #define RTXMG_LOG(msg) Logger::info(msg)
 #else
@@ -465,10 +465,12 @@ namespace dxvk {
     config.enableLogging = false;  // DISABLED - causes GPU readback stalls (~1 second per frame)
     config.zbuffer = m_zBuffer.get();
     config.camera = &m_tessellationCamera;
-    // CRITICAL: Set isolation level for subdivision - 0 means no tessellation!
-    // Sample defaults to kMaxIsolationLevel (6). Higher = more subdivision detail.
-    // Using 3 instead of 6 to reduce triangle count and avoid performance issues
-    config.isolationLevel = 3;
+    config.isolationLevel = 0;  // Dynamic isolation level
+    config.disableSubdivision = false;
+
+    config.memorySettings.maxClusters = 64u * 1024u;
+    config.memorySettings.vertexBufferBytes = 32ull << 20;
+    config.memorySettings.clasBufferBytes = 96ull << 20;
 
     // Set viewport size from depth buffer - CRITICAL for tessellation rate calculations
     // Without this, viewportSize is {0,0} and edge tessellation rates are all 0, causing clusters=0
@@ -504,6 +506,7 @@ namespace dxvk {
 
       uint32_t instancesCreated = 0;
       uint32_t meshesNotReady = 0;
+      uint32_t meshesSkippedDegenerate = 0;
 
       // Rebuild instances only for surfaceIds that have transforms this frame
       for (const auto& [surfaceId, transform] : m_instanceTransforms) {
@@ -520,6 +523,22 @@ namespace dxvk {
         if (meshIndex >= m_scene->GetSubdMeshes().size()) {
           Logger::warn(str::format("RTX MegaGeo: Invalid meshIndex ", meshIndex, " for surfaceId ", surfaceId));
           continue;
+        }
+
+        // Check for degenerate/invalid AABB that could cause GPU crashes
+        SubdivisionSurface* meshForCheck = m_scene->GetSubdMeshes()[meshIndex];
+        if (meshForCheck) {
+          const box3& aabb = meshForCheck->m_aabb;
+          float extentX = aabb.m_maxs[0] - aabb.m_mins[0];
+          float extentY = aabb.m_maxs[1] - aabb.m_mins[1];
+          float extentZ = aabb.m_maxs[2] - aabb.m_mins[2];
+          bool isDegenerate = (extentX <= 0.0f || extentY <= 0.0f || extentZ <= 0.0f);
+          bool isInvalid = std::isnan(aabb.m_mins[0]) || std::isnan(aabb.m_maxs[0]) ||
+                           std::isinf(aabb.m_mins[0]) || std::isinf(aabb.m_maxs[0]);
+          if (isDegenerate || isInvalid) {
+            meshesSkippedDegenerate++;
+            continue;  // Skip to prevent GPU crashes
+          }
         }
 
         // Create instance for this surface with the proper transform
@@ -564,8 +583,8 @@ namespace dxvk {
 #endif
       }
 
-      RTXMG_LOG(str::format("RTX MegaGeo: Rebuilt ", instancesCreated, " instances (",
-          meshesNotReady, " meshes not ready)"));
+      Logger::info(str::format("RTX MegaGeo: Rebuilt ", instancesCreated, " instances (",
+          meshesNotReady, " not ready, ", meshesSkippedDegenerate, " skipped degenerate)"));
     } else {
       RTXMG_LOG("RTX MegaGeo: Scene is null, cannot rebuild instances");
     }
@@ -734,6 +753,28 @@ namespace dxvk {
 #endif
       } else {
         Logger::warn(str::format(">>> RTXMG: 0 clusters (desired: ", m_stats.numDesiredClusters, ") from ", m_surfaces.size(), " surfaces - CHECK TESSELLATION <<<"));
+      }
+    }
+
+    // Log cluster buffer status after build
+    {
+      static uint32_t s_bufDiagCount = 0;
+      if (s_bufDiagCount < 5) {
+        auto shadingBuf = getClusterShadingDataBuffer();
+        auto posBuf = getClusterVertexPositionsBuffer();
+        auto normBuf = getClusterVertexNormalsBuffer();
+        Logger::info(str::format("RTX MegaGeo POST-BUILD[", s_bufDiagCount, "]: shadingBuf=", (void*)shadingBuf.Get(),
+            " posBuf=", (void*)posBuf.Get(), " normBuf=", (void*)normBuf.Get()));
+
+        // Log BLAS addresses for first few surfaces
+        for (auto& [surfId, surfData] : m_surfaces) {
+          if (s_bufDiagCount == 0) {
+            VkDeviceAddress blasAddr = getSurfaceBlasAddress(surfId);
+            Logger::info(str::format("RTX MegaGeo POST-BUILD: surface[", surfId, "] blasAddr=0x", std::hex, blasAddr, std::dec));
+            if (surfId >= 5) break; // Only log first few
+          }
+        }
+        s_bufDiagCount++;
       }
     }
 
@@ -994,6 +1035,18 @@ namespace dxvk {
         maxPt.y = std::max(maxPt.y, p.y);
         maxPt.z = std::max(maxPt.z, p.z);
       }
+      // Ensure AABB has minimum extent to avoid degenerate acceleration structures
+      // Flat geometry (floors, walls) can have zero extent in one dimension which causes GPU hangs
+      const float kMinExtent = 0.001f;
+      for (int i = 0; i < 3; ++i) {
+        float extent = (&maxPt.x)[i] - (&minPt.x)[i];
+        if (extent < kMinExtent) {
+          float center = ((&maxPt.x)[i] + (&minPt.x)[i]) * 0.5f;
+          (&minPt.x)[i] = center - kMinExtent * 0.5f;
+          (&maxPt.x)[i] = center + kMinExtent * 0.5f;
+        }
+      }
+
       shape->aabb.m_mins[0] = minPt.x;
       shape->aabb.m_mins[1] = minPt.y;
       shape->aabb.m_mins[2] = minPt.z;
@@ -1403,6 +1456,42 @@ namespace dxvk {
       return 0;
     }
     return m_downloadedBlasAddresses[rtxmgInstanceIndex];
+  }
+
+  bool RtxMegaGeoBuilder::downloadBlasAddresses() {
+    if (!m_clusterAccels || m_clusterAccels->blasPtrsBuffer.GetBytes() == 0) {
+      Logger::warn("RTX MegaGeo: downloadBlasAddresses - no blasPtrsBuffer available");
+      return false;
+    }
+
+    if (!m_commandList) {
+      Logger::err("RTX MegaGeo: downloadBlasAddresses - no command list");
+      return false;
+    }
+
+    std::vector<nvrhi::GpuVirtualAddress> blasAddresses = m_clusterAccels->blasPtrsBuffer.Download(m_commandList.Get());
+
+    if (blasAddresses.empty()) {
+      Logger::err("RTX MegaGeo: downloadBlasAddresses - download returned empty");
+      return false;
+    }
+
+    m_downloadedBlasAddresses.resize(blasAddresses.size());
+    uint32_t nonZeroCount = 0;
+    for (size_t i = 0; i < blasAddresses.size(); ++i) {
+      m_downloadedBlasAddresses[i] = static_cast<VkDeviceAddress>(blasAddresses[i]);
+      if (m_downloadedBlasAddresses[i] != 0) nonZeroCount++;
+    }
+
+    Logger::info(str::format("RTX MegaGeo: Downloaded ", blasAddresses.size(), " BLAS addresses, ",
+        nonZeroCount, " non-zero"));
+
+    // Log first few for debugging
+    for (size_t i = 0; i < std::min<size_t>(5, blasAddresses.size()); ++i) {
+      Logger::info(str::format("RTX MegaGeo: BLAS[", i, "] = 0x", std::hex, m_downloadedBlasAddresses[i]));
+    }
+
+    return nonZeroCount > 0;
   }
 
 } // namespace dxvk

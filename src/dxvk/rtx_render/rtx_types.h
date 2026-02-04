@@ -760,6 +760,10 @@ struct BlasEntry {
   Type blasType = Type::TriangleBlas;
   class RtxMegaGeoBuilder* megaGeoBuilder = nullptr;  // Weak pointer - owned by RtxContext
   uint32_t megaGeoSurfaceId = 0;  // Surface ID within RtxMegaGeoBuilder
+  
+  // DEBUG FEATURE: When true, this BLAS was rejected by MegaGeo debug mode
+  // Used to hide instances that don't qualify for subdivision
+  bool isMegaGeoDebugRejected = false;
 
   BlasEntry() = default;
 

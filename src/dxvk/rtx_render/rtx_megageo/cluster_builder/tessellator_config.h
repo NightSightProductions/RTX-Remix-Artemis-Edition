@@ -92,6 +92,7 @@ struct TessellatorConfig
     bool  enableLogging = false; // enable debug logging for tessellator build
     bool  enableMonolithicClusterBuild = true;  // Must use monolithic - only one shader permutation is pre-compiled
     bool  enableVertexNormals = false; // enable vertex normal computation
+    bool  disableSubdivision = false; // bypass stencil evaluation, use bilinear interpolation of control points
 
     uint2            viewportSize = { 0u, 0u };
     uint4            edgeSegments = { 8, 8, 8, 8 };

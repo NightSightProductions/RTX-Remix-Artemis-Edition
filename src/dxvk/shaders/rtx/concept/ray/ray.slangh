@@ -315,6 +315,8 @@ vec3 rayEvaluate(Ray ray, float t)
     rayHitInfo.barycentricCoordinates = barycentricsToUint(barycentricCoordinates);                              \
     rayHitInfo.primitiveIndex = rayQueryGetIntersectionPrimitiveIndexEXT(rayQuery, true);                        \
     rayHitInfo.customIndex = rayQueryGetIntersectionInstanceCustomIndexEXT(rayQuery, true);                      \
+    rayHitInfo.geometryIndex = rayQueryGetIntersectionGeometryIndexEXT(rayQuery, true);                          \
+    rayHitInfo.clusterId = rayQueryGetIntersectionGeometryIndexEXT(rayQuery, true);                              \
     rayHitInfo.frontHit = rayQueryGetIntersectionFrontFaceEXT(rayQuery, true);                                   \
   }                                                                                                              \
                                                                                                                  \

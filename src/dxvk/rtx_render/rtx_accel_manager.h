@@ -193,6 +193,10 @@ private:
   // RTX Mega Geometry builder for cluster-based subdivision surface BLAS
   Rc<RtxMegaGeoBuilder> m_megaGeoBuilder;
 
+  // RTX Mega Geometry: Preserve transforms from previous frame for static geometry
+  // Static geometry instances get GC'd after 1 frame but we need to keep rendering them
+  std::unordered_map<uint32_t, Matrix4> m_prevMegaGeoTransforms;
+
 public:
   // RTX Mega Geometry accessor
   RtxMegaGeoBuilder* getMegaGeoBuilder() const { return m_megaGeoBuilder.ptr(); }

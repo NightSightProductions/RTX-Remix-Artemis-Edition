@@ -44,7 +44,9 @@ inline float3 quantize(float3 v, uint32_t nbits)
     return float3(quantize(v.x, nbits), quantize(v.y, nbits), quantize(v.z, nbits));
 }
 
+#ifndef assert
 #define assert(x)
+#endif
 
 #endif
 

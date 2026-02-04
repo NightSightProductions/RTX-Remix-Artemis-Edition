@@ -86,7 +86,7 @@ variableName.barycentricCoordinates = barycentricsToUint(rayQuery.CandidateTrian
 variableName.primitiveIndex = rayQuery.CandidatePrimitiveIndex();                                   \
 variableName.customIndex = rayQuery.CandidateInstanceID();                                          \
 variableName.geometryIndex = rayQuery.CandidateGeometryIndex();                                     \
-variableName.clusterId = 0xFFFFFFFF;                                                                \
+variableName.clusterId = rayQuery.CandidateGeometryIndex();                                         \
 variableName.frontHit = rayQuery.CandidateTriangleFrontFace();
 
 #define RAY_HIT_INFO_CREATE_RAY_QUERY_COMMITTED(variableName, rayQuery)                             \
@@ -97,5 +97,5 @@ variableName.barycentricCoordinates = barycentricsToUint(rayQuery.CommittedTrian
 variableName.primitiveIndex = rayQuery.CommittedPrimitiveIndex();                                   \
 variableName.customIndex = rayQuery.CommittedInstanceID();                                          \
 variableName.geometryIndex = rayQuery.CommittedGeometryIndex();                                     \
-variableName.clusterId = 0xFFFFFFFF;                                                                \
+variableName.clusterId = rayQuery.CommittedGeometryIndex();                                         \
 variableName.frontHit = rayQuery.CommittedTriangleFrontFace();

@@ -78,6 +78,38 @@ namespace dxvk {
     size_t getCachedDataSize() const { return m_cachedDataSize; }
     bool hasCachedData() const { return m_cachedDataSize > 0; }
 
+    // Volatile buffer support - host-visible ring buffer for constant buffers
+    bool isVolatile() const { return m_isVolatile; }
+    void setVolatile(uint32_t maxVersions, uint64_t perVersionSize) {
+      m_isVolatile = true;
+      m_maxVersions = maxVersions;
+      m_perVersionSize = perVersionSize;
+      m_currentVersion = 0;
+    }
+
+    // Write to the next version slot via mapped memory (no GPU commands needed)
+    // Returns the byte offset of the written version within the buffer
+    uint64_t writeVolatile(const void* data, size_t size) {
+      m_currentVersion = (m_currentVersion + 1) % m_maxVersions;
+      uint64_t offset = m_currentVersion * m_perVersionSize;
+
+      void* mapped = m_dxvkBuffer->mapPtr(offset);
+      if (mapped) {
+        memcpy(mapped, data, size);
+      }
+
+      // Also update cached data for push constants
+      setCachedData(data, size);
+
+      return offset;
+    }
+
+    uint64_t getCurrentVersionOffset() const {
+      return m_currentVersion * m_perVersionSize;
+    }
+
+    uint64_t getPerVersionSize() const { return m_perVersionSize; }
+
   private:
     nvrhi::BufferDesc m_desc;
     Rc<DxvkBuffer> m_dxvkBuffer;
@@ -85,6 +117,12 @@ namespace dxvk {
     // Cache for push constant data (max 128 bytes)
     uint8_t m_cachedData[128] = {};
     size_t m_cachedDataSize = 0;
+
+    // Volatile buffer state
+    bool m_isVolatile = false;
+    uint32_t m_maxVersions = 0;
+    uint64_t m_perVersionSize = 0;
+    uint32_t m_currentVersion = 0;
   };
 
 } // namespace dxvk

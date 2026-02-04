@@ -394,8 +394,8 @@ SurfaceInteraction surfaceInteractionCreateCluster<let GenerateTangents : bool>(
     surfaceInteraction.textureGradientY = (texcoords[2] - texcoords[0]) / 3.0f;
   }
 
-  // Default vertex color for cluster surfaces
-  surfaceInteraction.vertexColor = f16vec4(1.0, 1.0, 1.0, 1.0);
+  // DEBUG: Bright red vertex color for cluster surfaces to visually identify them
+  surfaceInteraction.vertexColor = f16vec4(1.0, 0.0, 0.0, 1.0);
 
   return surfaceInteraction;
 }

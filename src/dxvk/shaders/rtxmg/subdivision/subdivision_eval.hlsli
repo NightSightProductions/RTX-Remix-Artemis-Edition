@@ -251,7 +251,48 @@ struct SubdivisionEvaluatorHLSL
         else
             return EvaluateLimitSurface(uv);
     }
-    
+
+    // Bilinear interpolation of the 4 corner control points - bypasses subdivision
+    LimitFrame EvaluateBilinear(float2 uv)
+    {
+        SurfaceDescriptor desc = GetSurfaceDesc();
+
+        // Get the 4 corner control points (indices 0, 1, 2, 3)
+        float3 p00 = m_vertexControlPoints[m_vertexControlPointIndices[desc.firstControlPoint + 0]];
+        float3 p10 = m_vertexControlPoints[m_vertexControlPointIndices[desc.firstControlPoint + 1]];
+        float3 p11 = m_vertexControlPoints[m_vertexControlPointIndices[desc.firstControlPoint + 2]];
+        float3 p01 = m_vertexControlPoints[m_vertexControlPointIndices[desc.firstControlPoint + 3]];
+
+        float u = uv.x;
+        float v = uv.y;
+
+        // Bilinear weights
+        float w00 = (1.0f - u) * (1.0f - v);
+        float w10 = u * (1.0f - v);
+        float w11 = u * v;
+        float w01 = (1.0f - u) * v;
+
+        // Bilinear du weights (derivative with respect to u)
+        float du00 = -(1.0f - v);
+        float du10 = (1.0f - v);
+        float du11 = v;
+        float du01 = -v;
+
+        // Bilinear dv weights (derivative with respect to v)
+        float dv00 = -(1.0f - u);
+        float dv10 = -u;
+        float dv11 = u;
+        float dv01 = (1.0f - u);
+
+        LimitFrame limit;
+        limit.Clear();
+        limit.p = w00 * p00 + w10 * p10 + w11 * p11 + w01 * p01;
+        limit.deriv1 = du00 * p00 + du10 * p10 + du11 * p11 + du01 * p01;
+        limit.deriv2 = dv00 * p00 + dv10 * p10 + dv11 * p11 + dv01 * p01;
+
+        return limit;
+    }
+
     float3 GetPureBsplinePatchPoint(uint32_t i, uint32_t j)
     {
         int iWeight = 4 * j + i;

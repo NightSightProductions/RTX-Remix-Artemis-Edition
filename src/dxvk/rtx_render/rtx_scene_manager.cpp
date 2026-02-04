@@ -907,10 +907,25 @@ namespace dxvk {
     // RTX Mega Geometry: Try to create subdivision surface BEFORE processGeometryInfo
     // This is critical because processGeometryInfo queues GPU upload which makes the
     // original buffer data inaccessible (isPendingGpuWrite becomes true)
-    if (tryCreateSubdivisionSurface(ctx, drawCallState, pBlas)) {
+    
+    // DEBUG FEATURE: When enabled, meshes that don't qualify for MegaGeo subdivision will not be rendered at all
+    // This helps debug which meshes are being rejected by the subdivision system
+    static const bool s_debugRejectNonCandidates = false; // DISABLED - subdivision is disabled
+    
+    // Store rejection state for debug mode (used later to hide the instance)
+    pBlas->isMegaGeoDebugRejected = false;
+    
+    const bool isMegaGeoCandidate = tryCreateSubdivisionSurface(ctx, drawCallState, pBlas);
+    
+    if (isMegaGeoCandidate) {
       Logger::info(str::format("RTX MegaGeo: onSceneObjectAdded - subdivision surface created! pBlas=", (void*)pBlas,
                                " isClusterBlas=", pBlas->isClusterBlas(),
                                " hash=", std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
+    } else if (s_debugRejectNonCandidates) {
+      // Debug mode: Mark this BLAS as rejected so we can hide its instance later
+      Logger::info(str::format("RTX MegaGeo DEBUG: Rejecting non-candidate mesh. hash=", 
+                               std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
+      pBlas->isMegaGeoDebugRejected = true;
     }
 
     // This is a new object.
@@ -1038,6 +1053,13 @@ namespace dxvk {
 
     // Note: The material data can be modified in instance manager
     RtInstance* instance = m_instanceManager.processSceneObject(m_cameraManager, m_rayPortalManager, *pBlas, drawCallState, renderMaterialData, existingInstance);
+
+    // DEBUG FEATURE: Hide instances for meshes rejected by MegaGeo debug mode
+    if (instance && pBlas->isMegaGeoDebugRejected) {
+      instance->setHidden(true);
+      Logger::info(str::format("RTX MegaGeo DEBUG: Hiding rejected instance ", (void*)instance, 
+                               " for hash=", std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
+    }
 
     // RTX MegaGeo: Log instance-BLAS linking for ClusterBlas debugging
     if (pBlas->isClusterBlas() && instance) {
@@ -2049,6 +2071,28 @@ namespace dxvk {
       return false;
     }
 
+    // DIAGNOSTIC: Log the draw call's objectToWorld transform
+    // This is the transform that SHOULD be applied to the cluster geometry in TLAS
+    {
+      const Matrix4& objToWorld = drawCallState.getTransformData().objectToWorld;
+      static uint32_t transformLogCount = 0;
+      if (transformLogCount < 10) {
+        Logger::info(str::format("RTXMG CREATE: Draw call objectToWorld transform #", transformLogCount));
+        Logger::info(str::format("  row0=(", objToWorld.data[0][0], ",", objToWorld.data[0][1], ",", objToWorld.data[0][2], ",", objToWorld.data[0][3], ")"));
+        Logger::info(str::format("  row1=(", objToWorld.data[1][0], ",", objToWorld.data[1][1], ",", objToWorld.data[1][2], ",", objToWorld.data[1][3], ")"));
+        Logger::info(str::format("  row2=(", objToWorld.data[2][0], ",", objToWorld.data[2][1], ",", objToWorld.data[2][2], ",", objToWorld.data[2][3], ")"));
+        Logger::info(str::format("  row3=(", objToWorld.data[3][0], ",", objToWorld.data[3][1], ",", objToWorld.data[3][2], ",", objToWorld.data[3][3], ")"));
+        // Check for identity
+        bool isIdentity = (objToWorld.data[0][0] == 1.0f && objToWorld.data[1][1] == 1.0f && objToWorld.data[2][2] == 1.0f && objToWorld.data[3][3] == 1.0f) &&
+                          (objToWorld.data[0][1] == 0.0f && objToWorld.data[0][2] == 0.0f && objToWorld.data[0][3] == 0.0f) &&
+                          (objToWorld.data[1][0] == 0.0f && objToWorld.data[1][2] == 0.0f && objToWorld.data[1][3] == 0.0f) &&
+                          (objToWorld.data[2][0] == 0.0f && objToWorld.data[2][1] == 0.0f && objToWorld.data[2][3] == 0.0f) &&
+                          (objToWorld.data[3][0] == 0.0f && objToWorld.data[3][1] == 0.0f && objToWorld.data[3][2] == 0.0f);
+        Logger::info(str::format("  isIdentity=", isIdentity ? "YES (vertices already in world space)" : "NO (need transform)"));
+        transformLogCount++;
+      }
+    }
+
     // Cache by TOPOLOGY only (not vertex positions) for animated meshes!
     // Topology = indices + geometry descriptor (no positions)
     HashRule topologyRule = rules::TopologicalHash;
@@ -2114,6 +2158,16 @@ namespace dxvk {
         Logger::err("RTX MegaGeo: Builder is still null after initialization");
         return false;
       }
+      Logger::info(str::format("RTX MegaGeo: Builder initialized successfully, ptr=", (void*)megaGeoBuilder,
+          " via AccelManager=", (void*)&m_accelManager));
+    } else {
+      // Builder already exists - log that we're reusing it
+      static uint32_t s_reuseCount = 0;
+      s_reuseCount++;
+      if ((s_reuseCount % 100) == 1) {
+        Logger::info(str::format("RTX MegaGeo: Reusing existing builder ptr=", (void*)megaGeoBuilder,
+            " (reuse count=", s_reuseCount, ")"));
+      }
     }
 
     // Extract VERTEX data from ORIGINAL RasterGeometry (CPU-accessible, only on cache miss!)
@@ -2169,6 +2223,17 @@ namespace dxvk {
       for (uint32_t v = 0; v < vertexCount; ++v) {
         texcoords[v] = bufferData.getTexCoord(v);
       }
+      // Log first few texcoords for debugging
+      static uint32_t s_texcoordLogCount = 0;
+      if (s_texcoordLogCount < 5) {
+        uint32_t numToLog = std::min(vertexCount, 4u);
+        for (uint32_t v = 0; v < numToLog; ++v) {
+          Logger::info(str::format("RTX MegaGeo TEXCOORD[", s_texcoordLogCount, "] v", v, "=(", texcoords[v].x, ",", texcoords[v].y, ")"));
+        }
+        s_texcoordLogCount++;
+      }
+    } else {
+      Logger::warn("RTX MegaGeo: texcoordData is NULL - no texcoords for subdivision surface!");
     }
 
     // Extract normals from ORIGINAL buffer
@@ -2179,6 +2244,17 @@ namespace dxvk {
         const float* normPtr = bufferData.normalData + v * bufferData.normalStride;
         normals[v] = Vector3(normPtr[0], normPtr[1], normPtr[2]);
       }
+      // Log first few normals for debugging
+      static uint32_t s_normalLogCount = 0;
+      if (s_normalLogCount < 5) {
+        uint32_t numToLog = std::min(originalGeom.vertexCount, 4u);
+        for (uint32_t v = 0; v < numToLog; ++v) {
+          Logger::info(str::format("RTX MegaGeo NORMAL[", s_normalLogCount, "] v", v, "=(", normals[v].x, ",", normals[v].y, ",", normals[v].z, ")"));
+        }
+        s_normalLogCount++;
+      }
+    } else {
+      Logger::warn("RTX MegaGeo: normalData is NULL - no normals for subdivision surface!");
     }
 
     // Extract quad topology - copy index data to CPU for async processing

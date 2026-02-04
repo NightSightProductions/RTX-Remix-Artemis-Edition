@@ -472,30 +472,71 @@ namespace dxvk {
     // RTX Mega Geometry: Process completed surfaces and build cluster BLAS BEFORE the instance loop
     // This ensures surfaceId->instanceIndex mapping is populated before addBlas() is called
     // CRITICAL: buildClusterBlas must run BEFORE addBlas so getInstanceIndexForSurface works
+
+    // DIAGNOSTIC: Log builder state at entry to mergeInstancesIntoBlas
+    static uint32_t s_mergeCallCount = 0;
+    s_mergeCallCount++;
+    if ((s_mergeCallCount % 100) == 1) {  // Log first call and every 100th call
+      Logger::info(str::format("RTX MegaGeo mergeInstances: call#", s_mergeCallCount,
+          " m_megaGeoBuilder=", (void*)m_megaGeoBuilder.ptr(),
+          " this(AccelManager)=", (void*)this,
+          " instances.size()=", instances.size()));
+    }
+
     if (m_megaGeoBuilder != nullptr) {
       m_megaGeoBuilder->processCompletedSurfaces();
 
       // Collect transforms for all cluster BLAS instances FIRST
-      // IMPORTANT: Use getTransform() not surface.objectToWorld - the VkInstance has the actual world transform
+      // Note: Use getVkInstance().transform directly (row-major) instead of getTransform() (column-major)
+      // because MegaGeo's affineToColumnMajor expects row-major input
       std::unordered_map<uint32_t, Matrix4> surfaceTransforms;
       uint32_t clusterInstCount = 0;
       for (RtInstance* inst : instances) {
         if (inst && inst->getBlas() && inst->getBlas()->isClusterBlas()) {
           uint32_t surfaceId = inst->getBlas()->megaGeoSurfaceId;
-          // getTransform() returns the actual world transform from VkAccelerationStructureInstanceKHR
-          Matrix4 worldTransform = inst->getTransform();
+          // Build Matrix4 directly from VkTransformMatrixKHR (row-major) without transposing
+          // This matches what affineToColumnMajor expects
+          Matrix4 worldTransform = Matrix4(inst->getVkInstance().transform);
           surfaceTransforms[surfaceId] = worldTransform;
-          // Log first few to debug transform values
+          // Log first few to debug transform values (DXVK Matrix4: translation is in column 3, i.e., data[i][3])
           if (clusterInstCount < 3) {
             Vector3 worldPos = inst->getWorldPosition();
+            // VkTransformMatrixKHR has 3 rows of 4 floats: transform.matrix[row][col]
             Logger::info(str::format("RTX MegaGeo: Collecting transform surfaceId=", surfaceId,
-                " worldPos=(", worldPos.x, ",", worldPos.y, ",", worldPos.z, ")",
-                " row3=(", worldTransform.data[3][0], ",", worldTransform.data[3][1], ",", worldTransform.data[3][2], ")"));
+                " worldPos=(", worldPos.x, ",", worldPos.y, ",", worldPos.z, ")"));
+            Logger::info(str::format("  VkTransform row0=(", inst->getVkInstance().transform.matrix[0][0], ",", inst->getVkInstance().transform.matrix[0][1], ",", inst->getVkInstance().transform.matrix[0][2], ",", inst->getVkInstance().transform.matrix[0][3], ")"));
+            Logger::info(str::format("  VkTransform row1=(", inst->getVkInstance().transform.matrix[1][0], ",", inst->getVkInstance().transform.matrix[1][1], ",", inst->getVkInstance().transform.matrix[1][2], ",", inst->getVkInstance().transform.matrix[1][3], ")"));
+            Logger::info(str::format("  VkTransform row2=(", inst->getVkInstance().transform.matrix[2][0], ",", inst->getVkInstance().transform.matrix[2][1], ",", inst->getVkInstance().transform.matrix[2][2], ",", inst->getVkInstance().transform.matrix[2][3], ")"));
+            // Check if VK transform is identity
+            bool vkIsIdentity = (inst->getVkInstance().transform.matrix[0][0] == 1.0f &&
+                                 inst->getVkInstance().transform.matrix[1][1] == 1.0f &&
+                                 inst->getVkInstance().transform.matrix[2][2] == 1.0f) &&
+                                (inst->getVkInstance().transform.matrix[0][3] == 0.0f &&
+                                 inst->getVkInstance().transform.matrix[1][3] == 0.0f &&
+                                 inst->getVkInstance().transform.matrix[2][3] == 0.0f);
+            Logger::info(str::format("  VkTransform isIdentity=", vkIsIdentity ? "YES" : "NO"));
           }
           clusterInstCount++;
         }
       }
-      Logger::info(str::format("RTX MegaGeo: Collected ", clusterInstCount, " cluster instance transforms, unique=", surfaceTransforms.size()));
+
+      // RTX MegaGeo: Preserve transforms from previous frame for static geometry
+      // Static geometry instances get GC'd after 1 frame (numFramesToKeepInstances=1)
+      // but the subdivision surfaces persist - we need to keep rendering them
+      uint32_t preservedCount = 0;
+      for (const auto& [surfaceId, prevTransform] : m_prevMegaGeoTransforms) {
+        if (surfaceTransforms.find(surfaceId) == surfaceTransforms.end()) {
+          // Surface has no transform this frame - preserve the previous one
+          surfaceTransforms[surfaceId] = prevTransform;
+          preservedCount++;
+        }
+      }
+
+      // Store current transforms for next frame
+      m_prevMegaGeoTransforms = surfaceTransforms;
+
+      Logger::info(str::format("RTX MegaGeo: Collected ", clusterInstCount, " cluster instance transforms, unique=", surfaceTransforms.size() - preservedCount,
+          ", preserved=", preservedCount, ", total=", surfaceTransforms.size()));
 
       // Build cluster BLAS if we have any transforms
       if (!surfaceTransforms.empty()) {
@@ -516,7 +557,26 @@ namespace dxvk {
           // After this call, getInstanceIndexForSurface will return valid indices
           ONCE(Logger::info("RTX MegaGeo AccelManager: Calling buildClusterBlas (early, before instance loop)"));
           m_megaGeoBuilder->buildClusterBlas(rtxCtx, depthBuffer, camera, surfaceTransforms);
+
+          // Barrier: RTXMG compute writes → ray tracing shader reads
+          // BuildAccel writes to clusterVertexPositions, clusterVertexNormals, clusterShadingData
+          // via compute shaders. Ray tracing shaders read these as storage buffers.
+          // DXVK's resource tracking doesn't see NVRHI-side writes, so explicit barrier is needed.
+          ctx->emitMemoryBarrier(0,
+            VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT | VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
+            VK_ACCESS_SHADER_WRITE_BIT | VK_ACCESS_ACCELERATION_STRUCTURE_WRITE_BIT_KHR,
+            VK_PIPELINE_STAGE_RAY_TRACING_SHADER_BIT_KHR,
+            VK_ACCESS_SHADER_READ_BIT);
         }
+      }
+    } else {
+      // DIAGNOSTIC: Builder is null - this means no surfaces have been created yet
+      // or initialization failed. Log periodically to track state.
+      static uint32_t s_nullBuilderCount = 0;
+      s_nullBuilderCount++;
+      if ((s_nullBuilderCount % 100) == 1) {
+        Logger::info(str::format("RTX MegaGeo mergeInstances: builder is NULL (count=", s_nullBuilderCount,
+            ") - no surfaces created yet or init failed. instances.size()=", instances.size()));
       }
     }
 
@@ -590,13 +650,13 @@ namespace dxvk {
           continue;
         }
 
-        // Cluster surfaces need a valid surface index for shader lookup
-        // Without this, the shader would try to read from surfaces[65535] causing GPU page faults
-        if (instance->getSurfaceIndex() == BINDING_INDEX_INVALID) {
-          instance->setSurfaceIndex(m_reorderedSurfaces.size());
-          m_reorderedSurfaces.push_back(instance);
-          m_reorderedSurfacesFirstIndexOffset.push_back(0);
-        }
+        // Cluster surfaces need a valid surface index for shader lookup.
+        // CRITICAL: Must reassign every frame because m_reorderedSurfaces is cleared each frame.
+        // Using a stale surfaceIndex from a previous frame would point to the wrong Surface entry,
+        // causing the shader to read isClusterSurface=false and take the wrong geometry path.
+        instance->setSurfaceIndex(m_reorderedSurfaces.size());
+        m_reorderedSurfaces.push_back(instance);
+        m_reorderedSurfacesFirstIndexOffset.push_back(0);
 
         // Add directly to TLAS - the BLAS address will be patched on GPU later
         static uint32_t s_clusterAddCount = 0;
@@ -885,7 +945,7 @@ namespace dxvk {
                                " surfaceId=", blasEntry->megaGeoSurfaceId));
     }
     if (isClusterBlas && blasEntry->megaGeoBuilder) {
-      // Set placeholder - will be patched by patchClusterBlasAddresses()
+      // Set placeholder - will be patched by patchClusterBlasAddressesGPU()
       blasInstance.accelerationStructureReference = 0;
 
       // Get the RTXMG instance index for this surface
@@ -898,9 +958,6 @@ namespace dxvk {
 
         // Record the mapping for GPU-side patching
         m_clusterInstancePatches.push_back({remixIndex, rtxmgIndex, tlasType});
-
-        ONCE(RTXMG_LOG(str::format("RTX MegaGeo AccelManager: Tracking cluster instance for GPU patching: ",
-                                      "remix=", remixIndex, " rtxmg=", rtxmgIndex, " tlas=", (int)tlasType)));
       } else {
         Logger::warn(str::format("RTX MegaGeo AccelManager: No RTXMG instance index for surface ", blasEntry->megaGeoSurfaceId));
       }
@@ -923,6 +980,32 @@ namespace dxvk {
       // Note: Cluster vertices are stored in LOCAL space by fill_clusters.
       // The TLAS instance transform (inherited from the RtInstance) transforms rays to local space.
       // The shader must transform vertex positions by surface.objectToWorld when reading them.
+
+      // Comprehensive logging for cluster instance debugging
+      static uint32_t s_clusterAddBlasLog = 0;
+      if (s_clusterAddBlasLog < 10) {
+        const auto& xform = blasInstance.transform;
+        Logger::info(str::format("RTX MegaGeo addBlas[", s_clusterAddBlasLog, "]: ",
+            " customIndex=0x", std::hex, blasInstance.instanceCustomIndex, std::dec,
+            " surfaceIdx=", surfaceIndexForCustomIndex,
+            " mask=", blasInstance.mask,
+            " sbtOffset=", blasInstance.instanceShaderBindingTableRecordOffset,
+            " flags=", blasInstance.flags,
+            " blasAddr=", blasInstance.accelerationStructureReference));
+        Logger::info(str::format("  transform row0=(", xform.matrix[0][0], ",", xform.matrix[0][1], ",", xform.matrix[0][2], ",", xform.matrix[0][3], ")"));
+        Logger::info(str::format("  transform row1=(", xform.matrix[1][0], ",", xform.matrix[1][1], ",", xform.matrix[1][2], ",", xform.matrix[1][3], ")"));
+        Logger::info(str::format("  transform row2=(", xform.matrix[2][0], ",", xform.matrix[2][1], ",", xform.matrix[2][2], ",", xform.matrix[2][3], ")"));
+        // Log the objectToWorld matrix for comparison
+        const auto& m = instance->surface.objectToWorld;
+        Logger::info(str::format("  objectToWorld row0=(", m.data[0][0], ",", m.data[0][1], ",", m.data[0][2], ",", m.data[0][3], ")"));
+        Logger::info(str::format("  objectToWorld row1=(", m.data[1][0], ",", m.data[1][1], ",", m.data[1][2], ",", m.data[1][3], ")"));
+        Logger::info(str::format("  objectToWorld row2=(", m.data[2][0], ",", m.data[2][1], ",", m.data[2][2], ",", m.data[2][3], ")"));
+        Logger::info(str::format("  objectToWorld row3=(", m.data[3][0], ",", m.data[3][1], ",", m.data[3][2], ",", m.data[3][3], ")"));
+        Logger::info(str::format("  isClusterSurface=", instance->surface.isClusterSurface,
+            " indexBufferIndex=", instance->surface.indexBufferIndex,
+            " positionBufferIndex=", instance->surface.positionBufferIndex));
+        s_clusterAddBlasLog++;
+      }
     }
 
     if (instanceToObject) {
@@ -1145,7 +1228,8 @@ namespace dxvk {
 
     // Allocate the instance buffer and copy its contents from host to device memory
     DxvkBufferCreateInfo info = { VK_STRUCTURE_TYPE_BUFFER_CREATE_INFO };
-    info.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR;
+    info.usage = VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT | VK_BUFFER_USAGE_ACCELERATION_STRUCTURE_BUILD_INPUT_READ_ONLY_BIT_KHR
+               | VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;  // RTX MegaGeo: needed for GPU-side cluster BLAS address patching (RWStructuredBuffer)
     info.stages = VK_PIPELINE_STAGE_TRANSFER_BIT;
     info.access = VK_ACCESS_TRANSFER_WRITE_BIT;
 
@@ -1173,8 +1257,6 @@ namespace dxvk {
     // RTX Mega Geometry: Patch cluster BLAS addresses directly on GPU
     // This is done AFTER uploading instance data so we can patch in-place
     if (!m_clusterInstancePatches.empty() && m_megaGeoBuilder != nullptr) {
-      RTXMG_LOG(str::format("RTX MegaGeo AccelManager: GPU-side patching ", m_clusterInstancePatches.size(), " cluster BLAS addresses"));
-
       // Create NVRHI wrapper for the instance buffer
       nvrhi::BufferDesc wrapperDesc;
       wrapperDesc.byteSize = m_vkInstanceBuffer->info().size;
@@ -1185,8 +1267,6 @@ namespace dxvk {
       nvrhi::BufferHandle instanceBufferWrapper = new NvrhiDxvkBuffer(wrapperDesc, m_vkInstanceBuffer);
 
       // Prepare mappings - need to account for TLAS offsets
-      // Opaque instances start at offset 0
-      // Unordered instances start after all Opaque instances
       uint32_t opaqueCount = static_cast<uint32_t>(m_mergedInstances[Tlas::Opaque].size());
 
       std::vector<RtxMegaGeoBuilder::InstancePatchMapping> mappings;
@@ -1194,24 +1274,19 @@ namespace dxvk {
       for (const auto& patch : m_clusterInstancePatches) {
         uint32_t globalIndex = patch.remixInstanceIndex;
         if (patch.tlasType == Tlas::Unordered) {
-          globalIndex += opaqueCount; // Offset for unordered instances
+          globalIndex += opaqueCount;
         }
         mappings.push_back({globalIndex, patch.rtxmgInstanceIndex});
       }
 
-      // Call GPU-side patching
-      RTXMG_LOG(str::format("RTX MegaGeo AccelManager: About to patch ", mappings.size(), " cluster BLAS addresses"));
       m_megaGeoBuilder->patchClusterBlasAddressesGPU(instanceBufferWrapper.Get(), 0, mappings);
-      RTXMG_LOG("RTX MegaGeo AccelManager: patchClusterBlasAddressesGPU returned");
 
       // Barrier to ensure patching completes before TLAS build
-      RTXMG_LOG("RTX MegaGeo AccelManager: Emitting barrier after patching");
       ctx->emitMemoryBarrier(0,
         VK_PIPELINE_STAGE_COMPUTE_SHADER_BIT,
         VK_ACCESS_SHADER_WRITE_BIT,
         VK_PIPELINE_STAGE_ACCELERATION_STRUCTURE_BUILD_BIT_KHR,
         VK_ACCESS_ACCELERATION_STRUCTURE_READ_BIT_KHR);
-      RTXMG_LOG("RTX MegaGeo AccelManager: Barrier after patching emitted");
     }
 
     // Vk billboard buffer
@@ -1341,6 +1416,26 @@ namespace dxvk {
     for (uint32_t i = 0; i < m_reorderedSurfaces.size(); ++i) {
       const auto& currentInstance = *m_reorderedSurfaces[i];
       RtSurface& currentSurface = m_reorderedSurfaces[i]->surface;
+
+      // Log cluster surface data being uploaded
+      if (currentSurface.isClusterSurface) {
+        static uint32_t s_clusterSurfUploadLog = 0;
+        if (s_clusterSurfUploadLog < 10) {
+          const auto& m = currentSurface.objectToWorld;
+          Logger::info(str::format("RTX MegaGeo uploadSurface[", i, "]: isCluster=", currentSurface.isClusterSurface,
+              " posBuffIdx=", currentSurface.positionBufferIndex,
+              " posOffset=", currentSurface.positionOffset,
+              " prevPosBuffIdx=", currentSurface.previousPositionBufferIndex,
+              " normalBuffIdx=", currentSurface.normalBufferIndex,
+              " color0BuffIdx=", currentSurface.color0BufferIndex,
+              " idxBuffIdx=", currentSurface.indexBufferIndex,
+              " idxStride=", currentSurface.indexStride,
+              " firstIdx=", currentSurface.firstIndex));
+          Logger::info(str::format("  objectToWorld row0=(", m.data[0][0], ",", m.data[0][1], ",", m.data[0][2], ",", m.data[0][3], ")"));
+          Logger::info(str::format("  objectToWorld row3=(", m.data[3][0], ",", m.data[3][1], ",", m.data[3][2], ",", m.data[3][3], ")"));
+          s_clusterSurfUploadLog++;
+        }
+      }
 
       // Split instance geometry need to have their first index offset set in their corresponding surface instances
       currentSurface.firstIndex += m_reorderedSurfacesFirstIndexOffset[i];
