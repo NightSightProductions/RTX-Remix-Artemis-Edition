@@ -1,11 +1,3 @@
-// Disable verbose MegaGeo logging
-#define RTXMG_VERBOSE_LOGGING 0
-#if RTXMG_VERBOSE_LOGGING
-#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
-#else
-#define RTXMG_LOG(msg) ((void)0)
-#endif
-
 /*
  * Copyright (c) 2024, NVIDIA CORPORATION. All rights reserved.
  *
@@ -51,6 +43,7 @@
 #include "../hiz/hiz_buffer_constants.h"
 
 #include <cstring>
+#include "../rtxmg_log.h"
 
 namespace donut {
 namespace engine {
@@ -230,7 +223,7 @@ void ShaderFactory::ensureHiZDescriptorSetLayout() {
 
   VkResult result = vkCreateDescriptorSetLayout(m_vkDevice, &layoutInfo, nullptr, &m_hiZDescriptorSetLayout);
   if (result == VK_SUCCESS && m_hiZDescriptorSetLayout != VK_NULL_HANDLE) {
-    dxvk::Logger::info(dxvk::str::format("ShaderFactory: Created HiZ descriptor set layout ", (void*)m_hiZDescriptorSetLayout,
+    RTXMG_LOG(dxvk::str::format("ShaderFactory: Created HiZ descriptor set layout ", (void*)m_hiZDescriptorSetLayout,
       " with ", HIZ_MAX_LODS, " SAMPLED_IMAGE bindings at binding 0"));
   } else {
     dxvk::Logger::err(dxvk::str::format("ShaderFactory: Failed to create HiZ descriptor set layout, result=", (int)result));
@@ -368,7 +361,7 @@ nvrhi::ShaderHandle ShaderFactory::CreateShader(
   }
 
   dxvkShader->setDebugName(path);
-  dxvk::Logger::info(dxvk::str::format("ShaderFactory: Created shader '", path, "' with ", slotCount, " resource slots"));
+  RTXMG_LOG(dxvk::str::format("ShaderFactory: Created shader '", path, "' with ", slotCount, " resource slots"));
 
   return new dxvk::NvrhiDxvkShader(dxvkShader);
 }

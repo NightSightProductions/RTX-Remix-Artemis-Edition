@@ -50,12 +50,6 @@ struct TopologyMap
     nvrhi::BufferHandle stencilMatrixArraysBuffer;
     nvrhi::BufferHandle plansBuffer;
 
-    // TODO: Add bindless descriptor support if needed for RTX Remix integration
-    // donut::engine::DescriptorHandle subpatchTreesDescriptor;
-    // donut::engine::DescriptorHandle patchPointIndicesDescriptor;
-    // donut::engine::DescriptorHandle stencilMatrixDescriptor;
-    // donut::engine::DescriptorHandle plansDescriptor;
-
     std::unique_ptr<OpenSubdiv::OPENSUBDIV_VERSION::Tmr::TopologyMap>
         aTopologyMap;
 

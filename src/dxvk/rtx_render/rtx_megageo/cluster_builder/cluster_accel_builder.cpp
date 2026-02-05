@@ -24,14 +24,6 @@
 // (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
 // OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
 
-// Enable verbose MegaGeo logging for debugging (0=off for performance, 1=on for debugging)
-#define RTXMG_VERBOSE_LOGGING 1
-#if RTXMG_VERBOSE_LOGGING
-#define RTXMG_LOG(msg) Logger::info(msg)
-#else
-#define RTXMG_LOG(msg) ((void)0)
-#endif
-
 // Enable chrono timing for performance profiling (set to 1 to enable)
 #define RTXMG_CHRONO_TIMING 1
 
@@ -96,6 +88,7 @@ using namespace dxvk;
 
 #include "../subdivision/subdivision_surface.h"
 #include "../subdivision/topology_map.h"
+#include "../rtxmg_log.h"
 
 using namespace donut;
 using namespace nvrhi::rt;
@@ -219,7 +212,6 @@ inline char const* toString(ShaderPermutationSurfaceType surfaceType)
 {
     return kSurfaceTypeDefines[uint32_t(surfaceType)];
 }
-
 
 void ClusterAccelBuilder::FillInstantiateTemplateArgs(nvrhi::IBuffer* outArgs, nvrhi::IBuffer* templateAddresses, uint32_t numTemplates, nvrhi::ICommandList* commandList)
 {
@@ -819,7 +811,7 @@ void ClusterAccelBuilder::BuildStructuredCLASes(ClusterAccels& accels, uint32_t 
     RTXMG_LOG(str::format("RTX MegaGeo: BuildStructuredCLASes - scratchSizeInBytes=", sizeInfo.scratchSizeInBytes));
 
     uint64_t countBufferOffset = tessCounterRange.byteOffset + kClusterCountByteOffset;
-    Logger::info(str::format("RTX MegaGeo: BuildStructuredCLASes - countBuffer offset calculation:",
+    RTXMG_LOG(str::format("RTX MegaGeo: BuildStructuredCLASes - countBuffer offset calculation:",
         " tessCounterRange.byteOffset=", tessCounterRange.byteOffset,
         " kClusterCountByteOffset=", kClusterCountByteOffset,
         " TOTAL offset=", countBufferOffset));
@@ -844,12 +836,12 @@ void ClusterAccelBuilder::BuildStructuredCLASes(ClusterAccels& accels, uint32_t 
     {
         auto clasIndirectArgs = m_clasIndirectArgDataBuffer.Download(commandList);
         uint32_t numToLog = std::min(uint32_t(clasIndirectArgs.size()), 10u);
-        Logger::info(str::format("RTX MegaGeo: CLAS indirect args before build (first ", numToLog, " of ", clasIndirectArgs.size(), "):"));
+        RTXMG_LOG(str::format("RTX MegaGeo: CLAS indirect args before build (first ", numToLog, " of ", clasIndirectArgs.size(), "):"));
         for (uint32_t i = 0; i < numToLog; ++i) {
             const auto& arg = clasIndirectArgs[i];
             bool templateAligned = (arg.clusterTemplate % 128 == 0);
             bool vertexAligned = (arg.vertexBuffer.startAddress % 16 == 0);
-            Logger::info(str::format("  [", i, "] clusterIdOff=", arg.clusterIdOffset,
+            RTXMG_LOG(str::format("  [", i, "] clusterIdOff=", arg.clusterIdOffset,
                 " geomIdxPacked=", arg.geometryIndexOffsetPacked,
                 " template=0x", std::hex, arg.clusterTemplate, " (128-aligned=", templateAligned ? "YES" : "NO", ")",
                 " vertexAddr=0x", arg.vertexBuffer.startAddress, " (16-aligned=", vertexAligned ? "YES" : "NO", ")",
@@ -864,10 +856,10 @@ void ClusterAccelBuilder::BuildStructuredCLASes(ClusterAccels& accels, uint32_t 
     {
         auto clasPtrs = accels.clasPtrsBuffer.Download(commandList);
         uint32_t numToLog = std::min(uint32_t(clasPtrs.size()), 10u);
-        Logger::info(str::format("RTX MegaGeo: CLAS pointers after build (first ", numToLog, " of ", clasPtrs.size(), "):"));
+        RTXMG_LOG(str::format("RTX MegaGeo: CLAS pointers after build (first ", numToLog, " of ", clasPtrs.size(), "):"));
         for (uint32_t i = 0; i < numToLog; ++i) {
             bool aligned128 = (clasPtrs[i] % 128 == 0);
-            Logger::info(str::format("  [", i, "] 0x", std::hex, clasPtrs[i], std::dec,
+            RTXMG_LOG(str::format("  [", i, "] 0x", std::hex, clasPtrs[i], std::dec,
                 " aligned(128)=", aligned128 ? "YES" : "NO"));
         }
     }
@@ -959,7 +951,7 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
 
             // Log buffer info for first instance only
             if (instanceIndex == 0) {
-                dxvk::Logger::info(dxvk::str::format("RTX MegaGeo DEBUG: Instance 0 buffers OK, surfaceCount=", surfaceCount,
+                RTXMG_LOG(dxvk::str::format("RTX MegaGeo DEBUG: Instance 0 buffers OK, surfaceCount=", surfaceCount,
                     " surfaceOffset=", surfaceOffset, " gridSamplerStride=", m_gridSamplersBuffer.GetElementBytes()));
             }
         }
@@ -1159,7 +1151,7 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             m_tessellatorConfig.debugClusterIndex >= 0 &&
             m_tessellatorConfig.debugLaneIndex >= 0)
         {
-            Logger::info(str::format("Fill Clusters Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name, " (Surface:", m_tessellatorConfig.debugSurfaceIndex,
+            RTXMG_LOG(str::format("Fill Clusters Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name, " (Surface:", m_tessellatorConfig.debugSurfaceIndex,
                 " Cluster:", m_tessellatorConfig.debugClusterIndex, " Lane:", m_tessellatorConfig.debugLaneIndex, ")"));
 
             auto debugOutput = m_debugBuffer.Download(commandList);
@@ -1171,7 +1163,7 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
         // ShaderDebugElement has: float4 floatData (px,py,pz,uvx), uint4 uintData (surf,cluster,pt,uvy_bits), payloadType, lineNumber
         {
             auto debugOutput = m_debugBuffer.Download(commandList);
-            Logger::info("=== DEBUG: Fill Clusters Vertex Positions ===");
+            RTXMG_LOG("=== DEBUG: Fill Clusters Vertex Positions ===");
             for (int i = 1; i < 16 && i < (int)debugOutput.size(); i++) { // Start at 1 (skip counter slot)
                 const auto& d = debugOutput[i];
                 float px = d.floatData.x;
@@ -1183,10 +1175,10 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
                 uint32_t ptIdx = d.uintData.z;
                 float uvy = *reinterpret_cast<const float*>(&d.uintData.w);
                 if (d.payloadType != 0) {
-                    Logger::info(str::format("  [", i, "] pos=(", px, ",", py, ",", pz, ") uv=(", uvx, ",", uvy, ") surf=", surfIdx, " cluster=", clustIdx, " pt=", ptIdx));
+                    RTXMG_LOG(str::format("  [", i, "] pos=(", px, ",", py, ",", pz, ") uv=(", uvx, ",", uvy, ") surf=", surfIdx, " cluster=", clustIdx, " pt=", ptIdx));
                 }
             }
-            Logger::info("=== END DEBUG ===");
+            RTXMG_LOG("=== END DEBUG ===");
         }
 #if RTXMG_CHRONO_TIMING
         auto instEnd = std::chrono::high_resolution_clock::now();
@@ -1198,7 +1190,7 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
 #if RTXMG_CHRONO_TIMING
     auto fillEnd = std::chrono::high_resolution_clock::now();
     float totalMs = std::chrono::duration_cast<std::chrono::microseconds>(fillEnd - fillStart).count() * 0.001f;
-    Logger::info(str::format(">>> RTXMG CHRONO: FillInstanceClusters TOTAL=", totalMs, "ms binding=", bindingTimeMs, "ms dispatch=", dispatchTimeMs, "ms instances=", maxInstances));
+    RTXMG_LOG(str::format(">>> RTXMG CHRONO: FillInstanceClusters TOTAL=", totalMs, "ms binding=", bindingTimeMs, "ms dispatch=", dispatchTimeMs, "ms instances=", maxInstances));
 #endif
 }
 
@@ -1323,7 +1315,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 
     // Log key parameters once per frame (instance 0 only) for debugging screenspace tessellation
     if (instanceIndex == 0) {
-        Logger::info(str::format(">>> RTXMG PARAMS: viewport=(", params.viewportSize.x, ",", params.viewportSize.y,
+        RTXMG_LOG(str::format(">>> RTXMG PARAMS: viewport=(", params.viewportSize.x, ",", params.viewportSize.y,
             ") tessRate=", params.fineTessellationRate, " isolation=", params.isolationLevel));
     }
 
@@ -1388,7 +1380,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     params.edgeSegments = m_tessellatorConfig.edgeSegments;
     params.globalDisplacementScale = m_tessellatorConfig.displacementScale;
 
-    ONCE(Logger::info(str::format("RTX MegaGeo: Visibility params - frustum=", params.enableFrustumVisibility,
+    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: Visibility params - frustum=", params.enableFrustumVisibility,
         " backface=", params.enableBackfaceVisibility, " HiZ=", params.enableHiZVisibility,
         " edgeSegments=(", params.edgeSegments.x, ",", params.edgeSegments.y, ",", params.edgeSegments.z, ",", params.edgeSegments.w, ")")));
 
@@ -1400,15 +1392,15 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     params.disableSubdivision = m_tessellatorConfig.disableSubdivision ? 1 : 0;
 
     // STRUCT ALIGNMENT DEBUG - always log to diagnose shader mismatch
-    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG sizeof(ComputeClusterTilingParams)=", sizeof(ComputeClusterTilingParams))));
-    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(disableSubdivision)=", offsetof(ComputeClusterTilingParams, disableSubdivision),
+    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG sizeof(ComputeClusterTilingParams)=", sizeof(ComputeClusterTilingParams))));
+    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG offset(disableSubdivision)=", offsetof(ComputeClusterTilingParams, disableSubdivision),
         " offset(clasDataBaseAddress)=", offsetof(ComputeClusterTilingParams, clasDataBaseAddress),
         " offset(clusterVertexPositionsBaseAddress)=", offsetof(ComputeClusterTilingParams, clusterVertexPositionsBaseAddress))));
-    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(globalDisplacementScale)=", offsetof(ComputeClusterTilingParams, globalDisplacementScale),
+    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG offset(globalDisplacementScale)=", offsetof(ComputeClusterTilingParams, globalDisplacementScale),
         " offset(maxClusters)=", offsetof(ComputeClusterTilingParams, maxClusters),
         " offset(maxVertices)=", offsetof(ComputeClusterTilingParams, maxVertices),
         " offset(maxClasBlocks)=", offsetof(ComputeClusterTilingParams, maxClasBlocks))));
-    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG disableSubdivision VALUE=", params.disableSubdivision,
+    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG disableSubdivision VALUE=", params.disableSubdivision,
         " (config=", m_tessellatorConfig.disableSubdivision ? "true" : "false", ")")));
 
     // Safety check: if clasDataBaseAddress is 0, all CLAS addresses will be invalid
@@ -1647,7 +1639,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
 
     // Log tessellation mode once per frame (instance 0 only) for debugging screenspace approach
     if (instanceIndex == 0) {
-        Logger::info(str::format("RTX MegaGeo: TessellationMode=", toString(shaderPermutation.tessellationMode()),
+        RTXMG_LOG(str::format("RTX MegaGeo: TessellationMode=", toString(shaderPermutation.tessellationMode()),
             " (SCREENSPACE: uses clip.w for LOD, NOT cameraPos)",
             " backface=", m_tessellatorConfig.enableBackfaceVisibility ? "YES (uses clip-space normal)" : "NO",
             " frustum=", m_tessellatorConfig.enableFrustumVisibility ? "YES" : "NO",
@@ -1717,7 +1709,7 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         {
             uint32_t surfaceCount = subdivisionSurface.m_surfaceCount;
             uint32_t noLimitOffset = subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
-            ONCE(Logger::info(str::format("RTX MegaGeo: disableSubdivision=", m_tessellatorConfig.disableSubdivision ? "YES" : "NO",
+            ONCE(RTXMG_LOG(str::format("RTX MegaGeo: disableSubdivision=", m_tessellatorConfig.disableSubdivision ? "YES" : "NO",
                 " surfaceStart=", params.surfaceStart, " surfaceEnd=", params.surfaceEnd,
                 " surfaceCount=", surfaceCount, " NoLimitOffset=", noLimitOffset)));
         }
@@ -1795,19 +1787,19 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     // Debug output download disabled for performance - enable ENABLE_SHADER_DEBUG to use
 #if ENABLE_SHADER_DEBUG
     {
-        Logger::info(str::format("RTX MegaGeo: Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name));
+        RTXMG_LOG(str::format("RTX MegaGeo: Debug Instance:", instanceIndex, " Mesh:", donutMeshInfo.name));
 
         auto debugOutput = m_debugBuffer.Download(commandList);
         uint numElements = debugOutput.front().payloadType;
-        Logger::info(str::format("RTX MegaGeo: Debug buffer numElements=", numElements));
+        RTXMG_LOG(str::format("RTX MegaGeo: Debug buffer numElements=", numElements));
 
         for (uint32_t i = 1; i <= std::min(numElements, 40u); ++i) {
             const auto& elem = debugOutput[i];
             if (elem.payloadType >= 9 && elem.payloadType <= 12) {
-                Logger::info(str::format("RTX MegaGeo: Debug[", i, "] line=", elem.lineNumber,
+                RTXMG_LOG(str::format("RTX MegaGeo: Debug[", i, "] line=", elem.lineNumber,
                     " floats=[", elem.floatData.x, ",", elem.floatData.y, ",", elem.floatData.z, ",", elem.floatData.w, "]"));
             } else {
-                Logger::info(str::format("RTX MegaGeo: Debug[", i, "] line=", elem.lineNumber,
+                RTXMG_LOG(str::format("RTX MegaGeo: Debug[", i, "] line=", elem.lineNumber,
                     " vals=[", elem.uintData.x, ",", elem.uintData.y, ",", elem.uintData.z, ",", elem.uintData.w, "]"));
             }
         }
@@ -1903,7 +1895,7 @@ void ClusterAccelBuilder::BuildBlasFromClas(ClusterAccels& accels, const Instanc
     nvrhi::GpuVirtualAddress clasPtrsBaseAddress = accels.clasPtrsBuffer.GetGpuVirtualAddress();
 
     // Always log critical addresses for debugging GPU crashes
-    Logger::info(str::format("RTX MegaGeo: BuildBlasFromClas - clasPtrsBaseAddress=0x", std::hex, clasPtrsBaseAddress,
+    RTXMG_LOG(str::format("RTX MegaGeo: BuildBlasFromClas - clasPtrsBaseAddress=0x", std::hex, clasPtrsBaseAddress,
         " numInstances=", std::dec, numInstances,
         " clasPtrsBuffer.size=", accels.clasPtrsBuffer.GetBytes(),
         " clusterOffsetCountsBuffer.size=", m_clusterOffsetCountsBuffer.GetBytes()));
@@ -1947,11 +1939,11 @@ void ClusterAccelBuilder::BuildBlasFromClas(ClusterAccels& accels, const Instanc
         auto blasIndirectArgs = m_blasFromClasIndirectArgsBuffer.Download(commandList);
         uint32_t numToLog = std::min(uint32_t(blasIndirectArgs.size()), numInstances);
         numToLog = std::min(numToLog, 10u); // Limit to first 10
-        Logger::info(str::format("RTX MegaGeo: BLAS indirect args (first ", numToLog, " of ", numInstances, "):"));
+        RTXMG_LOG(str::format("RTX MegaGeo: BLAS indirect args (first ", numToLog, " of ", numInstances, "):"));
         for (uint32_t i = 0; i < numToLog; ++i) {
             const auto& arg = blasIndirectArgs[i];
             bool aligned128 = (arg.clusterAddresses % 128 == 0);
-            Logger::info(str::format("  [", i, "] clusterCount=", arg.clusterCount,
+            RTXMG_LOG(str::format("  [", i, "] clusterCount=", arg.clusterCount,
                 " clusterAddresses=0x", std::hex, arg.clusterAddresses,
                 std::dec, " stride=", arg.clusterReferencesStride,
                 " aligned(128)=", aligned128 ? "YES" : "NO"));
@@ -2026,20 +2018,20 @@ void ClusterAccelBuilder::UpdateMemoryAllocations(ClusterAccels& accels, uint32_
     }
 
     // Log which conditions triggered reallocation (helps debug frequent stalls)
-    Logger::info(str::format("RTX MegaGeo: UpdateMemoryAllocations triggered - "
+    RTXMG_LOG(str::format("RTX MegaGeo: UpdateMemoryAllocations triggered - "
         "numInst=", numInstancesChanged, " subdPatches=", sceneSubdPatchesChanged,
         " clusters=", numClustersChanged, " clasBytes=", clasBytesChanged,
         " vertices=", maxVerticesChanged, " normals=", enableVertexNormalsChanged));
     if (numInstancesChanged)
-        Logger::info(str::format("  numInstances: ", oldNumInstances, " -> ", numInstances));
+        RTXMG_LOG(str::format("  numInstances: ", oldNumInstances, " -> ", numInstances));
     if (sceneSubdPatchesChanged)
-        Logger::info(str::format("  sceneSubdPatches: ", oldSceneSubdPatches, " -> ", sceneSubdPatches));
+        RTXMG_LOG(str::format("  sceneSubdPatches: ", oldSceneSubdPatches, " -> ", sceneSubdPatches));
     if (numClustersChanged)
-        Logger::info(str::format("  maxClusters: ", oldMaxClusters, " -> ", maxClusters));
+        RTXMG_LOG(str::format("  maxClusters: ", oldMaxClusters, " -> ", maxClusters));
     if (clasBytesChanged)
-        Logger::info(str::format("  maxClasBytes: ", oldMaxClasBytes, " -> ", maxClasBytes));
+        RTXMG_LOG(str::format("  maxClasBytes: ", oldMaxClasBytes, " -> ", maxClasBytes));
     if (maxVerticesChanged)
-        Logger::info(str::format("  maxVertices: ", oldMaxVertices, " -> ", maxVertices));
+        RTXMG_LOG(str::format("  maxVertices: ", oldMaxVertices, " -> ", maxVertices));
 
     // ==========================================================================
     // DEFERRED DESTRUCTION - NO waitForIdle() anywhere!
@@ -2347,7 +2339,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     auto afterMemAlloc = std::chrono::high_resolution_clock::now();
     float memAllocMs = std::chrono::duration_cast<std::chrono::microseconds>(afterMemAlloc - setupStart).count() * 0.001f;
     if (memAllocMs > 1.0f) {
-        Logger::info(str::format(">>> RTXMG CHRONO: UpdateMemoryAllocations=", memAllocMs, "ms (SLOW - likely waitForIdle)"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: UpdateMemoryAllocations=", memAllocMs, "ms (SLOW - likely waitForIdle)"));
     }
 #endif
     RTXMG_LOG("RTX MegaGeo: BuildAccel - after UpdateMemoryAllocations");
@@ -2358,7 +2350,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     auto afterTemplates = std::chrono::high_resolution_clock::now();
     float templatesMs = std::chrono::duration_cast<std::chrono::microseconds>(afterTemplates - afterMemAlloc).count() * 0.001f;
     if (templatesMs > 1.0f) {
-        Logger::info(str::format(">>> RTXMG CHRONO: InitStructuredClusterTemplates=", templatesMs, "ms (SLOW)"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: InitStructuredClusterTemplates=", templatesMs, "ms (SLOW)"));
     }
 #endif
     RTXMG_LOG("RTX MegaGeo: BuildAccel - after InitStructuredClusterTemplates");
@@ -2396,7 +2388,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     auto afterClears = std::chrono::high_resolution_clock::now();
     float clearsMs = std::chrono::duration_cast<std::chrono::microseconds>(afterClears - beforeClears).count() * 0.001f;
     if (clearsMs > 1.0f) {
-        Logger::info(str::format(">>> RTXMG CHRONO: BufferClears=", clearsMs, "ms (SLOW)"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: BufferClears=", clearsMs, "ms (SLOW)"));
     }
 #endif
     RTXMG_LOG("RTX MegaGeo: BuildAccel - after clearBufferUInt");
@@ -2474,7 +2466,6 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
             uint32_t surfaceCount{ subd.SurfaceCount() };
             RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel - instance ", i, " surfaceCount=", surfaceCount));
 
-
             ComputeInstanceClusterTiling(accels, scene, i, surfaceOffset, surfaceCount, tessCounterRange, commandList);
             RTXMG_LOG(str::format("RTX MegaGeo: BuildAccel - instance ", i, " ComputeInstanceClusterTiling complete"));
 
@@ -2487,7 +2478,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
             totalSurfaces += surfaceCount;
             // Log every 10th instance or if it took >5ms
             if (i % 10 == 0 || instanceMs > 5.0f) {
-                Logger::info(str::format(">>> RTXMG CHRONO: Instance[", i, "] surfaces=", surfaceCount, " time=", instanceMs, "ms"));
+                RTXMG_LOG(str::format(">>> RTXMG CHRONO: Instance[", i, "] surfaces=", surfaceCount, " time=", instanceMs, "ms"));
             }
 #endif
         }
@@ -2498,7 +2489,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
         float tilingMs = std::chrono::duration_cast<std::chrono::microseconds>(chronoNow - chronoSectionStart).count() * 0.001f;
         float avgPerInstance = maxInstances > 0 ? totalInstanceMs / maxInstances : 0.0f;
         float avgPerSurface = totalSurfaces > 0 ? totalInstanceMs / totalSurfaces : 0.0f;
-        Logger::info(str::format(">>> RTXMG CHRONO: ComputeClusterTiling TOTAL=", tilingMs, "ms instances=", maxInstances,
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: ComputeClusterTiling TOTAL=", tilingMs, "ms instances=", maxInstances,
             " surfaces=", totalSurfaces, " avgPerInst=", avgPerInstance, "ms avgPerSurf=", avgPerSurface, "ms"));
         chronoSectionStart = chronoNow;
 #endif
@@ -2531,7 +2522,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     {
         auto chronoNow = std::chrono::high_resolution_clock::now();
         float fillMs = std::chrono::duration_cast<std::chrono::microseconds>(chronoNow - chronoSectionStart).count() * 0.001f;
-        Logger::info(str::format(">>> RTXMG CHRONO: FillInstanceClusters=", fillMs, "ms"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: FillInstanceClusters=", fillMs, "ms"));
         chronoSectionStart = chronoNow;
     }
 #endif
@@ -2554,7 +2545,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     {
         auto chronoNow = std::chrono::high_resolution_clock::now();
         float clasMs = std::chrono::duration_cast<std::chrono::microseconds>(chronoNow - chronoSectionStart).count() * 0.001f;
-        Logger::info(str::format(">>> RTXMG CHRONO: BuildStructuredCLASes=", clasMs, "ms"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: BuildStructuredCLASes=", clasMs, "ms"));
         chronoSectionStart = chronoNow;
     }
 #endif
@@ -2570,7 +2561,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     {
         auto chronoNow = std::chrono::high_resolution_clock::now();
         float blasMs = std::chrono::duration_cast<std::chrono::microseconds>(chronoNow - chronoSectionStart).count() * 0.001f;
-        Logger::info(str::format(">>> RTXMG CHRONO: BuildBlasFromClas=", blasMs, "ms"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: BuildBlasFromClas=", blasMs, "ms"));
         chronoSectionStart = chronoNow;
     }
 #endif
@@ -2587,14 +2578,14 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     {
         auto chronoNow = std::chrono::high_resolution_clock::now();
         float downloadMs = std::chrono::duration_cast<std::chrono::microseconds>(chronoNow - chronoSectionStart).count() * 0.001f;
-        Logger::info(str::format(">>> RTXMG CHRONO: DownloadCounters=", downloadMs, "ms"));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: DownloadCounters=", downloadMs, "ms"));
         chronoSectionStart = chronoNow;
     }
 #endif
 
     // Log ALL counter indices to see which ones have data - always log for debugging
     for (uint32_t i = 0; i < kFrameCount; ++i) {
-        ONCE(Logger::info(str::format("RTX MegaGeo: Counter[", i, "] clusters=", counterBufferData[i].clusters,
+        ONCE(RTXMG_LOG(str::format("RTX MegaGeo: Counter[", i, "] clusters=", counterBufferData[i].clusters,
                                  " desiredClusters=", counterBufferData[i].desiredClusters,
                                  " desiredTriangles=", counterBufferData[i].desiredTriangles,
                                  " desiredVertices=", counterBufferData[i].desiredVertices,
@@ -2666,13 +2657,13 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
         size_t tessCountersBuf = m_tessellationCountersBuffer.GetBytes();
         size_t totalVRAM = vtxPosBuf + vtxNrmBuf + clasBuf + clustersBuf + shadingBuf + clasPtrsBuf + blasBuf + blasPtrsBuf + blasSizesBuf + templateBuf + dispatchBuf + offsetCountsBuf + blasFromClasArgsBuf + tessCountersBuf;
 
-        Logger::info(str::format("RTX MegaGeo VRAM: TOTAL=", totalVRAM / (1024*1024), "MB (",  totalVRAM, " bytes)"));
-        Logger::info(str::format("  vtxPositions=", vtxPosBuf / 1024, "KB vtxNormals=", vtxNrmBuf / 1024, "KB"));
-        Logger::info(str::format("  CLAS=", clasBuf / (1024*1024), "MB clusters=", clustersBuf / 1024, "KB shading=", shadingBuf / 1024, "KB clasPtrs=", clasPtrsBuf / 1024, "KB"));
-        Logger::info(str::format("  BLAS=", blasBuf / (1024*1024), "MB blasPtrs=", blasPtrsBuf / 1024, "KB blasSizes=", blasSizesBuf / 1024, "KB"));
-        Logger::info(str::format("  templates=", templateBuf / 1024, "KB (data=", templateDataBuf / 1024, "KB idx=", templateIdxBuf / 1024, "KB vtx=", templateVtxBuf / 1024, "KB small=", templateSmallBuf / 1024, "KB)"));
-        Logger::info(str::format("  dispatch=", dispatchBuf / 1024, "KB offsetCounts=", offsetCountsBuf / 1024, "KB blasFromClasArgs=", blasFromClasArgsBuf / 1024, "KB tessCounters=", tessCountersBuf / 1024, "KB"));
-        Logger::info(str::format("  maxClusters=", m_maxClusters, " maxVertices=", m_maxVertices, " numInstances=", m_numInstances, " maxClasBytes=", m_maxClasBytes));
+        RTXMG_LOG(str::format("RTX MegaGeo VRAM: TOTAL=", totalVRAM / (1024*1024), "MB (",  totalVRAM, " bytes)"));
+        RTXMG_LOG(str::format("  vtxPositions=", vtxPosBuf / 1024, "KB vtxNormals=", vtxNrmBuf / 1024, "KB"));
+        RTXMG_LOG(str::format("  CLAS=", clasBuf / (1024*1024), "MB clusters=", clustersBuf / 1024, "KB shading=", shadingBuf / 1024, "KB clasPtrs=", clasPtrsBuf / 1024, "KB"));
+        RTXMG_LOG(str::format("  BLAS=", blasBuf / (1024*1024), "MB blasPtrs=", blasPtrsBuf / 1024, "KB blasSizes=", blasSizesBuf / 1024, "KB"));
+        RTXMG_LOG(str::format("  templates=", templateBuf / 1024, "KB (data=", templateDataBuf / 1024, "KB idx=", templateIdxBuf / 1024, "KB vtx=", templateVtxBuf / 1024, "KB small=", templateSmallBuf / 1024, "KB)"));
+        RTXMG_LOG(str::format("  dispatch=", dispatchBuf / 1024, "KB offsetCounts=", offsetCountsBuf / 1024, "KB blasFromClasArgs=", blasFromClasArgsBuf / 1024, "KB tessCounters=", tessCountersBuf / 1024, "KB"));
+        RTXMG_LOG(str::format("  maxClusters=", m_maxClusters, " maxVertices=", m_maxVertices, " numInstances=", m_numInstances, " maxClasBytes=", m_maxClasBytes));
     }
 
     // Log final statistics
@@ -2685,7 +2676,7 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     {
         auto chronoEnd = std::chrono::high_resolution_clock::now();
         float totalMs = std::chrono::duration_cast<std::chrono::microseconds>(chronoEnd - chronoStart).count() * 0.001f;
-        Logger::info(str::format(">>> RTXMG CHRONO: BuildAccel TOTAL=", totalMs, "ms clusters=", counters.clusters));
+        RTXMG_LOG(str::format(">>> RTXMG CHRONO: BuildAccel TOTAL=", totalMs, "ms clusters=", counters.clusters));
     }
 #endif
 }

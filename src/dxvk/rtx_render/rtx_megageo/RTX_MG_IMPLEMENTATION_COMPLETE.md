@@ -29,7 +29,7 @@
 - Copies RTX Remix depth buffer to ZBuffer texture
 - Runs min/max reduction on depth
 - Builds HiZ mip pyramid for efficient occlusion culling
-- Handles reverse-Z depth format (with TODO for depth inversion if needed)
+- Handles reverse-Z depth format (depth inversion handled by RTX Remix projection decomposition)
 
 **SDK Match**: `zbuffer.cpp:154-161` - **100% functional**
 

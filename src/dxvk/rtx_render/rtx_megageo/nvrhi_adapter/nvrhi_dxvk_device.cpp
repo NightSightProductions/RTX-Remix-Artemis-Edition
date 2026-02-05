@@ -19,14 +19,6 @@
 * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 * DEALINGS IN THE SOFTWARE.
 */
-// Disable verbose MegaGeo logging
-#define RTXMG_VERBOSE_LOGGING 0
-#if RTXMG_VERBOSE_LOGGING
-#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
-#else
-#define RTXMG_LOG(msg) ((void)0)
-#endif
-
 #include "nvrhi_dxvk_device.h"
 #include "nvrhi_dxvk_command_list.h"
 #include "nvrhi_dxvk_sampler.h"
@@ -35,6 +27,7 @@
 #include "nvrhi_dxvk_shader.h"
 #include "../../../util/log/log.h"
 #include <unordered_map>
+#include "../rtxmg_log.h"
 
 namespace dxvk {
 
@@ -161,7 +154,7 @@ namespace dxvk {
 
     if (desc.isVolatile && maxVersions > 0) {
       result->setVolatile(maxVersions, perVersionSize);
-      ONCE(Logger::info(str::format("RTX MegaGeo: Created volatile CB '",
+      ONCE(RTXMG_LOG(str::format("RTX MegaGeo: Created volatile CB '",
         desc.debugName ? desc.debugName : "unnamed",
         "' perVersion=", perVersionSize, " maxVersions=", maxVersions,
         " totalSize=", perVersionSize * maxVersions)));
@@ -467,7 +460,7 @@ namespace dxvk {
       // Store in pipeline wrapper - use first layout for descriptor set layout reference
       pipeline->setVkPipeline(vkPipeline, pipelineLayout, setLayouts[0], m_vkDevice);
 
-      Logger::info(str::format("RTX MegaGeo: Created native VkPipeline ", (void*)vkPipeline,
+      RTXMG_LOG(str::format("RTX MegaGeo: Created native VkPipeline ", (void*)vkPipeline,
         " with ", setLayouts.size(), " descriptor set layouts"));
     }
 
@@ -529,7 +522,7 @@ namespace dxvk {
   nvrhi::BindingLayoutHandle NvrhiDxvkDevice::createBindingLayout(
     const nvrhi::BindingLayoutDesc& desc)
   {
-    Logger::info(str::format("RTX MegaGeo: createBindingLayout space=", desc.registerSpace,
+    RTXMG_LOG(str::format("RTX MegaGeo: createBindingLayout space=", desc.registerSpace,
       " registerSpaceIsDescriptorSet=", desc.registerSpaceIsDescriptorSet ? "true" : "false",
       " bindings=", desc.bindings.size()));
 
@@ -606,7 +599,7 @@ namespace dxvk {
       VkResult result = vkCreateDescriptorSetLayout(m_vkDevice, &layoutInfo, nullptr, &vkLayout);
       if (result == VK_SUCCESS && vkLayout != VK_NULL_HANDLE) {
         layout->setVkDescriptorSetLayout(vkLayout, m_vkDevice);
-        Logger::info(str::format("RTX MegaGeo: Created VkDescriptorSetLayout ", (void*)vkLayout,
+        RTXMG_LOG(str::format("RTX MegaGeo: Created VkDescriptorSetLayout ", (void*)vkLayout,
           " for space ", desc.registerSpace, " with ", bindings.size(), " bindings"));
       } else {
         Logger::err(str::format("RTX MegaGeo: Failed to create VkDescriptorSetLayout, result=", (int)result));
@@ -946,7 +939,7 @@ namespace dxvk {
     // Store in binding set (owns pool - pool is destroyed when binding set is destroyed, thread-safe)
     bindingSet->setDescriptorSet(descriptorPool, descriptorSet, m_vkDevice, true);
 
-    Logger::info(str::format("RTX MegaGeo: createBindingSet - created pre-built descriptor set with ",
+    RTXMG_LOG(str::format("RTX MegaGeo: createBindingSet - created pre-built descriptor set with ",
       writes.size(), " descriptors for space ", layoutDesc.registerSpace));
 
     return bindingSet;
@@ -968,7 +961,7 @@ namespace dxvk {
       vkGetClusterASSizes = reinterpret_cast<PFN_vkGetClusterAccelerationStructureBuildSizesNV>(
         m_device->vkd()->sym("vkGetClusterAccelerationStructureBuildSizesNV"));
       if (vkGetClusterASSizes) {
-        Logger::info("RTX MegaGeo: Loaded vkGetClusterAccelerationStructureBuildSizesNV");
+        RTXMG_LOG("RTX MegaGeo: Loaded vkGetClusterAccelerationStructureBuildSizesNV");
       }
     }
 
@@ -1051,7 +1044,7 @@ namespace dxvk {
     result.resultMaxSizeInBytes = sizeInfo.accelerationStructureSize;
     result.scratchSizeInBytes = sizeInfo.buildScratchSize;
 
-    Logger::info(str::format("RTX MegaGeo: getClusterOperationSizeInfo - type=", (int)params.type,
+    RTXMG_LOG(str::format("RTX MegaGeo: getClusterOperationSizeInfo - type=", (int)params.type,
       " resultMaxSize=", result.resultMaxSizeInBytes, " scratchSize=", result.scratchSizeInBytes));
 
     return result;
@@ -1124,7 +1117,7 @@ namespace dxvk {
       return VK_NULL_HANDLE;
     }
 
-    Logger::info(str::format("RTX MegaGeo: Created shared descriptor pool with maxSets=", kSharedPoolMaxSets,
+    RTXMG_LOG(str::format("RTX MegaGeo: Created shared descriptor pool with maxSets=", kSharedPoolMaxSets,
       " and ", kSharedPoolDescriptorCount, " descriptors per type"));
 
     return m_sharedDescriptorPool;

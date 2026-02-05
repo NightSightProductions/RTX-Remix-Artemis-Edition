@@ -19,14 +19,6 @@
 * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 * DEALINGS IN THE SOFTWARE.
 */
-// Enable verbose MegaGeo logging for debugging
-#define RTXMG_VERBOSE_LOGGING 0
-#if RTXMG_VERBOSE_LOGGING
-#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
-#else
-#define RTXMG_LOG(msg) ((void)0)
-#endif
-
 #include "nvrhi_dxvk_command_list.h"
 #include "nvrhi_dxvk_buffer.h"
 #include "nvrhi_dxvk_texture.h"
@@ -36,6 +28,7 @@
 #include "../../rtx_context.h"  // For RtxContext::commitComputeStateForMegaGeo
 #include <algorithm>
 #include <array>
+#include "../rtxmg_log.h"
 
 namespace dxvk {
 
@@ -814,18 +807,18 @@ namespace dxvk {
     }
 
     // Diagnostic logging for crash investigation
-    Logger::info(str::format("RTX MegaGeo: executeMultiIndirectClusterOperation - scratchSize=", desc.scratchSizeInBytes));
+    RTXMG_LOG(str::format("RTX MegaGeo: executeMultiIndirectClusterOperation - scratchSize=", desc.scratchSizeInBytes));
     if (desc.inIndirectArgsBuffer) {
-      Logger::info(str::format("RTX MegaGeo:   inIndirectArgsBuffer addr=", desc.inIndirectArgsBuffer->getGpuVirtualAddress()));
+      RTXMG_LOG(str::format("RTX MegaGeo:   inIndirectArgsBuffer addr=", desc.inIndirectArgsBuffer->getGpuVirtualAddress()));
     }
     if (desc.inOutAddressesBuffer) {
-      Logger::info(str::format("RTX MegaGeo:   inOutAddressesBuffer addr=", desc.inOutAddressesBuffer->getGpuVirtualAddress()));
+      RTXMG_LOG(str::format("RTX MegaGeo:   inOutAddressesBuffer addr=", desc.inOutAddressesBuffer->getGpuVirtualAddress()));
     }
     if (desc.outSizesBuffer) {
-      Logger::info(str::format("RTX MegaGeo:   outSizesBuffer addr=", desc.outSizesBuffer->getGpuVirtualAddress()));
+      RTXMG_LOG(str::format("RTX MegaGeo:   outSizesBuffer addr=", desc.outSizesBuffer->getGpuVirtualAddress()));
     }
     if (desc.outAccelerationStructuresBuffer) {
-      Logger::info(str::format("RTX MegaGeo:   outAccelStructBuffer addr=", desc.outAccelerationStructuresBuffer->getGpuVirtualAddress()));
+      RTXMG_LOG(str::format("RTX MegaGeo:   outAccelStructBuffer addr=", desc.outAccelerationStructuresBuffer->getGpuVirtualAddress()));
     }
 
     // Get direct Vulkan command buffer from DXVK
@@ -859,7 +852,7 @@ namespace dxvk {
 
     if (vkCmdBuildClusterAS) {
       // Always log key values for crash diagnosis
-      Logger::info(str::format("RTX MegaGeo: vkCmdBuildClusterAS scratchData=0x", std::hex, vkCmds.scratchData,
+      RTXMG_LOG(str::format("RTX MegaGeo: vkCmdBuildClusterAS scratchData=0x", std::hex, vkCmds.scratchData,
                                " dstImplicit=0x", vkCmds.dstImplicitData,
                                " srcInfos=0x", vkCmds.srcInfosArray.deviceAddress,
                                " count=0x", vkCmds.srcInfosCount));
@@ -868,16 +861,16 @@ namespace dxvk {
       constexpr uint64_t kAS_ALIGNMENT = 256;
       constexpr uint64_t kBUFFER_ALIGNMENT = 16;
 
-      Logger::info(str::format("RTX MegaGeo: ALIGNMENT CHECK:"));
-      Logger::info(str::format("  scratchData (0x", std::hex, vkCmds.scratchData,
+      RTXMG_LOG(str::format("RTX MegaGeo: ALIGNMENT CHECK:"));
+      RTXMG_LOG(str::format("  scratchData (0x", std::hex, vkCmds.scratchData,
                                ") aligned(256)=", (vkCmds.scratchData % kAS_ALIGNMENT == 0)));
-      Logger::info(str::format("  dstImplicitData (0x", std::hex, vkCmds.dstImplicitData,
+      RTXMG_LOG(str::format("  dstImplicitData (0x", std::hex, vkCmds.dstImplicitData,
                                ") aligned(256)=", (vkCmds.dstImplicitData == 0 || vkCmds.dstImplicitData % kAS_ALIGNMENT == 0)));
-      Logger::info(str::format("  srcInfosArray.deviceAddress (0x", std::hex, vkCmds.srcInfosArray.deviceAddress,
+      RTXMG_LOG(str::format("  srcInfosArray.deviceAddress (0x", std::hex, vkCmds.srcInfosArray.deviceAddress,
                                ") aligned(16)=", (vkCmds.srcInfosArray.deviceAddress % kBUFFER_ALIGNMENT == 0)));
-      Logger::info(str::format("  dstAddressesArray.deviceAddress (0x", std::hex, vkCmds.dstAddressesArray.deviceAddress,
+      RTXMG_LOG(str::format("  dstAddressesArray.deviceAddress (0x", std::hex, vkCmds.dstAddressesArray.deviceAddress,
                                ") aligned(16)=", (vkCmds.dstAddressesArray.deviceAddress == 0 || vkCmds.dstAddressesArray.deviceAddress % kBUFFER_ALIGNMENT == 0)));
-      Logger::info(str::format("  dstSizesArray.deviceAddress (0x", std::hex, vkCmds.dstSizesArray.deviceAddress,
+      RTXMG_LOG(str::format("  dstSizesArray.deviceAddress (0x", std::hex, vkCmds.dstSizesArray.deviceAddress,
                                ") aligned(16)=", (vkCmds.dstSizesArray.deviceAddress == 0 || vkCmds.dstSizesArray.deviceAddress % kBUFFER_ALIGNMENT == 0)));
 
       RTXMG_LOG("RTX MegaGeo: About to call vkCmdBuildClusterAccelerationStructureIndirectNV");
@@ -943,7 +936,7 @@ namespace dxvk {
 
     // If state is different, record a barrier
     if (currentState != state) {
-      Logger::info(str::format("RTX MegaGeo: AUTO BARRIER buffer ", (void*)buffer,
+      RTXMG_LOG(str::format("RTX MegaGeo: AUTO BARRIER buffer ", (void*)buffer,
         " from ", (uint32_t)currentState, " to ", (uint32_t)state));
       m_PendingBufferBarriers.push_back({buffer, currentState, state});
       m_BufferStates[buffer] = state;
@@ -1077,7 +1070,7 @@ namespace dxvk {
       if (srcStages == 0) srcStages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
       if (dstStages == 0) dstStages = VK_PIPELINE_STAGE_ALL_COMMANDS_BIT;
 
-      Logger::info(str::format("RTX MegaGeo: COMMITTING ", bufferBarriers.size(), " buffer barriers, srcStages=0x",
+      RTXMG_LOG(str::format("RTX MegaGeo: COMMITTING ", bufferBarriers.size(), " buffer barriers, srcStages=0x",
         std::hex, srcStages, " dstStages=0x", dstStages));
 
       m_device->getDxvkDevice()->vkd()->vkCmdPipelineBarrier(
@@ -1789,7 +1782,7 @@ namespace dxvk {
         blasInput.maxClusterCountPerAccelerationStructure = desc.params.blas.maxClasPerBlasCount;
         input.opInput.pClustersBottomLevel = &blasInput;
         // Always log BlasBuild parameters for crash debugging
-        Logger::info(str::format("RTX MegaGeo: BlasBuild maxTotalClusterCount=", blasInput.maxTotalClusterCount,
+        RTXMG_LOG(str::format("RTX MegaGeo: BlasBuild maxTotalClusterCount=", blasInput.maxTotalClusterCount,
                                  " maxClusterCountPerAS=", blasInput.maxClusterCountPerAccelerationStructure,
                                  " maxArgCount=", input.maxAccelerationStructureCount));
         break;
@@ -1830,7 +1823,7 @@ namespace dxvk {
       vkCmds.srcInfosArray.stride = argsBuffer->getDesc().structStride;
       vkCmds.srcInfosArray.size = argsBuffer->getDesc().byteSize - desc.inIndirectArgsOffsetInBytes;
       // Always log for crash debugging
-      Logger::info(str::format("RTX MegaGeo: ", opTypeName, " srcInfosArray addr=0x", std::hex, vkCmds.srcInfosArray.deviceAddress,
+      RTXMG_LOG(str::format("RTX MegaGeo: ", opTypeName, " srcInfosArray addr=0x", std::hex, vkCmds.srcInfosArray.deviceAddress,
                                " stride=", std::dec, vkCmds.srcInfosArray.stride, " size=", vkCmds.srcInfosArray.size,
                                " (numElements=", vkCmds.srcInfosArray.stride > 0 ? vkCmds.srcInfosArray.size / vkCmds.srcInfosArray.stride : 0, ")"));
     } else {
@@ -1846,7 +1839,7 @@ namespace dxvk {
       vkCmds.dstAddressesArray.stride = addressesBuffer->getDesc().structStride;
       vkCmds.dstAddressesArray.size = addressesBuffer->getDesc().byteSize - desc.inOutAddressesOffsetInBytes;
       // Always log for crash debugging
-      Logger::info(str::format("RTX MegaGeo: ", opTypeName, " dstAddressesArray addr=0x", std::hex, vkCmds.dstAddressesArray.deviceAddress,
+      RTXMG_LOG(str::format("RTX MegaGeo: ", opTypeName, " dstAddressesArray addr=0x", std::hex, vkCmds.dstAddressesArray.deviceAddress,
                                " stride=", std::dec, vkCmds.dstAddressesArray.stride, " size=", vkCmds.dstAddressesArray.size));
     } else {
       // Explicitly zero the array for GetSizes mode
@@ -1922,12 +1915,12 @@ namespace dxvk {
     if (desc.inIndirectArgCountBuffer) {
       NvrhiDxvkBuffer* countBuffer = static_cast<NvrhiDxvkBuffer*>(desc.inIndirectArgCountBuffer);
       vkCmds.srcInfosCount = countBuffer->getGpuVirtualAddress() + desc.inIndirectArgCountOffsetInBytes;
-      Logger::info(str::format("RTX MegaGeo: INDIRECT COUNT BUFFER SET - baseAddr=0x", std::hex, countBuffer->getGpuVirtualAddress(),
+      RTXMG_LOG(str::format("RTX MegaGeo: INDIRECT COUNT BUFFER SET - baseAddr=0x", std::hex, countBuffer->getGpuVirtualAddress(),
                                " offset=", std::dec, desc.inIndirectArgCountOffsetInBytes,
                                " srcInfosCount=0x", std::hex, vkCmds.srcInfosCount));
     } else {
       vkCmds.srcInfosCount = 0;
-      Logger::info("RTX MegaGeo: NO INDIRECT COUNT BUFFER - srcInfosCount=0, will use srcInfosArray.size/stride as count");
+      RTXMG_LOG("RTX MegaGeo: NO INDIRECT COUNT BUFFER - srcInfosCount=0, will use srcInfosArray.size/stride as count");
     }
 
     // Set address resolution flags to none for now

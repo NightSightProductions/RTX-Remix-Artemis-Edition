@@ -26,6 +26,7 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+#include "../rtxmg_log.h"
 
 namespace fs = std::filesystem;
 
@@ -158,7 +159,7 @@ std::unique_ptr<uint8_t[]> ReadBigFile(fs::path const& filepath,
         {
             auto tstop = std::chrono::steady_clock::now();
             std::chrono::duration<float> elapsed = tstop - tstart;
-            dxvk::Logger::info(dxvk::str::format("Read (", elapsed.count(), " seconds) '", filepath.generic_string(), "'"));
+            RTXMG_LOG(dxvk::str::format("Read (", elapsed.count(), " seconds) '", filepath.generic_string(), "'"));
         }
 
         if (file.good())

@@ -23,6 +23,7 @@
 #include "nvrhi_scratch_manager.h"
 #include "../../dxvk_device.h"
 #include "../../../util/log/log.h"
+#include "../rtxmg_log.h"
 
 namespace dxvk {
 
@@ -43,7 +44,7 @@ namespace dxvk {
     chunk->version = 0;
 
     m_allocatedMemory += size;
-    Logger::info(str::format("RTX MegaGeo: ScratchManager created chunk, size=", size,
+    RTXMG_LOG(str::format("RTX MegaGeo: ScratchManager created chunk, size=", size,
                              " totalAllocated=", m_allocatedMemory));
 
     return chunk;

@@ -20,16 +20,9 @@
  * DEALINGS IN THE SOFTWARE.
  */
 
-// Disable verbose MegaGeo logging
-#define RTXMG_VERBOSE_LOGGING 0
-#if RTXMG_VERBOSE_LOGGING
-#define RTXMG_LOG(msg) RTXMG_LOG(msg)
-#else
-#define RTXMG_LOG(msg) ((void)0)
-#endif
-
 #include "buffer.h"
 #include "../../../dxvk_include.h"
+#include "../rtxmg_log.h"
 
 nvrhi::BufferDesc GetGenericDesc(size_t nElements, uint32_t elementSize, const char* name, nvrhi::Format format)
 {

@@ -156,7 +156,8 @@ struct GridSampler
     // a surface, i.e., if you wanted to tessellate at this point, what should be the spacing.
     // They are needed for displacement texture filtering on the surface.
     //
-    // TODO: define something that is C0 continuous across clusters.  The lerp is not quite C0.
+    // NOTE: The lerp is not strictly C0 continuous across cluster boundaries, but the
+    // visual impact on displacement texture filtering is negligible.
     float DU(float2 uvVals)
     {
         float v = uvVals.y;

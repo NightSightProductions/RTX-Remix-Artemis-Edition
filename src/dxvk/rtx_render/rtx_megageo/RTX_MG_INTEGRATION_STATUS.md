@@ -120,12 +120,10 @@ Complete 1:1 integration of RTX Mega Geometry into RTX Remix with NVRHI→DXVK a
   - ✅ `FillInstantiateTemplateArgsShader` - ManagedShader with ShaderManager
   - ✅ `FillBlasFromClasArgsShader` - ManagedShader with ShaderManager
   - ✅ `FillInstanceDescsShader` - ManagedShader with ShaderManager
-- ⚠️ Permutation shaders (2/6) still using Donut ShaderFactory:
-  - `ComputeClusterTilingShader` - 96 permutations (displacement × frustum × tess mode × vis mode × surface type)
-  - `FillClustersShader` - 16 permutations (displacement × normals × surface type)
-  - **Reason**: RTX Remix ShaderManager doesn't currently support macro-based permutations
-  - **Solution**: Needs either (1) pre-compiled shader variants system, or (2) dynamic compilation support
-  - **Status**: TODO comments added, Donut ShaderFactory temporarily retained for these shaders
+- ✅ Permutation shaders (2/6) fully migrated:
+  - `ComputeClusterTilingShader` - converted to pre-compiled Slang/SPIR-V
+  - `FillClustersShader` - converted to pre-compiled Slang/SPIR-V
+  - Donut ShaderFactory replaced with pre-compiled SPIR-V loading via adapter
 
 ---
 
@@ -227,10 +225,10 @@ src/dxvk/shaders/rtx/pass/rtx_megageo/
     ├── fill_instance_descs.comp.slang                      ✅
     ├── fill_instantiate_template_args_binding_indices.h
     ├── fill_instantiate_template_args.comp.slang           ✅
-    ├── compute_cluster_tiling_binding_indices.h           ⚠️ TODO
-    ├── compute_cluster_tiling.comp.slang                   ⚠️ TODO
-    ├── fill_clusters_binding_indices.h                     ⚠️ TODO
-    └── fill_clusters.comp.slang                            ⚠️ TODO
+    ├── compute_cluster_tiling_binding_indices.h           ✅ Complete
+    ├── compute_cluster_tiling.comp.slang                   ✅ Complete
+    ├── fill_clusters_binding_indices.h                     ✅ Complete
+    └── fill_clusters.comp.slang                            ✅ Complete
 ```
 
 ### C++ Implementation Files:
@@ -274,8 +272,7 @@ src/dxvk/rtx_render/rtx_megageo/
 - Infrastructure: 100%
 - Module Adaptation: 100%
 - Shader Conversion: 100% (11/11)
-- C++ Shader Loading: 100% (3/3 modules, 10/12 shaders with ShaderManager*)
-  - *2 shaders with permutations still use Donut ShaderFactory (documented with TODOs)
+- C++ Shader Loading: 100% (3/3 modules, 12/12 shaders fully migrated)
 - Build System: 100% ✅
 - NVRHI Adapter: 100% ✅
 - RtxMegaGeoBuilder Wrapper: 100% ✅

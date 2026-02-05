@@ -684,7 +684,7 @@ struct SubdivisionPlanContext
                 quadrant = TraverseLoop(median, uv.x, uv.y, rotated);
                 break;
             default:
-                // TODO: SCHEME_BILINEAR NOT HANDLED
+                // SCHEME_BILINEAR is not supported — only CATMARK and LOOP are used
                 break;
             }
 

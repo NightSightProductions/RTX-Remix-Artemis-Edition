@@ -150,12 +150,6 @@ void TopologyMap::InitDeviceData(nvrhi::ICommandList* commandList, bool keepHost
 
     plansBuffer = CreateAndUploadBuffer<SubdivisionPlanHLSL>(gpuPlans, "plans", commandList);
 
-    // TODO: Add bindless descriptor creation if needed for RTX Remix integration
-    // subpatchTreesDescriptor = descriptorTable->CreateDescriptorHandle(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, subpatchTreesArraysBuffer));
-    // patchPointIndicesDescriptor = descriptorTable->CreateDescriptorHandle(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, patchPointIndicesArraysBuffer));
-    // stencilMatrixDescriptor = descriptorTable->CreateDescriptorHandle(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, stencilMatrixArraysBuffer));
-    // plansDescriptor = descriptorTable->CreateDescriptorHandle(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, plansBuffer));
-
     if (!keepHostData)
         aTopologyMap.reset();
 }

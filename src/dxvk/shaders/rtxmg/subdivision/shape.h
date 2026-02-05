@@ -145,6 +145,4 @@ struct Shape
         LoadObjFile(const std::filesystem::path& pathStr, bool parseMaterials = true, bool requireUVs = true);
 
     std::string                   capslib;
-// TODO: Capsules
-//     CapsuleCache                  capsules;
 };

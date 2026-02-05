@@ -28,6 +28,7 @@
 #include <iomanip>
 #include <sstream>
 #include <typeinfo>
+#include "../rtxmg_log.h"
 
 // operator<< overloads for MathLib types
 inline std::ostream& operator<<(std::ostream& os, const uint2& v) {
@@ -86,7 +87,6 @@ namespace vectorlog
         return true;
     }
 
-
     static void EndLine(std::stringstream& ss, std::ostream* optOutputStream)
     {
         if (optOutputStream)
@@ -95,7 +95,7 @@ namespace vectorlog
         }
         else
         {
-            dxvk::Logger::info(ss.str());
+            RTXMG_LOG(ss.str());
             ss.str("");
             ss.clear();
         }

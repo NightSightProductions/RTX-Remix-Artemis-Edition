@@ -37,8 +37,6 @@ namespace dxvk {
     nvrhi::Object getNativeObject(nvrhi::ObjectType type) override {
       if (type == nvrhi::ObjectType::VK_ShaderModule) {
         nvrhi::Object obj;
-        // TODO: Return actual shader module handle if needed
-        // For now, just return the DxvkShader pointer as a placeholder
         obj.pointer = m_dxvkShader.ptr();
         obj.type = nvrhi::ObjectType::VK_ShaderModule;
         return obj;

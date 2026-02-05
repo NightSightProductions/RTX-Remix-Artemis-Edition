@@ -43,6 +43,7 @@
 #include <algorithm>
 #include <numeric>
 #include <ranges>
+#include "../rtxmg_log.h"
 
 using namespace OpenSubdiv;
 using namespace dxvk;
@@ -127,7 +128,7 @@ static void gatherStatistics(Shape const& shape,
         std::vector<decltype(surfStats)> surfaceTableStats;
     } evalStats;
 
-    dxvk::Logger::info(dxvk::str::format("gatherStatistics: Starting, nsurfaces=", nsurfaces));
+    RTXMG_LOG(dxvk::str::format("gatherStatistics: Starting, nsurfaces=", nsurfaces));
     topologyQuality.resize(nsurfaces, 0);
 
     size_t stencilSum = 0;
@@ -135,7 +136,7 @@ static void gatherStatistics(Shape const& shape,
     for (int surfIndex = 0; surfIndex < nsurfaces; ++surfIndex)
     {
         if (surfIndex % 10 == 0) {
-            dxvk::Logger::info(dxvk::str::format("gatherStatistics: Processing surface ", surfIndex, " of ", nsurfaces));
+            RTXMG_LOG(dxvk::str::format("gatherStatistics: Processing surface ", surfIndex, " of ", nsurfaces));
         }
 
         Tmr::SurfaceDescriptor const& desc = surfTable.GetDescriptor(surfIndex);
@@ -247,7 +248,7 @@ static void gatherStatistics(Shape const& shape,
             std::max(surfStats.stencilCountMax, (uint32_t)nstencils);
     }
 
-    dxvk::Logger::info(dxvk::str::format("gatherStatistics: Loop complete, validating counts"));
+    RTXMG_LOG(dxvk::str::format("gatherStatistics: Loop complete, validating counts"));
     uint32_t totalCounted = surfStats.holesCount + surfStats.bsplineSurfaceCount +
         surfStats.regularSurfaceCount + surfStats.isolationSurfaceCount +
         surfStats.sharpSurfaceCount;
@@ -273,10 +274,10 @@ static void gatherStatistics(Shape const& shape,
 
     surfStats.surfaceCount = nsurfaces;
 
-    dxvk::Logger::info("gatherStatistics: Checking topology type");
+    RTXMG_LOG("gatherStatistics: Checking topology type");
     if (!surfStats.IsCatmarkTopology())
     {
-        dxvk::Logger::info("gatherStatistics: Running second pass for non-Catmark topology");
+        RTXMG_LOG("gatherStatistics: Running second pass for non-Catmark topology");
         // if we suspect this was not a sub-d model (likely a triangular mesh), run
         // a second pass of the surfaces to tag all the irregular faces (non-quads)
         // as poor quality
@@ -300,7 +301,7 @@ static void gatherStatistics(Shape const& shape,
         }
     }
 
-    dxvk::Logger::info("gatherStatistics: Building stencil histogram");
+    RTXMG_LOG("gatherStatistics: Building stencil histogram");
     // fill stencil counts histogram
     if (surfStats.stencilCountMin == surfStats.stencilCountMax)
     {
@@ -335,16 +336,16 @@ static void gatherStatistics(Shape const& shape,
         }
     }
 
-    dxvk::Logger::info("gatherStatistics: Building topology recommendations");
+    RTXMG_LOG("gatherStatistics: Building topology recommendations");
     surfStats.BuildTopologyRecommendations();
 
-    dxvk::Logger::info("gatherStatistics: Updating eval stats");
+    RTXMG_LOG("gatherStatistics: Updating eval stats");
     evalStats.surfaceTablesByteSizeTotal += surfStats.byteSize;
     evalStats.hasBadTopology |= (!surfStats.topologyRecommendations.empty());
 
     evalStats.surfaceTableStats.emplace_back(std::move(surfStats));
 
-    dxvk::Logger::info("gatherStatistics: Complete");
+    RTXMG_LOG("gatherStatistics: Complete");
 }
 
 static std::vector<uint16_t> quadrangulateFaceToSubshape(
@@ -391,11 +392,11 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
     std::shared_ptr<donut::engine::DescriptorTableManager> descriptorTable,
     nvrhi::ICommandList* commandList)
 {
-    dxvk::Logger::info("SubdivSurface: Constructor start");
+    RTXMG_LOG("SubdivSurface: Constructor start");
     m_shape = std::move(shape);
 
     // Create Far mesh (control cage topology)
-    dxvk::Logger::info("SubdivSurface: Getting SDC type and options");
+    RTXMG_LOG("SubdivSurface: Getting SDC type and options");
     Sdc::SchemeType schemeType = GetSdcType(*m_shape);
     Sdc::Options schemeOptions = GetSdcOptions(*m_shape);
     Tmr::EndCapType endCaps = Tmr::EndCapType::ENDCAP_BSPLINE_BASIS;
@@ -405,25 +406,25 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         // for a given set of traits ; eventually Tmr::SurfaceTableFactory
         // may support directly topology caches, allowing a given
         // Tmr::SurfaceTable to reference multiple topology maps at run-time.
-        dxvk::Logger::info("SubdivSurface: Setting topology traits");
+        RTXMG_LOG("SubdivSurface: Setting topology traits");
         Tmr::TopologyMap::Traits traits;
         traits.SetCompatible(schemeType, schemeOptions, endCaps);
 
-        dxvk::Logger::info("SubdivSurface: Getting topology map from cache");
+        RTXMG_LOG("SubdivSurface: Getting topology map from cache");
         m_topology_map = &topologyCache.get(traits.value);
     }
 
-    dxvk::Logger::info("SubdivSurface: Getting topology map reference");
+    RTXMG_LOG("SubdivSurface: Getting topology map reference");
     Tmr::TopologyMap& topologyMap = *m_topology_map->aTopologyMap;
 
-    dxvk::Logger::info("SubdivSurface: Creating TopologyRefiner");
+    RTXMG_LOG("SubdivSurface: Creating TopologyRefiner");
     std::unique_ptr<Far::TopologyRefiner> refiner;
 
     refiner.reset(Far::TopologyRefinerFactory<Shape>::Create(
         *m_shape,
         Far::TopologyRefinerFactory<Shape>::Options(schemeType, schemeOptions)));
 
-    dxvk::Logger::info("SubdivSurface: Creating SurfaceTable");
+    RTXMG_LOG("SubdivSurface: Creating SurfaceTable");
     Tmr::SurfaceTableFactory tableFactory;
 
     Tmr::SurfaceTableFactory::Options options;
@@ -440,11 +441,11 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
     m_surface_table =
         tableFactory.Create(*refiner, topologyMap, options);
 
-    dxvk::Logger::info("SubdivSurface: Gathering statistics");
+    RTXMG_LOG("SubdivSurface: Gathering statistics");
     std::vector<uint16_t> topologyQuality;
     try {
         gatherStatistics(*m_shape, *refiner, topologyMap, *m_surface_table, topologyQuality);
-        dxvk::Logger::info("SubdivSurface: Statistics gathered successfully");
+        RTXMG_LOG("SubdivSurface: Statistics gathered successfully");
     } catch (const std::exception& e) {
         dxvk::Logger::err(dxvk::str::format("SubdivSurface: Exception in gatherStatistics: ", e.what()));
         throw;
@@ -453,19 +454,15 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         throw;
     }
 
-    dxvk::Logger::info("SubdivSurface: Creating topology quality buffer");
+    RTXMG_LOG("SubdivSurface: Creating topology quality buffer");
     m_topologyQualityBuffer = CreateAndUploadBuffer<uint16_t>(
         topologyQuality, "topology quality", commandList);
-    dxvk::Logger::info("SubdivSurface: Topology quality buffer created");
-
-    // TODO: Add bindless descriptor creation if needed for RTX Remix integration
-    // m_topologyQualityDescriptor = descriptorTable->CreateDescriptorHandle(
-    //     nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_topologyQualityBuffer));
+    RTXMG_LOG("SubdivSurface: Topology quality buffer created");
 
     // setup for texcoords - always create like the sample does
-    dxvk::Logger::info("SubdivSurface: Creating texcoord surface table");
-    dxvk::Logger::info(dxvk::str::format("SubdivSurface: refiner numFVarChannels=", refiner->GetNumFVarChannels()));
-    dxvk::Logger::info(dxvk::str::format("SubdivSurface: shape uvs size=", m_shape->uvs.size()));
+    RTXMG_LOG("SubdivSurface: Creating texcoord surface table");
+    RTXMG_LOG(dxvk::str::format("SubdivSurface: refiner numFVarChannels=", refiner->GetNumFVarChannels()));
+    RTXMG_LOG(dxvk::str::format("SubdivSurface: shape uvs size=", m_shape->uvs.size()));
 
     Tmr::LinearSurfaceTableFactory tableFactoryFvar;
     constexpr int const fvarChannel = 0;
@@ -478,7 +475,7 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         try {
             m_texcoord_surface_table =
                 tableFactoryFvar.Create(*refiner, fvarChannel, m_surface_table.get());
-            dxvk::Logger::info("SubdivSurface: Texcoord surface table created");
+            RTXMG_LOG("SubdivSurface: Texcoord surface table created");
         } catch (const std::exception& e) {
             dxvk::Logger::err(dxvk::str::format("SubdivSurface: Exception creating texcoord surface table: ", e.what()));
             m_texcoord_surface_table = nullptr;
@@ -488,28 +485,28 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         }
     }
 
-    dxvk::Logger::info("SubdivSurface: Calling InitDeviceData");
+    RTXMG_LOG("SubdivSurface: Calling InitDeviceData");
     InitDeviceData(commandList);
-    dxvk::Logger::info("SubdivSurface: InitDeviceData complete");
+    RTXMG_LOG("SubdivSurface: InitDeviceData complete");
 
-    dxvk::Logger::info("SubdivSurface: Creating texcoords buffer");
+    RTXMG_LOG("SubdivSurface: Creating texcoords buffer");
     m_texcoordsBuffer =
         CreateAndUploadBuffer(m_shape->uvs, "base texcoords", commandList);
-    dxvk::Logger::info("SubdivSurface: Texcoords buffer created");
+    RTXMG_LOG("SubdivSurface: Texcoords buffer created");
 
-    dxvk::Logger::info("SubdivSurface: Creating positions buffer");
-    dxvk::Logger::info(dxvk::str::format("SubdivSurface: m_shape->verts.size()=", m_shape->verts.size()));
+    RTXMG_LOG("SubdivSurface: Creating positions buffer");
+    RTXMG_LOG(dxvk::str::format("SubdivSurface: m_shape->verts.size()=", m_shape->verts.size()));
     // DEBUG: Log first few vertex positions
     for (size_t i = 0; i < std::min(m_shape->verts.size(), size_t(10)); i++) {
         const auto& v = m_shape->verts[i];
-        dxvk::Logger::info(dxvk::str::format("SubdivSurface: vert[", i, "] = (", v.x, ", ", v.y, ", ", v.z, ")"));
+        RTXMG_LOG(dxvk::str::format("SubdivSurface: vert[", i, "] = (", v.x, ", ", v.y, ", ", v.z, ")"));
     }
     // DEBUG: Log AABB
-    dxvk::Logger::info(dxvk::str::format("SubdivSurface: AABB min=(", m_shape->aabb.m_mins[0], ",", m_shape->aabb.m_mins[1], ",", m_shape->aabb.m_mins[2],
+    RTXMG_LOG(dxvk::str::format("SubdivSurface: AABB min=(", m_shape->aabb.m_mins[0], ",", m_shape->aabb.m_mins[1], ",", m_shape->aabb.m_mins[2],
         ") max=(", m_shape->aabb.m_maxs[0], ",", m_shape->aabb.m_maxs[1], ",", m_shape->aabb.m_maxs[2], ")"));
     m_positionsBuffer = CreateAndUploadBuffer(m_shape->verts, "SubdPosedPositions", commandList);
     m_aabb = m_shape->aabb;
-    dxvk::Logger::info("SubdivSurface: Positions buffer created");
+    RTXMG_LOG("SubdivSurface: Positions buffer created");
 
     if (keyFrameShapes.size() > 0)
     {
@@ -540,14 +537,6 @@ SubdivisionSurface::SubdivisionSurface(TopologyCache& topologyCache,
         }
     }
 
-    // TODO: Implement descriptor table management for RTX Remix
-    // These were using donut::engine::DescriptorTableManager which we don't have
-    // For now, we'll manage descriptors directly through NVRHI binding sets
-    // m_vertexSurfaceDescriptorDescriptor = descriptorTable->CreateDescriptorHandle(...);
-    // m_vertexControlPointIndicesDescriptor = descriptorTable->CreateDescriptorHandle(...);
-    // m_positionsDescriptor = descriptorTable->CreateDescriptorHandle(...);
-    // m_positionsPrevDescriptor = descriptorTable->CreateDescriptorHandle(...);
-    // m_surfaceToGeometryIndexDescriptor = descriptorTable->CreateDescriptorHandle(...);
 }
 
 uint32_t SubdivisionSurface::NumVertices() const
@@ -575,7 +564,7 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
             const auto& desc = sortedDescriptors[i];
             bool hasLimit = desc.HasLimit();
             if (hasLimit) hasLimitCount++; else noLimitCount++;
-            dxvk::Logger::info(dxvk::str::format("SubdivSurface: Descriptor[", i, "] field0=0x",
+            RTXMG_LOG(dxvk::str::format("SubdivSurface: Descriptor[", i, "] field0=0x",
                 std::hex, desc.field0, std::dec, " firstCP=", desc.firstControlPoint,
                 " HasLimit=", hasLimit ? "true" : "false",
                 " planIdx=", desc.GetSubdivisionPlanIndex()));
@@ -583,7 +572,7 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
         for (uint32_t i = 10; i < m_surfaceCount; i++) {
             if (sortedDescriptors[i].HasLimit()) hasLimitCount++; else noLimitCount++;
         }
-        dxvk::Logger::info(dxvk::str::format("SubdivSurface: Total ", m_surfaceCount, " descriptors: ",
+        RTXMG_LOG(dxvk::str::format("SubdivSurface: Total ", m_surfaceCount, " descriptors: ",
             hasLimitCount, " have limit, ", noLimitCount, " no limit"));
     }
 
@@ -696,7 +685,7 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
     }
     UpdateSurfaceOffset(SurfaceType::NoLimit, m_surfaceCount);
 
-    dxvk::Logger::info(dxvk::str::format("SubdivSurface: Surface offsets: PureBSpline=", m_surfaceOffsets[0],
+    RTXMG_LOG(dxvk::str::format("SubdivSurface: Surface offsets: PureBSpline=", m_surfaceOffsets[0],
         " RegularBSpline=", m_surfaceOffsets[1], " Limit=", m_surfaceOffsets[2],
         " NoLimit=", m_surfaceOffsets[3], " total=", m_surfaceCount));
 
@@ -738,9 +727,9 @@ void SubdivisionSurface::InitDeviceData(nvrhi::ICommandList* commandList)
 
     // Log raw field0 values being uploaded to GPU
     {
-        dxvk::Logger::info(dxvk::str::format("SubdivSurface: Uploading ", sortedDescriptors.size(), " descriptors to GPU"));
+        RTXMG_LOG(dxvk::str::format("SubdivSurface: Uploading ", sortedDescriptors.size(), " descriptors to GPU"));
         for (uint32_t i = 0; i < std::min(size_t(5), sortedDescriptors.size()); i++) {
-            dxvk::Logger::info(dxvk::str::format("SubdivSurface: GPU Descriptor[", i, "] field0=0x",
+            RTXMG_LOG(dxvk::str::format("SubdivSurface: GPU Descriptor[", i, "] field0=0x",
                 std::hex, sortedDescriptors[i].field0, std::dec,
                 " (bit0=", (sortedDescriptors[i].field0 & 1), ")",
                 " firstCP=", sortedDescriptors[i].firstControlPoint));

@@ -46,7 +46,8 @@ public:
                    bool compactWeights=true);
     ~StencilBuilder();
 
-    // TODO: noncopyable.
+    StencilBuilder(const StencilBuilder&) = delete;
+    StencilBuilder& operator=(const StencilBuilder&) = delete;
 
     size_t GetNumVerticesTotal() const;
 

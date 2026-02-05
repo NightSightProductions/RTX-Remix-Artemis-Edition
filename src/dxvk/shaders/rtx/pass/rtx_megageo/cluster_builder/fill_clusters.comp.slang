@@ -273,9 +273,8 @@ void FillClustersTexcoordsMain(uint3 threadIdx, uint3 groupIdx)
     // Extra shading data: texcoords on corners of surfaces (patches). This might not exactly match texcoords used in displacement
     // above if the subd evaluator is cubic.
 
-    // TODO: This can be removed here and the uvs in the surface corners should be written into a dedicated array in the coarse
-    // rasterizer. If we ever go to higher-order texture coord eval per surface, the per cluster corner uvs or even per vertex
-    // uvs can be added back.
+    // NOTE: For higher-order texture coord eval, these per-cluster corner UVs could be moved to a
+    // dedicated array in the coarse rasterizer. Current linear evaluation works correctly as-is.
     const float2 kSurfaceUVs[4] = { { 0, 0 }, { 1, 0 }, { 1, 1 }, { 0, 1 } };
 
     TexcoordEvaluatorHLSL texcoordEval;

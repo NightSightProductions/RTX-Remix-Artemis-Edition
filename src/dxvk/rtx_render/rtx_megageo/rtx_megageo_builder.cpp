@@ -19,14 +19,6 @@
 * FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER
 * DEALINGS IN THE SOFTWARE.
 */
-// Enable verbose MegaGeo logging for debugging (0=off for performance, 1=on for debugging)
-#define RTXMG_VERBOSE_LOGGING 1
-#if RTXMG_VERBOSE_LOGGING
-#define RTXMG_LOG(msg) Logger::info(msg)
-#else
-#define RTXMG_LOG(msg) ((void)0)
-#endif
-
 #include "rtx_megageo_builder.h"
 #include "../rtx_context.h"
 #include "../rtx_camera.h"
@@ -53,6 +45,7 @@
 #include "osd_lite/opensubdiv/sdc/options.h"
 #include "osd_lite/opensubdiv/tmr/topologyMap.h"
 #include "osd_lite/opensubdiv/tmr/surfaceTableFactory.h"
+#include "rtxmg_log.h"
 
 namespace dxvk {
 
@@ -104,7 +97,7 @@ namespace dxvk {
       return true;
     }
 
-    Logger::info("Initializing RTX Mega Geometry Builder...");
+    RTXMG_LOG("Initializing RTX Mega Geometry Builder...");
 
     // Create NVRHI adapter
     m_nvrhiDevice = new NvrhiDxvkDevice(
@@ -309,7 +302,7 @@ namespace dxvk {
     // Store placeholder in map
     m_surfaces[surfaceId] = std::move(surface);
 
-    Logger::info(str::format("Queued subdivision surface ", surfaceId,
+    RTXMG_LOG(str::format("Queued subdivision surface ", surfaceId,
                              " for async creation (", desc.numFaces, " faces, ",
                              desc.numVertices, " vertices)"));
 
@@ -346,7 +339,7 @@ namespace dxvk {
       nullptr,
       m_commandList.Get());
 
-    Logger::info(str::format("Updated subdivision surface ", surfaceId));
+    RTXMG_LOG(str::format("Updated subdivision surface ", surfaceId));
     return true;
   }
 
@@ -368,7 +361,7 @@ namespace dxvk {
     // (ClusterAccelBuilder manages its own surface list)
 
     m_surfaces.erase(it);
-    Logger::info(str::format("Removed subdivision surface ", surfaceId));
+    RTXMG_LOG(str::format("Removed subdivision surface ", surfaceId));
   }
 
   bool RtxMegaGeoBuilder::buildClusterBlas(
@@ -583,7 +576,7 @@ namespace dxvk {
 #endif
       }
 
-      Logger::info(str::format("RTX MegaGeo: Rebuilt ", instancesCreated, " instances (",
+      RTXMG_LOG(str::format("RTX MegaGeo: Rebuilt ", instancesCreated, " instances (",
           meshesNotReady, " not ready, ", meshesSkippedDegenerate, " skipped degenerate)"));
     } else {
       RTXMG_LOG("RTX MegaGeo: Scene is null, cannot rebuild instances");
@@ -622,7 +615,7 @@ namespace dxvk {
     auto buildDuration = std::chrono::duration_cast<std::chrono::microseconds>(buildEnd - buildStart);
     float frameTimeMs = buildDuration.count() * 0.001f;
     s_buildTimeMs = s_buildTimeMs * 0.9f + frameTimeMs * 0.1f; // Smoothed average
-    Logger::info(str::format(">>> RTXMG CHRONO: BuildAccel frame=", frameTimeMs, "ms smoothed=", s_buildTimeMs, "ms"));
+    RTXMG_LOG(str::format(">>> RTXMG CHRONO: BuildAccel frame=", frameTimeMs, "ms smoothed=", s_buildTimeMs, "ms"));
 #endif
 
     // Mark all surfaces as ready
@@ -633,20 +626,20 @@ namespace dxvk {
       RTXMG_LOG(str::format("RTX MegaGeo: blasPtrsBuffer available: ", (m_clusterAccels->blasPtrsBuffer.Get() != nullptr)));
 
       // Log buffer sizes for debugging GPU crashes
-      Logger::info(str::format("RTX MegaGeo: Buffer sizes - clusterShadingData: ",
+      RTXMG_LOG(str::format("RTX MegaGeo: Buffer sizes - clusterShadingData: ",
           m_clusterAccels->clusterShadingDataBuffer.GetBytes(), " bytes (",
           m_clusterAccels->clusterShadingDataBuffer.GetNumElements(), " elements)"));
-      Logger::info(str::format("RTX MegaGeo: Buffer sizes - clusterVertexPositions: ",
+      RTXMG_LOG(str::format("RTX MegaGeo: Buffer sizes - clusterVertexPositions: ",
           m_clusterAccels->clusterVertexPositionsBuffer.GetBytes(), " bytes (",
           m_clusterAccels->clusterVertexPositionsBuffer.GetNumElements(), " elements)"));
-      Logger::info(str::format("RTX MegaGeo: Buffer sizes - clusterVertexNormals: ",
+      RTXMG_LOG(str::format("RTX MegaGeo: Buffer sizes - clusterVertexNormals: ",
           m_clusterAccels->clusterVertexNormalsBuffer.GetBytes(), " bytes (",
           m_clusterAccels->clusterVertexNormalsBuffer.GetNumElements(), " elements)"));
-      Logger::info(str::format("RTX MegaGeo: numClusters=", m_clusterStats.allocated.m_numClusters,
+      RTXMG_LOG(str::format("RTX MegaGeo: numClusters=", m_clusterStats.allocated.m_numClusters,
           " numTriangles=", m_clusterStats.allocated.m_numTriangles));
 
       // DIAGNOSTIC: Log per-surface info to identify rendering issues
-      Logger::info("=== RTXMG SURFACE DIAGNOSTICS ===");
+      RTXMG_LOG("=== RTXMG SURFACE DIAGNOSTICS ===");
       for (auto& [id, surface] : m_surfaces) {
         if (surface.subdivSurface) {
           const Shape* shape = surface.subdivSurface->GetShape();
@@ -686,7 +679,7 @@ namespace dxvk {
                 ") max=(", aabb.m_maxs[0], ",", aabb.m_maxs[1], ",", aabb.m_maxs[2], ")"));
           } else {
             // Log healthy surfaces too for comparison
-            Logger::info(str::format("RTXMG DIAG: Surface ", id, " OK: ", numSurfaces, " patches, ", numVertices, " verts, extent=(",
+            RTXMG_LOG(str::format("RTXMG DIAG: Surface ", id, " OK: ", numSurfaces, " patches, ", numVertices, " verts, extent=(",
                 extentX, ",", extentY, ",", extentZ, ")"));
           }
 
@@ -714,7 +707,7 @@ namespace dxvk {
           }
         }
       }
-      Logger::info("=== END RTXMG DIAGNOSTICS ===");
+      RTXMG_LOG("=== END RTXMG DIAGNOSTICS ===");
 
       // Mark all surfaces as ready - BLAS addresses will be patched on GPU
       for (auto& [id, surface] : m_surfaces) {
@@ -744,11 +737,11 @@ namespace dxvk {
     if ((frameLogCounter++ % 60) == 0) { // Log every 60 frames (~1 second)
       if (m_stats.numClusters > 0) {
 #if RTXMG_CHRONO_TIMING
-        Logger::info(str::format(">>> RTXMG: ", m_stats.numClusters, " clusters, ",
+        RTXMG_LOG(str::format(">>> RTXMG: ", m_stats.numClusters, " clusters, ",
                                   m_stats.numTriangles, " tris, ", m_surfaces.size(), " surfaces, ",
                                   s_buildTimeMs, "ms <<<"));
 #else
-        Logger::info(str::format(">>> RTXMG ACTIVE: ", m_stats.numClusters, " clusters, ",
+        RTXMG_LOG(str::format(">>> RTXMG ACTIVE: ", m_stats.numClusters, " clusters, ",
                                   m_stats.numTriangles, " triangles from ", m_surfaces.size(), " surfaces <<<"));
 #endif
       } else {
@@ -763,14 +756,14 @@ namespace dxvk {
         auto shadingBuf = getClusterShadingDataBuffer();
         auto posBuf = getClusterVertexPositionsBuffer();
         auto normBuf = getClusterVertexNormalsBuffer();
-        Logger::info(str::format("RTX MegaGeo POST-BUILD[", s_bufDiagCount, "]: shadingBuf=", (void*)shadingBuf.Get(),
+        RTXMG_LOG(str::format("RTX MegaGeo POST-BUILD[", s_bufDiagCount, "]: shadingBuf=", (void*)shadingBuf.Get(),
             " posBuf=", (void*)posBuf.Get(), " normBuf=", (void*)normBuf.Get()));
 
         // Log BLAS addresses for first few surfaces
         for (auto& [surfId, surfData] : m_surfaces) {
           if (s_bufDiagCount == 0) {
             VkDeviceAddress blasAddr = getSurfaceBlasAddress(surfId);
-            Logger::info(str::format("RTX MegaGeo POST-BUILD: surface[", surfId, "] blasAddr=0x", std::hex, blasAddr, std::dec));
+            RTXMG_LOG(str::format("RTX MegaGeo POST-BUILD: surface[", surfId, "] blasAddr=0x", std::hex, blasAddr, std::dec));
             if (surfId >= 5) break; // Only log first few
           }
         }
@@ -857,7 +850,7 @@ namespace dxvk {
 
   bool RtxMegaGeoBuilder::hasValidBuffers() const {
     if (!m_clusterAccels) {
-      ONCE(Logger::info("RTX MegaGeo hasValidBuffers: m_clusterAccels is null"));
+      ONCE(RTXMG_LOG("RTX MegaGeo hasValidBuffers: m_clusterAccels is null"));
       return false;
     }
 
@@ -869,7 +862,7 @@ namespace dxvk {
 
     static uint32_t s_logCounter = 0;
     if ((s_logCounter++ % 100) == 0) {
-      Logger::info(str::format("RTX MegaGeo hasValidBuffers: shading=", shadingValid,
+      RTXMG_LOG(str::format("RTX MegaGeo hasValidBuffers: shading=", shadingValid,
                                " pos=", posValid, " norm=", normValid));
     }
 
@@ -1053,17 +1046,16 @@ namespace dxvk {
       shape->aabb.m_maxs[0] = maxPt.x;
       shape->aabb.m_maxs[1] = maxPt.y;
       shape->aabb.m_maxs[2] = maxPt.z;
-      Logger::info(str::format("convertToShape: Computed aabb min=(", minPt.x, ",", minPt.y, ",", minPt.z,
+      RTXMG_LOG(str::format("convertToShape: Computed aabb min=(", minPt.x, ",", minPt.y, ",", minPt.z,
           ") max=(", maxPt.x, ",", maxPt.y, ",", maxPt.z, ")"));
     } else {
       Logger::warn(str::format("convertToShape: Cannot compute aabb - numVertices=", desc.numVertices,
           " controlPoints=", (void*)desc.controlPoints));
     }
 
-    Logger::info(str::format("Converted to Shape: ", desc.numFaces, " faces, ", desc.numVertices, " vertices"));
+    RTXMG_LOG(str::format("Converted to Shape: ", desc.numFaces, " faces, ", desc.numVertices, " vertices"));
     return shape;
   }
-
 
   void RtxMegaGeoBuilder::updateHiZBuffer(const Rc<DxvkImageView>& depthBuffer) {
     // Integrate RTX Remix depth buffer with RTX MG HiZ system
@@ -1143,7 +1135,6 @@ namespace dxvk {
     // The HiZ buffer is now ready for use in compute_cluster_tiling shader
     // It will be bound via the TessellatorConfig::zbuffer pointer
   }
-
 
   void RtxMegaGeoBuilder::showImguiSettings() {
 #ifdef IMGUI_ENABLED
@@ -1309,12 +1300,9 @@ namespace dxvk {
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(0, m_patchMappingsBuffer))
         .addItem(nvrhi::BindingSetItem::StructuredBuffer_SRV(1, m_clusterAccels->blasPtrsBuffer.Get()));
 
-    // For the UAV, we need the actual instance buffer wrapped
-    // Since we only have VkBuffer, we'll need to get the DxvkBuffer from AccelManager
-    // For now, fall back to CPU download approach but mark this as TODO for full GPU optimization
-
-    // FALLBACK: Download and store for CPU-side patching
-    // This is temporary until we can properly wrap the instance buffer
+    // CPU download path for cases where only a raw VkBuffer handle is available.
+    // The GPU-optimized path (patchClusterBlasAddressesGPU) is the primary method
+    // used by AccelManager when an NVRHI buffer wrapper is available.
     std::vector<nvrhi::GpuVirtualAddress> blasAddresses = m_clusterAccels->blasPtrsBuffer.Download(m_commandList.Get());
 
     if (blasAddresses.empty()) {
@@ -1483,12 +1471,12 @@ namespace dxvk {
       if (m_downloadedBlasAddresses[i] != 0) nonZeroCount++;
     }
 
-    Logger::info(str::format("RTX MegaGeo: Downloaded ", blasAddresses.size(), " BLAS addresses, ",
+    RTXMG_LOG(str::format("RTX MegaGeo: Downloaded ", blasAddresses.size(), " BLAS addresses, ",
         nonZeroCount, " non-zero"));
 
     // Log first few for debugging
     for (size_t i = 0; i < std::min<size_t>(5, blasAddresses.size()); ++i) {
-      Logger::info(str::format("RTX MegaGeo: BLAS[", i, "] = 0x", std::hex, m_downloadedBlasAddresses[i]));
+      RTXMG_LOG(str::format("RTX MegaGeo: BLAS[", i, "] = 0x", std::hex, m_downloadedBlasAddresses[i]));
     }
 
     return nonZeroCount > 0;

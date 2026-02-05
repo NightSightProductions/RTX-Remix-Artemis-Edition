@@ -34,6 +34,7 @@
 #include "../utils/string_utils.h"
 #include "../utils/debug.h"
 #include "../../../util/log/log.h"
+#include "../rtxmg_log.h"
 
 using namespace dxvk;
 
@@ -564,7 +565,6 @@ std::ifstream& operator>>(std::ifstream& is, Vector2& v)
     return is;
 }
 
-
 std::ofstream& operator<<(std::ofstream& os, Vector3 const& v)
 {
     writeTrivial(os, v.x);
@@ -712,7 +712,6 @@ void Shape::WriteShape(const std::string& objFile) const
     }
 }
 
-
 bool Shape::ReadShape(const std::string& objFile)
 {
     using namespace std::chrono;
@@ -780,8 +779,6 @@ std::unique_ptr<Shape> Shape::DefaultShape()
 
     return shape;
 }
-
-
 
 //
 // udim
@@ -985,7 +982,6 @@ static void resolveUdims(Shape& shape)
     shape.mtlbind = std::move(mtlbind);
 }
 
-
 std::unique_ptr<Shape> Shape::LoadObjFile(const fs::path& m_filepath,
     bool parseMaterials, bool requireUVs)
 {
@@ -1011,7 +1007,6 @@ std::unique_ptr<Shape> Shape::LoadObjFile(const fs::path& m_filepath,
 
     shape->filepath = filepathStr;
 
-
     // Require texcoords, to simplify mesh processing later
     if (!shape->HasUV() && requireUVs)
     {
@@ -1028,7 +1023,7 @@ std::unique_ptr<Shape> Shape::LoadObjFile(const fs::path& m_filepath,
 
         if (fs::is_regular_file(p))
         {
-            Logger::info(str::format("Loading mtl file from disk: ", p.generic_string()));
+            RTXMG_LOG(str::format("Loading mtl file from disk: ", p.generic_string()));
             shape->mtls = parseMtllib(p.generic_string().c_str());
         }
         else
@@ -1038,21 +1033,8 @@ std::unique_ptr<Shape> Shape::LoadObjFile(const fs::path& m_filepath,
 
         resolveUdims(*shape);
 
-        if (!shape->capslib.empty())
-        {
-        	fs::path p = shape->capslib;
+        // Capsule loading is not supported — Catmull-Clark subdivision only
 
-            if (!fs::is_regular_file(p))
-            {
-                p = shape->filepath.parent_path() / shape->capslib;
-            }
-            if (fs::is_regular_file(p))
-            {
-                // TODO: load capsules
-                //Logger::info("Loading caps file from disk: %s", p.generic_string().c_str());
-                //shape->capsules.Load(p.generic_string());
-            }
-        }
     }
 
     return shape;
