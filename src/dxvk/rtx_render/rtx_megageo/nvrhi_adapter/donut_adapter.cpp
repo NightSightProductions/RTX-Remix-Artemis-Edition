@@ -43,7 +43,13 @@
 #include "../hiz/hiz_buffer_constants.h"
 
 #include <cstring>
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_DONUT_ADAPTER
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 namespace donut {
 namespace engine {

@@ -27,7 +27,13 @@
 #include "nvrhi_dxvk_shader.h"
 #include "../../../util/log/log.h"
 #include <unordered_map>
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_NVRHI_DXVK_DEVICE
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 namespace dxvk {
 

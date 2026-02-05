@@ -34,7 +34,13 @@
 #include "../utils/string_utils.h"
 #include "../utils/debug.h"
 #include "../../../util/log/log.h"
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_SHAPE
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 using namespace dxvk;
 

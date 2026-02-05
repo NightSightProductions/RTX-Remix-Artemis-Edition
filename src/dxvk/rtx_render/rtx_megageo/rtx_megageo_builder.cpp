@@ -24,6 +24,7 @@
 #include "../rtx_camera.h"
 #include "../../util/log/log.h"
 #include "../../../util/util_error.h"  // For DxvkError exception handling
+#include <algorithm>
 #include <cmath>
 #include <chrono>
 
@@ -45,7 +46,14 @@
 #include "osd_lite/opensubdiv/sdc/options.h"
 #include "osd_lite/opensubdiv/tmr/topologyMap.h"
 #include "osd_lite/opensubdiv/tmr/surfaceTableFactory.h"
+
 #include "rtxmg_log.h"
+#undef RTXMG_LOG
+#if RTXMG_LOG_RTX_MEGAGEO_BUILDER
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 namespace dxvk {
 
@@ -442,28 +450,25 @@ namespace dxvk {
       RTXMG_LOG("RTX MegaGeo: buildClusterBlas - Templates initialized");
     }
 
-    // Update HIZ buffer from depth buffer (if provided)
-    // Skip first 2 frames - depth buffer isn't rendered to yet and has UNDEFINED layout
-    RTXMG_LOG("RTX MegaGeo: buildClusterBlas - About to update HiZ buffer");
-    if (depthBuffer != nullptr && s_frameCounter > 2) {
-      updateHiZBuffer(depthBuffer);
-    } else if (depthBuffer != nullptr && s_frameCounter <= 2) {
-      RTXMG_LOG("RTX MegaGeo: Skipping HiZ update - waiting for depth buffer to be rendered");
-    }
-    RTXMG_LOG("RTX MegaGeo: buildClusterBlas - HiZ buffer update complete");
+    // HiZ culling DISABLED: With s_megaGeoOnly=true, only cluster geometry produces depth.
+    // This creates a feedback loop where HiZ oscillates between aggressive/no culling each frame,
+    // causing geometry to appear and disappear randomly.
+    // TODO: Re-enable when non-cluster geometry also provides depth, or use a rasterization pre-pass.
+    RTXMG_LOG("RTX MegaGeo: buildClusterBlas - HiZ culling disabled (feedback loop prevention)");
 
     // Configure tessellator
     TessellatorConfig config;
     config.enableVertexNormals = true;
     config.enableLogging = false;  // DISABLED - causes GPU readback stalls (~1 second per frame)
-    config.zbuffer = m_zBuffer.get();
+    config.zbuffer = nullptr;  // Disable HiZ culling to prevent oscillation
     config.camera = &m_tessellationCamera;
     config.isolationLevel = 0;  // Dynamic isolation level
     config.disableSubdivision = false;
 
-    config.memorySettings.maxClusters = 64u * 1024u;
-    config.memorySettings.vertexBufferBytes = 32ull << 20;
-    config.memorySettings.clasBufferBytes = 96ull << 20;
+    // Match sample defaults from TessellatorConfig
+    config.memorySettings.maxClusters = 1u << 21;  // 2M clusters (sample default)
+    config.memorySettings.vertexBufferBytes = 1024ull << 20;  // 1024MB (sample default)
+    config.memorySettings.clasBufferBytes = 3076ull << 20;  // 3076MB (sample default)
 
     // Set viewport size from depth buffer - CRITICAL for tessellation rate calculations
     // Without this, viewportSize is {0,0} and edge tessellation rates are all 0, causing clusters=0
@@ -502,7 +507,19 @@ namespace dxvk {
       uint32_t meshesSkippedDegenerate = 0;
 
       // Rebuild instances only for surfaceIds that have transforms this frame
-      for (const auto& [surfaceId, transform] : m_instanceTransforms) {
+      // IMPORTANT: Sort by surfaceId for deterministic instance ordering.
+      // When dirty tracking skips BuildAccel, m_surfaceToInstanceIndex must match
+      // the blasPtrsBuffer from the previous BuildAccel. Unordered_map iteration
+      // order is nondeterministic, so we sort to ensure consistent instance indices.
+      std::vector<uint32_t> sortedSurfaceIds;
+      sortedSurfaceIds.reserve(m_instanceTransforms.size());
+      for (const auto& [surfaceId, _] : m_instanceTransforms) {
+        sortedSurfaceIds.push_back(surfaceId);
+      }
+      std::sort(sortedSurfaceIds.begin(), sortedSurfaceIds.end());
+
+      for (uint32_t surfaceId : sortedSurfaceIds) {
+        const Matrix4& transform = m_instanceTransforms[surfaceId];
         auto meshIt = m_surfaceToMeshIndex.find(surfaceId);
         if (meshIt == m_surfaceToMeshIndex.end()) {
           // Mesh not ready yet (async creation in progress)
@@ -582,6 +599,58 @@ namespace dxvk {
       RTXMG_LOG("RTX MegaGeo: Scene is null, cannot rebuild instances");
     }
 
+    // Dirty tracking: skip expensive BuildAccel if nothing changed
+    {
+      bool needsRebuild = m_forceRebuild;
+
+      if (!needsRebuild) {
+        const float cameraPosThreshold = 0.01f;
+        const float cameraFwdThreshold = 0.001f;
+        const float fovThreshold = 0.001f;
+
+        float posDelta = length(actualCameraPos - m_prevCameraPosition);
+        float fwdDelta = length(forward - m_prevCameraForward);
+
+        if (posDelta > cameraPosThreshold ||
+            fwdDelta > cameraFwdThreshold ||
+            std::abs(fovY - m_prevFovY) > fovThreshold) {
+          needsRebuild = true;
+        }
+      }
+
+      if (!needsRebuild) {
+        if (m_instanceTransforms.size() != m_prevBuildTransforms.size()) {
+          needsRebuild = true;
+        } else {
+          for (const auto& [surfaceId, transform] : m_instanceTransforms) {
+            auto it = m_prevBuildTransforms.find(surfaceId);
+            if (it == m_prevBuildTransforms.end()) {
+              needsRebuild = true;
+              break;
+            }
+            const auto& prev = it->second;
+            bool same = true;
+            for (int r = 0; r < 4 && same; r++)
+              for (int c = 0; c < 4 && same; c++)
+                if (std::abs(transform.data[r][c] - prev.data[r][c]) > 1e-6f)
+                  same = false;
+            if (!same) { needsRebuild = true; break; }
+          }
+        }
+      }
+
+      m_prevCameraPosition = actualCameraPos;
+      m_prevCameraForward = forward;
+      m_prevFovY = fovY;
+      m_prevBuildTransforms = m_instanceTransforms;
+      m_forceRebuild = false;
+
+      if (!needsRebuild) {
+        RTXMG_LOG("RTX MegaGeo: Skipping BuildAccel - nothing changed");
+        return true;
+      }
+    }
+
     // Chrono timing for BuildAccel
 #if RTXMG_CHRONO_TIMING
     static float s_buildTimeMs = 0.0f;
@@ -637,6 +706,29 @@ namespace dxvk {
           m_clusterAccels->clusterVertexNormalsBuffer.GetNumElements(), " elements)"));
       RTXMG_LOG(str::format("RTX MegaGeo: numClusters=", m_clusterStats.allocated.m_numClusters,
           " numTriangles=", m_clusterStats.allocated.m_numTriangles));
+
+      // CRITICAL DEBUG: Log desired vs allocated to understand if tessellation is producing geometry
+      Logger::info(str::format("RTX MegaGeo STATS: desired clusters=", m_clusterStats.desired.m_numClusters,
+          " tris=", m_clusterStats.desired.m_numTriangles,
+          " | allocated clusters=", m_clusterStats.allocated.m_numClusters,
+          " tris=", m_clusterStats.allocated.m_numTriangles));
+      Logger::info(str::format("RTX MegaGeo STATS: desired blasSize=", m_clusterStats.desired.m_blasSize,
+          " clasSize=", m_clusterStats.desired.m_clasSize,
+          " vertBufSize=", m_clusterStats.desired.m_vertexBufferSize));
+      Logger::info(str::format("RTX MegaGeo STATS: allocated blasSize=", m_clusterStats.allocated.m_blasSize,
+          " clasSize=", m_clusterStats.allocated.m_clasSize,
+          " vertBufSize=", m_clusterStats.allocated.m_vertexBufferSize));
+      if (m_clusterStats.allocated.m_numTriangles == 0) {
+        Logger::err("RTX MegaGeo STATS: *** ZERO TRIANGLES PRODUCED! Tessellation is not generating geometry ***");
+        Logger::err(str::format("RTX MegaGeo STATS: Config: tessMode=", (int)config.tessMode,
+            " isolationLevel=", config.isolationLevel,
+            " fineTessRate=", config.fineTessellationRate,
+            " coarseTessRate=", config.coarseTessellationRate,
+            " viewportSize=", config.viewportSize.x, "x", config.viewportSize.y,
+            " disableSubdiv=", config.disableSubdivision ? "YES" : "NO"));
+        Logger::err(str::format("RTX MegaGeo STATS: Scene: meshes=", m_scene ? m_scene->GetSubdMeshes().size() : 0,
+            " instances=", m_scene ? m_scene->GetSubdMeshInstances().size() : 0));
+      }
 
       // DIAGNOSTIC: Log per-surface info to identify rendering issues
       RTXMG_LOG("=== RTXMG SURFACE DIAGNOSTICS ===");
@@ -708,6 +800,79 @@ namespace dxvk {
         }
       }
       RTXMG_LOG("=== END RTXMG DIAGNOSTICS ===");
+
+      // CRITICAL DEBUG: Readback BLAS addresses and vertex positions to verify GPU data
+      {
+        static uint32_t s_readbackCount = 0;
+        if (s_readbackCount < 3) {
+          // BLAS address readback
+          Logger::info("RTX MegaGeo: Performing BLAS address readback verification...");
+          Logger::info(str::format("RTX MegaGeo: blasPtrsBuffer bytes=",
+              m_clusterAccels->blasPtrsBuffer.GetBytes(),
+              " elements=", m_clusterAccels->blasPtrsBuffer.GetNumElements()));
+          bool blasOk = downloadBlasAddresses();
+          Logger::info(str::format("RTX MegaGeo BLAS READBACK: result=", blasOk ? "OK (has non-zero)" : "FAIL (all zero or empty)"));
+
+          // Vertex position readback - check if GPU vertex data is valid
+          if (m_clusterAccels->clusterVertexPositionsBuffer.GetBytes() > 0) {
+            auto vertexPositions = m_clusterAccels->clusterVertexPositionsBuffer.Download(m_commandList.Get());
+            uint32_t totalVerts = static_cast<uint32_t>(vertexPositions.size());
+            uint32_t zeroVerts = 0, nanVerts = 0, infVerts = 0, sentinelVerts = 0;
+            float minX = 1e30f, minY = 1e30f, minZ = 1e30f;
+            float maxX = -1e30f, maxY = -1e30f, maxZ = -1e30f;
+            const float kSentinel = 10000.0f;
+            for (uint32_t i = 0; i < totalVerts; ++i) {
+              float x = vertexPositions[i].x, y = vertexPositions[i].y, z = vertexPositions[i].z;
+              if (x == 0.0f && y == 0.0f && z == 0.0f) zeroVerts++;
+              else if (x == kSentinel && y == kSentinel && z == kSentinel) sentinelVerts++;
+              if (std::isnan(x) || std::isnan(y) || std::isnan(z)) nanVerts++;
+              if (std::isinf(x) || std::isinf(y) || std::isinf(z)) infVerts++;
+              if (!std::isnan(x) && !std::isinf(x) && x != kSentinel) { minX = std::min(minX, x); maxX = std::max(maxX, x); }
+              if (!std::isnan(y) && !std::isinf(y) && y != kSentinel) { minY = std::min(minY, y); maxY = std::max(maxY, y); }
+              if (!std::isnan(z) && !std::isinf(z) && z != kSentinel) { minZ = std::min(minZ, z); maxZ = std::max(maxZ, z); }
+            }
+            // sentinel = shader never wrote, zero = shader wrote (0,0,0), other = valid data
+            uint32_t realData = totalVerts - zeroVerts - sentinelVerts - nanVerts - infVerts;
+            Logger::info(str::format("RTX MegaGeo VERTEX READBACK: ", totalVerts, " total, ",
+                sentinelVerts, " SENTINEL(never written), ", zeroVerts, " zero(shader wrote 0), ",
+                realData, " real data, ", nanVerts, " NaN, ", infVerts, " Inf"));
+            Logger::info(str::format("RTX MegaGeo VERTEX READBACK: bounds min=(", minX, ",", minY, ",", minZ,
+                ") max=(", maxX, ",", maxY, ",", maxZ, ")"));
+            // Find first non-zero vertex and log its location
+            uint32_t firstNonZero = UINT32_MAX;
+            uint32_t lastNonZero = 0;
+            for (uint32_t i = 0; i < totalVerts; ++i) {
+              float x = vertexPositions[i].x, y = vertexPositions[i].y, z = vertexPositions[i].z;
+              if (x != 0.0f || y != 0.0f || z != 0.0f) {
+                if (firstNonZero == UINT32_MAX) firstNonZero = i;
+                lastNonZero = i;
+              }
+            }
+            Logger::info(str::format("RTX MegaGeo VERTEX READBACK: firstNonZero=", firstNonZero,
+                " lastNonZero=", lastNonZero, " populated range=", (lastNonZero >= firstNonZero ? lastNonZero - firstNonZero + 1 : 0)));
+            // Log 20 vertices around the first non-zero region
+            if (firstNonZero != UINT32_MAX) {
+              uint32_t logStart = (firstNonZero > 5) ? firstNonZero - 5 : 0;
+              for (uint32_t i = logStart; i < std::min<uint32_t>(logStart + 20, totalVerts); ++i) {
+                Logger::info(str::format("RTX MegaGeo VERTEX[", i, "] = (", vertexPositions[i].x, ",",
+                    vertexPositions[i].y, ",", vertexPositions[i].z, ")"));
+              }
+              // Also log a few from the middle of the populated range
+              uint32_t mid = firstNonZero + (lastNonZero - firstNonZero) / 2;
+              Logger::info(str::format("RTX MegaGeo VERTEX READBACK: mid-range samples around ", mid, ":"));
+              uint32_t midStart = (mid > 5) ? mid - 5 : 0;
+              for (uint32_t i = midStart; i < std::min<uint32_t>(midStart + 10, totalVerts); ++i) {
+                Logger::info(str::format("RTX MegaGeo VERTEX[", i, "] = (", vertexPositions[i].x, ",",
+                    vertexPositions[i].y, ",", vertexPositions[i].z, ")"));
+              }
+            }
+          } else {
+            Logger::warn("RTX MegaGeo VERTEX READBACK: clusterVertexPositionsBuffer is empty!");
+          }
+
+          s_readbackCount++;
+        }
+      }
 
       // Mark all surfaces as ready - BLAS addresses will be patched on GPU
       for (auto& [id, surface] : m_surfaces) {
@@ -1343,7 +1508,33 @@ namespace dxvk {
       return;
     }
 
-    RTXMG_LOG(str::format("RTX MegaGeo: GPU-side patching ", mappings.size(), " cluster BLAS addresses"));
+    // Always-on logging for GPU patching
+    static uint32_t s_gpuPatchLogCount = 0;
+    if (s_gpuPatchLogCount < 5) {
+      Logger::info(str::format("RTX MegaGeo GPU PATCH: patching ", mappings.size(), " instances, blasPtrsBuffer=",
+          m_clusterAccels->blasPtrsBuffer.GetBytes(), " bytes (",
+          m_clusterAccels->blasPtrsBuffer.GetNumElements(), " elements)"));
+      Logger::info(str::format("RTX MegaGeo GPU PATCH: instanceBuffer byteSize=", instanceBuffer->getDesc().byteSize,
+          " offset=", instanceBufferOffset,
+          " stride=", sizeof(VkAccelerationStructureInstanceKHR)));
+      // Log first few mappings
+      for (size_t i = 0; i < std::min<size_t>(5, mappings.size()); ++i) {
+        Logger::info(str::format("RTX MegaGeo GPU PATCH mapping[", i, "]: remixIdx=", mappings[i].remixInstanceIndex,
+            "+offset=", instanceBufferOffset,
+            " -> rtxmgIdx=", mappings[i].rtxmgInstanceIndex));
+      }
+      // Check for out-of-bounds rtxmg indices
+      uint32_t maxRtxmgIdx = 0;
+      for (const auto& m : mappings) {
+        if (m.rtxmgInstanceIndex > maxRtxmgIdx) maxRtxmgIdx = m.rtxmgInstanceIndex;
+      }
+      uint32_t blasElements = m_clusterAccels->blasPtrsBuffer.GetNumElements();
+      if (maxRtxmgIdx >= blasElements) {
+        Logger::err(str::format("RTX MegaGeo GPU PATCH: *** OUT OF BOUNDS *** maxRtxmgIdx=", maxRtxmgIdx,
+            " >= blasPtrsBuffer elements=", blasElements));
+      }
+      s_gpuPatchLogCount++;
+    }
 
     nvrhi::utils::ScopedMarker marker(m_commandList.Get(), "RtxMegaGeoBuilder::patchClusterBlasAddressesGPU");
 
@@ -1471,12 +1662,21 @@ namespace dxvk {
       if (m_downloadedBlasAddresses[i] != 0) nonZeroCount++;
     }
 
-    RTXMG_LOG(str::format("RTX MegaGeo: Downloaded ", blasAddresses.size(), " BLAS addresses, ",
-        nonZeroCount, " non-zero"));
+    Logger::info(str::format("RTX MegaGeo BLAS READBACK: Downloaded ", blasAddresses.size(), " BLAS addresses, ",
+        nonZeroCount, " non-zero, ", (blasAddresses.size() - nonZeroCount), " ZERO"));
 
-    // Log first few for debugging
-    for (size_t i = 0; i < std::min<size_t>(5, blasAddresses.size()); ++i) {
-      RTXMG_LOG(str::format("RTX MegaGeo: BLAS[", i, "] = 0x", std::hex, m_downloadedBlasAddresses[i]));
+    // Log first few and any zero entries for debugging
+    for (size_t i = 0; i < std::min<size_t>(10, blasAddresses.size()); ++i) {
+      Logger::info(str::format("RTX MegaGeo BLAS[", i, "] = ", m_downloadedBlasAddresses[i],
+          (m_downloadedBlasAddresses[i] == 0 ? " *** ZERO ***" : "")));
+    }
+    // Also log any zero addresses beyond the first 10
+    if (blasAddresses.size() > 10) {
+      for (size_t i = 10; i < blasAddresses.size(); ++i) {
+        if (m_downloadedBlasAddresses[i] == 0) {
+          Logger::warn(str::format("RTX MegaGeo BLAS[", i, "] = 0 *** ZERO ***"));
+        }
+      }
     }
 
     return nonZeroCount > 0;

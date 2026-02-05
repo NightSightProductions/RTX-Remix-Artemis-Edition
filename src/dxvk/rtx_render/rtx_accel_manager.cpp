@@ -20,6 +20,7 @@
 * DEALINGS IN THE SOFTWARE.
 */
 #include <mutex>
+#include <set>
 #include <vector>
 #include <assert.h>
 
@@ -520,23 +521,10 @@ namespace dxvk {
         }
       }
 
-      // RTX MegaGeo: Preserve transforms from previous frame for static geometry
-      // Static geometry instances get GC'd after 1 frame (numFramesToKeepInstances=1)
-      // but the subdivision surfaces persist - we need to keep rendering them
-      uint32_t preservedCount = 0;
-      for (const auto& [surfaceId, prevTransform] : m_prevMegaGeoTransforms) {
-        if (surfaceTransforms.find(surfaceId) == surfaceTransforms.end()) {
-          // Surface has no transform this frame - preserve the previous one
-          surfaceTransforms[surfaceId] = prevTransform;
-          preservedCount++;
-        }
-      }
+      // No transform preservation: ClusterBlas fast-path in DrawCallCache keeps entries alive,
+      // and 10x GC lifetime protects them. Preserved transforms waste cluster budget on invisible surfaces.
 
-      // Store current transforms for next frame
-      m_prevMegaGeoTransforms = surfaceTransforms;
-
-      Logger::info(str::format("RTX MegaGeo: Collected ", clusterInstCount, " cluster instance transforms, unique=", surfaceTransforms.size() - preservedCount,
-          ", preserved=", preservedCount, ", total=", surfaceTransforms.size()));
+      Logger::info(str::format("RTX MegaGeo: Collected ", clusterInstCount, " cluster instance transforms, unique=", surfaceTransforms.size()));
 
       // Build cluster BLAS if we have any transforms
       if (!surfaceTransforms.empty()) {
@@ -1271,12 +1259,27 @@ namespace dxvk {
 
       std::vector<RtxMegaGeoBuilder::InstancePatchMapping> mappings;
       mappings.reserve(m_clusterInstancePatches.size());
+      std::set<uint32_t> uniqueRtxmgIndices;
       for (const auto& patch : m_clusterInstancePatches) {
         uint32_t globalIndex = patch.remixInstanceIndex;
         if (patch.tlasType == Tlas::Unordered) {
           globalIndex += opaqueCount;
         }
         mappings.push_back({globalIndex, patch.rtxmgInstanceIndex});
+        uniqueRtxmgIndices.insert(patch.rtxmgInstanceIndex);
+      }
+
+      // CRITICAL DEBUG: Check if multiple TLAS instances map to different RTXMG BLASes
+      ONCE(Logger::info(str::format("RTX MegaGeo PATCH: ", mappings.size(), " mappings, ",
+          uniqueRtxmgIndices.size(), " unique RTXMG indices, opaqueCount=", opaqueCount)));
+      // Log first 10 mappings to see the pattern
+      static uint32_t s_patchLogCount = 0;
+      if (s_patchLogCount < 3) {
+        for (size_t i = 0; i < std::min<size_t>(10, mappings.size()); ++i) {
+          Logger::info(str::format("RTX MegaGeo PATCH[", i, "]: remixIdx=", mappings[i].remixInstanceIndex,
+              " -> rtxmgIdx=", mappings[i].rtxmgInstanceIndex));
+        }
+        s_patchLogCount++;
       }
 
       m_megaGeoBuilder->patchClusterBlasAddressesGPU(instanceBufferWrapper.Get(), 0, mappings);

@@ -28,7 +28,13 @@
 #include "../../rtx_context.h"  // For RtxContext::commitComputeStateForMegaGeo
 #include <algorithm>
 #include <array>
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_NVRHI_DXVK_COMMAND_LIST
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 namespace dxvk {
 
@@ -275,6 +281,17 @@ namespace dxvk {
 
     Rc<DxvkBuffer> dxvkDst = nvrhiDst->getDxvkBuffer();
     Rc<DxvkBuffer> dxvkSrc = nvrhiSrc->getDxvkBuffer();
+
+    // When the special dispatch path is used (pre-built descriptor sets / raw Vulkan dispatch),
+    // DXVK doesn't track compute shader UAV writes. We must insert an explicit barrier
+    // to ensure compute writes are visible before the transfer read.
+    // Use the NVRHI adapter's own state tracking (m_BufferStates) to detect when a buffer
+    // transitions from UAV (compute write) to CopySource (transfer read).
+    if (m_EnableAutomaticBarriers) {
+      requireBufferState(src, nvrhi::ResourceStates::CopySource);
+      requireBufferState(dst, nvrhi::ResourceStates::CopyDest);
+      commitBarriers();
+    }
 
     m_context->copyBuffer(dxvkDst, dstOffset, dxvkSrc, srcOffset, size);
   }
@@ -1347,6 +1364,15 @@ namespace dxvk {
 
         // Store the binding set handle to keep the descriptor set alive until command buffer completes
         m_pendingDescriptorSets.push_back({nvrhiBindingSet->getDescriptorSet(), setIndex, pipelineLayout, bindingSet});
+
+        // Even though we skip DXVK per-binding calls, update m_BufferStates so the automatic
+        // barrier system knows what state each buffer is in after this dispatch.
+        // Without this, subsequent copyBuffer/bufferBarrier calls would see stale states
+        // and might not insert necessary barriers (e.g. compute UAV write → transfer read).
+        if (m_EnableAutomaticBarriers) {
+          setResourceStatesForBindingSet(bindingSet.Get());
+        }
+
         bindingSetIndex++;
         continue;  // Skip per-binding approach for this set
       }

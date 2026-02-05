@@ -43,7 +43,13 @@
 #include <algorithm>
 #include <numeric>
 #include <ranges>
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_SUBDIVISION_SURFACE
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 using namespace OpenSubdiv;
 using namespace dxvk;

@@ -88,7 +88,14 @@ using namespace dxvk;
 
 #include "../subdivision/subdivision_surface.h"
 #include "../subdivision/topology_map.h"
+
 #include "../rtxmg_log.h"
+#undef RTXMG_LOG
+#if RTXMG_LOG_CLUSTER_ACCEL_BUILDER
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 using namespace donut;
 using namespace nvrhi::rt;
@@ -878,9 +885,65 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
     nvrhi::utils::ScopedMarker marker(commandList, "FillInstanceClusters");
     stats::clusterAccelSamplers.fillClustersTime.Start(commandList);
 
-    // NOTE: Do NOT clear vertex buffer here - matching sample behavior
-    // The sample doesn't clear, and clearing can cause issues with barrier ordering
-    // if the CLAS is still using the buffer from the previous frame
+    // DIAGNOSTIC: Fill vertex buffer with sentinel value (10000.0f = 0x461C4000) to distinguish
+    // "shader wrote zero" from "shader never wrote". Only for first 3 frames.
+    {
+        static uint32_t sentinelFrame = 0;
+        if (sentinelFrame < 3) {
+            Logger::info(str::format("RTX MegaGeo SENTINEL: Filling vertex buffer with 10000.0f (frame ", sentinelFrame, ")"));
+            commandList->clearBufferUInt(accels.clusterVertexPositionsBuffer.Get(), 0x461C4000u); // 10000.0f as uint32
+            sentinelFrame++;
+        }
+    }
+
+    // Diagnostic: read back the indirect dispatch args and cluster offset-counts
+    // to verify CopyClusterOffset populated them correctly
+    {
+        static uint32_t fillDiagFrame = 0;
+        if (fillDiagFrame < 3) {
+            auto indirectArgs = m_fillClustersDispatchIndirectBuffer.Download(commandList);
+            auto offsetCounts = m_clusterOffsetCountsBuffer.Download(commandList);
+            uint32_t numInstances = std::min(uint32_t(instances.size()), m_numInstances);
+            uint32_t maxLog = std::min(numInstances, 5u);
+            Logger::info(dxvk::str::format("RTX MegaGeo FILL DIAG frame=", fillDiagFrame,
+                " indirectArgs.size()=", indirectArgs.size(), " offsetCounts.size()=", offsetCounts.size(),
+                " numInstances=", numInstances));
+            for (uint32_t i = 0; i < maxLog; ++i) {
+                // Slot layout per instance: [PureBSpline=0, RegularBSpline=1, Limit=2, AllTypes=3] x NumTypes=4
+                uint32_t base = i * ClusterDispatchType::NumTypes;
+                uint32_t limitIdx = base + ClusterDispatchType::Limit;
+                uint32_t allIdx = base + ClusterDispatchType::AllTypes;
+                if (allIdx < indirectArgs.size() && allIdx < offsetCounts.size()) {
+                    Logger::info(dxvk::str::format("RTX MegaGeo FILL DIAG inst[", i, "]: "
+                        "Limit dispatch=(", indirectArgs[limitIdx].x, ",", indirectArgs[limitIdx].y, ",", indirectArgs[limitIdx].z, ") "
+                        "All dispatch=(", indirectArgs[allIdx].x, ",", indirectArgs[allIdx].y, ",", indirectArgs[allIdx].z, ") "
+                        "Limit OC=(off=", offsetCounts[limitIdx].x, ",cnt=", offsetCounts[limitIdx].y, ") "
+                        "All OC=(off=", offsetCounts[allIdx].x, ",cnt=", offsetCounts[allIdx].y, ")"));
+                }
+            }
+            // Also readback first few clusters to verify nVertexOffset values
+            auto clusters = m_clustersBuffer.Download(commandList);
+            Logger::info(dxvk::str::format("RTX MegaGeo FILL DIAG: clusters buffer has ", clusters.size(), " entries"));
+            uint32_t clusterLog = std::min(uint32_t(clusters.size()), 10u);
+            for (uint32_t i = 0; i < clusterLog; ++i) {
+                Logger::info(dxvk::str::format("RTX MegaGeo CLUSTER[", i, "]: iSurface=", clusters[i].iSurface,
+                    " nVertexOffset=", clusters[i].nVertexOffset,
+                    " offset=(", clusters[i].offset.x, ",", clusters[i].offset.y, ")"
+                    " sizeX=", clusters[i].sizeX, " sizeY=", clusters[i].sizeY));
+            }
+            // Log a few more from the middle if there are many
+            if (clusters.size() > 20) {
+                uint32_t mid = uint32_t(clusters.size()) / 2;
+                for (uint32_t i = mid; i < std::min(mid + 5u, uint32_t(clusters.size())); ++i) {
+                    Logger::info(dxvk::str::format("RTX MegaGeo CLUSTER[", i, "]: iSurface=", clusters[i].iSurface,
+                        " nVertexOffset=", clusters[i].nVertexOffset,
+                        " offset=(", clusters[i].offset.x, ",", clusters[i].offset.y, ")"
+                        " sizeX=", clusters[i].sizeX, " sizeY=", clusters[i].sizeY));
+                }
+            }
+            fillDiagFrame++;
+        }
+    }
 
 #if RTXMG_CHRONO_TIMING
     auto fillStart = std::chrono::high_resolution_clock::now();
@@ -1096,6 +1159,16 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             FillClustersPermutation shaderPermutation = { false /*subd.m_hasDisplacementMaterial*/, m_tessellatorConfig.enableVertexNormals, ShaderPermutationSurfaceType::All };
             state.setPipeline(GetFillClustersPSO(shaderPermutation));
             commandList->setComputeState(state);
+            // Dispatch slot design (matching sample code behavior):
+            //   - CopyClusterOffset(AllTypes) writes VERTEX dispatch args to the Limit slot (2)
+            //     and TEXCOORD dispatch args to the AllTypes slot (3).
+            //     See copy_cluster_offset.comp.slang line 92: when dispatchTypeIndex==All,
+            //     it writes InOutFillClustersIndirectArgs[..+ClusterDispatchType::Limit].
+            //   - The fill_clusters shader compiled with SURFACE_TYPE_ALL reads
+            //     t_ClusterOffsetCounts from slot 3 (ClusterDispatchType::All) to get
+            //     the total cluster offset+count for this instance.
+            //   - So: dispatch from slot 2 (Limit) for vertex workgroups, shader reads slot 3 (All) for cluster data.
+            //     Both are populated by CopyClusterOffset(AllTypes). This is intentional, not a bug.
             uint32_t dispatchIndirectArgsOffset = (instanceIndex * ClusterDispatchType::NumTypes + ClusterDispatchType::Limit) * fillElementSize;
             RTXMG_LOG(str::format("RTX MegaGeo: FillInstanceClusters - monolithic dispatchIndirect offset=", dispatchIndirectArgsOffset,
                 " bufferSize=", fillBufferSize, " instanceIndex=", instanceIndex));
@@ -1159,26 +1232,79 @@ void ClusterAccelBuilder::FillInstanceClusters(const RTXMGScene& scene, ClusterA
             vectorlog::Log(debugOutput, ShaderDebugElement::OutputLambda, vectorlog::FormatOptions{ .wrap = false, .header = false, .elementIndex = false, .startIndex = 1, .count = numElements });
         }
 
-        // DEBUG: Always log first few vertex positions from debug buffer
-        // ShaderDebugElement has: float4 floatData (px,py,pz,uvx), uint4 uintData (surf,cluster,pt,uvy_bits), payloadType, lineNumber
+        // DEBUG: Log shader debug buffer and input data for first instance only (first 3 frames)
         {
-            auto debugOutput = m_debugBuffer.Download(commandList);
-            RTXMG_LOG("=== DEBUG: Fill Clusters Vertex Positions ===");
-            for (int i = 1; i < 16 && i < (int)debugOutput.size(); i++) { // Start at 1 (skip counter slot)
-                const auto& d = debugOutput[i];
-                float px = d.floatData.x;
-                float py = d.floatData.y;
-                float pz = d.floatData.z;
-                float uvx = d.floatData.w;
-                uint32_t surfIdx = d.uintData.x;
-                uint32_t clustIdx = d.uintData.y;
-                uint32_t ptIdx = d.uintData.z;
-                float uvy = *reinterpret_cast<const float*>(&d.uintData.w);
-                if (d.payloadType != 0) {
-                    RTXMG_LOG(str::format("  [", i, "] pos=(", px, ",", py, ",", pz, ") uv=(", uvx, ",", uvy, ") surf=", surfIdx, " cluster=", clustIdx, " pt=", ptIdx));
+            static uint32_t debugFrameCount = 0;
+            if (instanceIndex == 0 && debugFrameCount < 3) {
+                // 1) Shader debug buffer: shows actual vertex positions computed by shader
+                auto debugOutput = m_debugBuffer.Download(commandList);
+                Logger::info("=== SHADER DEBUG: Fill Clusters Vertex Positions (instance 0) ===");
+                uint32_t validEntries = 0;
+                for (int i = 1; i < 16 && i < (int)debugOutput.size(); i++) {
+                    const auto& d = debugOutput[i];
+                    float px = d.floatData.x;
+                    float py = d.floatData.y;
+                    float pz = d.floatData.z;
+                    float uvx = d.floatData.w;
+                    uint32_t surfIdx = d.uintData.x;
+                    uint32_t clustIdx = d.uintData.y;
+                    uint32_t ptIdx = d.uintData.z;
+                    float uvy = *reinterpret_cast<const float*>(&d.uintData.w);
+                    Logger::info(str::format("  [", i, "] pos=(", px, ",", py, ",", pz, ") uv=(", uvx, ",", uvy,
+                        ") surf=", surfIdx, " cluster=", clustIdx, " pt=", ptIdx, " payloadType=", d.payloadType));
+                    if (d.payloadType != 0) validEntries++;
                 }
+                Logger::info(str::format("  validEntries=", validEntries, " (expect 8 if shader ran for clusterIndex<2)"));
+
+                // 2) Input data check: download control points to verify they're not zero
+                const auto& subd = *subdMeshes[instances[0].meshID];
+                {
+                    nvrhi::IBuffer* posBuf = subd.m_positionsBuffer.Get();
+                    size_t posBytes = posBuf ? posBuf->getDesc().byteSize : 0;
+                    uint32_t cpTotal = posBytes > 0 ? static_cast<uint32_t>(posBytes / sizeof(float3)) : 0;
+                    Logger::info(str::format("RTX MegaGeo INPUT DATA: mesh[", instances[0].meshID, "] positionsBuffer bytes=", posBytes, " elements=", cpTotal));
+                    if (posBytes > 0) {
+                        auto readbackDesc = GetReadbackDesc(posBuf->getDesc());
+                        auto staging = m_device->createBuffer(readbackDesc);
+                        // Round UP to ensure vector has at least posBytes of space (avoid heap overrun)
+                        std::vector<float3> controlPoints((posBytes + sizeof(float3) - 1) / sizeof(float3));
+                        DownloadBuffer(posBuf, (void*)controlPoints.data(), staging.Get(), false, commandList);
+                        uint32_t cpZero = 0;
+                        for (uint32_t i = 0; i < cpTotal; ++i) {
+                            if (controlPoints[i].x == 0.0f && controlPoints[i].y == 0.0f && controlPoints[i].z == 0.0f) cpZero++;
+                        }
+                        Logger::info(str::format("RTX MegaGeo INPUT DATA: controlPoints total=", cpTotal, " zero=", cpZero, " nonZero=", (cpTotal - cpZero)));
+                        for (uint32_t i = 0; i < std::min(cpTotal, 10u); ++i) {
+                            Logger::info(str::format("  CP[", i, "] = (", controlPoints[i].x, ",", controlPoints[i].y, ",", controlPoints[i].z, ")"));
+                        }
+                    }
+                }
+
+                // 3) Also check patch points
+                {
+                    nvrhi::IBuffer* ppBuf = subd.m_vertexDeviceData.patchPoints.Get();
+                    size_t ppBytes = ppBuf ? ppBuf->getDesc().byteSize : 0;
+                    uint32_t ppTotal = ppBytes > 0 ? static_cast<uint32_t>(ppBytes / sizeof(float3)) : 0;
+                    Logger::info(str::format("RTX MegaGeo INPUT DATA: mesh[", instances[0].meshID, "] patchPoints bytes=", ppBytes, " elements=", ppTotal));
+                    if (ppBytes > 0) {
+                        auto readbackDesc = GetReadbackDesc(ppBuf->getDesc());
+                        auto staging = m_device->createBuffer(readbackDesc);
+                        // Round UP to ensure vector has at least ppBytes of space (avoid heap overrun)
+                        std::vector<float3> patchPoints((ppBytes + sizeof(float3) - 1) / sizeof(float3));
+                        DownloadBuffer(ppBuf, (void*)patchPoints.data(), staging.Get(), false, commandList);
+                        uint32_t ppZero = 0;
+                        for (uint32_t i = 0; i < ppTotal; ++i) {
+                            if (patchPoints[i].x == 0.0f && patchPoints[i].y == 0.0f && patchPoints[i].z == 0.0f) ppZero++;
+                        }
+                        Logger::info(str::format("RTX MegaGeo INPUT DATA: patchPoints total=", ppTotal, " zero=", ppZero, " nonZero=", (ppTotal - ppZero)));
+                        for (uint32_t i = 0; i < std::min(ppTotal, 10u); ++i) {
+                            Logger::info(str::format("  PP[", i, "] = (", patchPoints[i].x, ",", patchPoints[i].y, ",", patchPoints[i].z, ")"));
+                        }
+                    }
+                }
+
+                debugFrameCount++;
             }
-            RTXMG_LOG("=== END DEBUG ===");
         }
 #if RTXMG_CHRONO_TIMING
         auto instEnd = std::chrono::high_resolution_clock::now();
@@ -1391,17 +1517,30 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
     params.clasDataBaseAddress = accels.clasBuffer.GetGpuVirtualAddress();
     params.disableSubdivision = m_tessellatorConfig.disableSubdivision ? 1 : 0;
 
-    // STRUCT ALIGNMENT DEBUG - always log to diagnose shader mismatch
-    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG sizeof(ComputeClusterTilingParams)=", sizeof(ComputeClusterTilingParams))));
-    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG offset(disableSubdivision)=", offsetof(ComputeClusterTilingParams, disableSubdivision),
+    // STRUCT ALIGNMENT DEBUG - always log via Logger::info to diagnose shader mismatch
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG sizeof(ComputeClusterTilingParams)=", sizeof(ComputeClusterTilingParams))));
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(surfaceStart)=", offsetof(ComputeClusterTilingParams, surfaceStart),
+        " offset(surfaceEnd)=", offsetof(ComputeClusterTilingParams, surfaceEnd),
+        " offset(matWorldToClip)=", offsetof(ComputeClusterTilingParams, matWorldToClip),
+        " offset(localToWorld)=", offsetof(ComputeClusterTilingParams, localToWorld))));
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(cameraPos)=", offsetof(ComputeClusterTilingParams, cameraPos),
+        " offset(aabb)=", offsetof(ComputeClusterTilingParams, aabb),
+        " offset(viewportSize)=", offsetof(ComputeClusterTilingParams, viewportSize))));
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(disableSubdivision)=", offsetof(ComputeClusterTilingParams, disableSubdivision),
         " offset(clasDataBaseAddress)=", offsetof(ComputeClusterTilingParams, clasDataBaseAddress),
         " offset(clusterVertexPositionsBaseAddress)=", offsetof(ComputeClusterTilingParams, clusterVertexPositionsBaseAddress))));
-    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG offset(globalDisplacementScale)=", offsetof(ComputeClusterTilingParams, globalDisplacementScale),
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG offset(fineTessellationRate)=", offsetof(ComputeClusterTilingParams, fineTessellationRate),
+        " offset(coarseTessellationRate)=", offsetof(ComputeClusterTilingParams, coarseTessellationRate),
         " offset(maxClusters)=", offsetof(ComputeClusterTilingParams, maxClusters),
         " offset(maxVertices)=", offsetof(ComputeClusterTilingParams, maxVertices),
         " offset(maxClasBlocks)=", offsetof(ComputeClusterTilingParams, maxClasBlocks))));
-    ONCE(RTXMG_LOG(str::format("RTX MegaGeo: STRUCT DEBUG disableSubdivision VALUE=", params.disableSubdivision,
+    ONCE(Logger::info(str::format("RTX MegaGeo: STRUCT DEBUG disableSubdivision VALUE=", params.disableSubdivision,
         " (config=", m_tessellatorConfig.disableSubdivision ? "true" : "false", ")")));
+    // Log key param values
+    ONCE(Logger::info(str::format("RTX MegaGeo: TILING PARAMS viewport=(", params.viewportSize.x, ",", params.viewportSize.y,
+        ") fineTessRate=", params.fineTessellationRate, " coarseTessRate=", params.coarseTessellationRate,
+        " isolation=", params.isolationLevel, " maxClusters=", params.maxClusters,
+        " frustumVis=", params.enableFrustumVisibility, " backfaceVis=", params.enableBackfaceVisibility)));
 
     // Safety check: if clasDataBaseAddress is 0, all CLAS addresses will be invalid
     if (params.clasDataBaseAddress == 0) {
@@ -1705,13 +1844,28 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
             : subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
         uint32_t dispatchCount = params.surfaceEnd - params.surfaceStart;
 
-        // Always log this info to help debug subdivision bypass
+        // Always log this info to help debug zero-triangle issue
         {
             uint32_t surfaceCount = subdivisionSurface.m_surfaceCount;
             uint32_t noLimitOffset = subdivisionSurface.m_surfaceOffsets[uint32_t(SubdivisionSurface::SurfaceType::NoLimit)];
-            ONCE(RTXMG_LOG(str::format("RTX MegaGeo: disableSubdivision=", m_tessellatorConfig.disableSubdivision ? "YES" : "NO",
-                " surfaceStart=", params.surfaceStart, " surfaceEnd=", params.surfaceEnd,
+            uint32_t off0 = subdivisionSurface.m_surfaceOffsets[0];
+            uint32_t off1 = subdivisionSurface.m_surfaceOffsets[1];
+            uint32_t off2 = subdivisionSurface.m_surfaceOffsets[2];
+            uint32_t off3 = subdivisionSurface.m_surfaceOffsets[3];
+            bool disableSub = m_tessellatorConfig.disableSubdivision;
+            uint32_t sStart = params.surfaceStart;
+            uint32_t sEnd = params.surfaceEnd;
+            // ALWAYS log - this is the critical value that determines if any surfaces get processed
+            ONCE(Logger::info(str::format("RTX MegaGeo DISPATCH: disableSubdivision=", disableSub ? "YES" : "NO",
+                " surfaceStart=", sStart, " surfaceEnd=", sEnd,
+                " dispatchCount=", dispatchCount,
                 " surfaceCount=", surfaceCount, " NoLimitOffset=", noLimitOffset)));
+            ONCE(Logger::info(str::format("RTX MegaGeo DISPATCH: surfaceOffsets=[",
+                off0, ",", off1, ",", off2, ",", off3, "]")));
+            if (dispatchCount == 0) {
+                Logger::err(str::format("RTX MegaGeo DISPATCH: *** ZERO DISPATCH! surfaceEnd=", sEnd,
+                    " NoLimitOffset=", noLimitOffset, " - no surfaces will be tessellated ***"));
+            }
         }
 
         RTXMG_LOG(str::format("RTX MegaGeo: Monolithic - surfaceStart=", params.surfaceStart,
@@ -1733,7 +1887,11 @@ void ClusterAccelBuilder::ComputeInstanceClusterTiling(ClusterAccels& accels,
         commandList->dispatch(div_ceil(dispatchCount, kComputeClusterTilingWaves), 1, 1);
         RTXMG_LOG("RTX MegaGeo: Monolithic - dispatch complete");
 
-        // Save cluster offset for this instance
+        // Save cluster offset for this instance.
+        // CopyClusterOffset(AllTypes) populates:
+        //   - ClusterOffsetCounts slot 3 (All): total cluster offset + count for this instance
+        //   - FillClustersIndirectArgs slot 2 (Limit): vertex dispatch workgroups (used by FillInstanceClusters)
+        //   - FillClustersIndirectArgs slot 3 (All): texcoord dispatch workgroups
         ClusterDispatchType dispatchType = ClusterDispatchType::AllTypes;
         RTXMG_LOG("RTX MegaGeo: Monolithic - CopyClusterOffset");
         CopyClusterOffset(instanceIndex, dispatchType, tessCounterRange, commandList);
@@ -2609,6 +2767,20 @@ void ClusterAccelBuilder::BuildAccel(const RTXMGScene& scene, const TessellatorC
     }
     RTXMG_LOG(str::format("RTX MegaGeo: Using counters from index ", readIndex,
                              ": clusters=", counters.clusters, " desired=", counters.desiredClusters));
+
+    // ALWAYS log counter values - critical for diagnosing zero-triangle issue
+    Logger::info(str::format("RTX MegaGeo COUNTERS[", readIndex, "]: clusters=", counters.clusters,
+        " desiredClusters=", counters.desiredClusters,
+        " desiredTriangles=", counters.desiredTriangles,
+        " desiredVertices=", counters.desiredVertices,
+        " desiredClasBlocks=", counters.desiredClasBlocks));
+    // Log ALL frame slots to see if data ended up in wrong slot
+    for (uint32_t ci = 0; ci < kFrameCount; ++ci) {
+      Logger::info(str::format("RTX MegaGeo COUNTERS slot[", ci, "]: clusters=", counterBufferData[ci].clusters,
+          " desiredClusters=", counterBufferData[ci].desiredClusters,
+          " desiredTris=", counterBufferData[ci].desiredTriangles,
+          " desiredVerts=", counterBufferData[ci].desiredVertices));
+    }
 
     // Record the desired required memory instead of the max
     stats.desired.m_numTriangles = counters.desiredTriangles;

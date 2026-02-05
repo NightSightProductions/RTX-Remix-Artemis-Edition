@@ -196,8 +196,15 @@ namespace dxvk {
     ScopedCpuProfileZone();
 
     const size_t oldestFrame = m_device->getCurrentFrameId() - RtxOptions::numFramesToKeepGeometryData();
+    // ClusterBlas entries are expensive to recreate (subdivision surface extraction + topology cache).
+    // Keep them alive 10x longer than regular BLAS to survive brief offscreen periods.
+    const size_t clusterOldestFrame = m_device->getCurrentFrameId() - RtxOptions::numFramesToKeepGeometryData() * 10;
     auto blasEntryGarbageCollection = [&](auto& iter, auto& entries) -> void {
       if (iter->second.frameLastTouched < oldestFrame) {
+        if (iter->second.isClusterBlas() && iter->second.frameLastTouched >= clusterOldestFrame) {
+          ++iter;
+          return;
+        }
         onSceneObjectDestroyed(iter->second);
         iter = entries.erase(iter);
       } else {
@@ -923,7 +930,7 @@ namespace dxvk {
                                " hash=", std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
     } else if (s_debugRejectNonCandidates) {
       // Debug mode: Mark this BLAS as rejected so we can hide its instance later
-      Logger::info(str::format("RTX MegaGeo DEBUG: Rejecting non-candidate mesh. hash=", 
+      Logger::info(str::format("RTX MegaGeo DEBUG: Rejecting non-candidate mesh. hash=",
                                std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
       pBlas->isMegaGeoDebugRejected = true;
     }
@@ -941,6 +948,13 @@ namespace dxvk {
   SceneManager::ObjectCacheState SceneManager::onSceneObjectUpdated(Rc<DxvkContext> ctx, const DrawCallState& drawCallState, BlasEntry* pBlas) {
     if (pBlas->frameLastTouched == m_device->getCurrentFrameId()) {
       pBlas->cacheMaterial(drawCallState.getMaterialData());
+      return SceneManager::ObjectCacheState::kUpdateInstance;
+    }
+
+    // ClusterBlas: skip triangle geometry processing, just update input state
+    if (pBlas->isClusterBlas()) {
+      pBlas->clearMaterialCache();
+      pBlas->input = drawCallState;
       return SceneManager::ObjectCacheState::kUpdateInstance;
     }
 
@@ -1054,10 +1068,21 @@ namespace dxvk {
     // Note: The material data can be modified in instance manager
     RtInstance* instance = m_instanceManager.processSceneObject(m_cameraManager, m_rayPortalManager, *pBlas, drawCallState, renderMaterialData, existingInstance);
 
+    // DEBUG: Set to true to hide ALL non-MegaGeo geometry (only ClusterBlas surfaces visible)
+    // Waits until ClusterBlas instances exist before hiding, to avoid empty TLAS crash
+    static const bool s_megaGeoOnly = true;
+    static bool s_hasSeenClusterBlas = false;
+    if (pBlas->isClusterBlas()) {
+      s_hasSeenClusterBlas = true;
+    }
+    if (instance && s_megaGeoOnly && s_hasSeenClusterBlas && !pBlas->isClusterBlas()) {
+      instance->setHidden(true);
+    }
+
     // DEBUG FEATURE: Hide instances for meshes rejected by MegaGeo debug mode
     if (instance && pBlas->isMegaGeoDebugRejected) {
       instance->setHidden(true);
-      Logger::info(str::format("RTX MegaGeo DEBUG: Hiding rejected instance ", (void*)instance, 
+      Logger::info(str::format("RTX MegaGeo DEBUG: Hiding rejected instance ", (void*)instance,
                                " for hash=", std::hex, drawCallState.getHash(RtxOptions::geometryAssetHashRule())));
     }
 

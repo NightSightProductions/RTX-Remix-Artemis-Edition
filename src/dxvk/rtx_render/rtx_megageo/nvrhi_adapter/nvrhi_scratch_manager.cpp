@@ -23,7 +23,13 @@
 #include "nvrhi_scratch_manager.h"
 #include "../../dxvk_device.h"
 #include "../../../util/log/log.h"
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_NVRHI_SCRATCH_MANAGER
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 namespace dxvk {
 

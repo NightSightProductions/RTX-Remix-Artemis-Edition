@@ -22,7 +22,13 @@
 
 #include "buffer.h"
 #include "../../../dxvk_include.h"
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_BUFFER
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 nvrhi::BufferDesc GetGenericDesc(size_t nElements, uint32_t elementSize, const char* name, nvrhi::Format format)
 {

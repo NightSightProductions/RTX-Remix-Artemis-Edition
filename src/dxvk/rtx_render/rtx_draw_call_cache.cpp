@@ -62,6 +62,12 @@ DrawCallCache::CacheState DrawCallCache::get(const DrawCallState& drawCall, Blas
     // Only 1 element
     BlasEntry& entry = range.first->second;
 
+    // ClusterBlas fast-path: topology match is sufficient, all instances share one BlasEntry
+    if (entry.isClusterBlas()) {
+      *out = &entry;
+      return CacheState::kExisted;
+    }
+
     const bool updatedThisFrame = entry.frameLastTouched == m_device->getCurrentFrameId();
     const bool vertexDataMatches = entry.input.getGeometryData().getHashForRule<rules::VertexDataHash>() == drawCall.getGeometryData().getHashForRule<rules::VertexDataHash>();
     const bool boneHashesMatch = entry.input.getSkinningState().boneHash == drawCall.getSkinningState().boneHash;
@@ -89,6 +95,11 @@ DrawCallCache::CacheState DrawCallCache::get(const DrawCallState& drawCall, Blas
 
   for (auto bucketIter = range.first; bucketIter != range.second; bucketIter++) {
     BlasEntry& blas  = bucketIter->second;
+    // ClusterBlas fast-path: all instances share one BlasEntry
+    if (blas.isClusterBlas()) {
+      *out = &blas;
+      return CacheState::kExisted;
+    }
     if (exactMatch(drawCall, blas)) {
       *out = &blas;
       return CacheState::kExisted;

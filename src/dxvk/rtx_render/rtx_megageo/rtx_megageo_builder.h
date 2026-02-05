@@ -508,6 +508,13 @@ namespace dxvk {
     // Camera for tessellation (updated each frame from RtCamera)
     Camera m_tessellationCamera;
 
+    // Dirty tracking - skip redundant BuildAccel when nothing changed
+    Vector3 m_prevCameraPosition = Vector3(0.0f, 0.0f, 0.0f);
+    Vector3 m_prevCameraForward = Vector3(0.0f, 0.0f, -1.0f);
+    float m_prevFovY = 0.0f;
+    std::unordered_map<uint32_t, Matrix4> m_prevBuildTransforms;
+    bool m_forceRebuild = true;
+
     // Initialization state
     bool m_initialized = false;
 

@@ -28,7 +28,13 @@
 #include <iomanip>
 #include <sstream>
 #include <typeinfo>
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_VECTORLOG
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 // operator<< overloads for MathLib types
 inline std::ostream& operator<<(std::ostream& os, const uint2& v) {

@@ -26,7 +26,13 @@
 #include <fstream>
 #include <sstream>
 #include <chrono>
+
 #include "../rtxmg_log.h"
+#if RTXMG_LOG_STRING_UTILS
+#define RTXMG_LOG(msg) dxvk::Logger::info(msg)
+#else
+#define RTXMG_LOG(msg) ((void)0)
+#endif
 
 namespace fs = std::filesystem;
 
