@@ -22,12 +22,19 @@
 #include "rtx_denoise.h"
 #include "dxvk_device.h"
 #include "rtx_nrd_context.h"
+#include "rtx_oidn_context.h"
+#include "rtx_options.h"
 #include "rtx/pass/nrd_args.h"
 
 namespace dxvk {
+
+  static bool useOidnBackend() {
+    return RtxOptions::denoiserBackend() == DenoiserBackend::OIDN;
+  }
   
   DxvkDenoise::DxvkDenoise(DxvkDevice* device, DenoiserType type)
-  : CommonDeviceObject(device) {
+  : CommonDeviceObject(device)
+  , m_type(type) {
     m_nrdContext = std::make_unique<NRDContext>(device, type);
   }
 
@@ -45,12 +52,26 @@ namespace dxvk {
     const Input& inputs,
     Output& outputs) 
   {
-    const SceneManager& sceneManager = device()->getCommon()->getSceneManager();
+    if (useOidnBackend()) {
+      if (!m_oidnContext) {
+        m_oidnContext = std::make_unique<OIDNContext>(device(), m_type);
+      }
 
+      if (m_oidnContext->isAvailable()) {
+        m_oidnContext->dispatch(ctx, barriers, rtOutput, inputs, outputs);
+        return;
+      }
+    }
+
+    const SceneManager& sceneManager = device()->getCommon()->getSceneManager();
     m_nrdContext->dispatch(ctx, barriers, sceneManager, rtOutput, inputs, outputs);
   }
 
   void DxvkDenoise::releaseResources() {
+    if (m_oidnContext) {
+      m_oidnContext->release();
+    }
+
     m_nrdContext->release();
   }
 
@@ -64,6 +85,10 @@ namespace dxvk {
   }
 
   void DxvkDenoise::showImguiSettings() {
+    if (useOidnBackend()) {
+      return;
+    }
+
     m_nrdContext->showImguiSettings();
   }
 
@@ -72,6 +97,10 @@ namespace dxvk {
   }
 
   bool DxvkDenoise::isReferenceDenoiserEnabled() const {
+    if (useOidnBackend()) {
+      return false;
+    }
+
     return m_nrdContext->isReferenceDenoiserEnabled();
   }
 }

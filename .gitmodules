@@ -42,3 +42,6 @@
 [submodule "submodules/xess"]
 	path = submodules/xess
 	url = https://github.com/intel/xess.git
+[submodule "submodules/oidn"]
+	path = submodules/oidn
+	url = https://github.com/RenderKit/oidn.git

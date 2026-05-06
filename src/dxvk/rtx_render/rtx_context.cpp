@@ -983,7 +983,9 @@ namespace dxvk {
 
   void RtxContext::getDenoiseArgs(NrdArgs& outPrimaryDirectNrdArgs, NrdArgs& outPrimaryIndirectNrdArgs, NrdArgs& outSecondaryNrdArgs) {
     const bool realtimeDenoiserEnabled = RtxOptions::useDenoiser() && !RtxOptions::useDenoiserReferenceMode();
-    const bool separateDenoiserEnabled = RtxOptions::denoiseDirectAndIndirectLightingSeparately();
+    const bool separateDenoiserEnabled =
+      RtxOptions::denoiseDirectAndIndirectLightingSeparately()
+      && RtxOptions::denoiserBackend() != DenoiserBackend::OIDN;
 
     auto& denoiser0 = (separateDenoiserEnabled ? m_common->metaPrimaryDirectLightDenoiser() : m_common->metaPrimaryCombinedLightDenoiser());
     auto& denoiser1 = (separateDenoiserEnabled ? m_common->metaPrimaryIndirectLightDenoiser() : m_common->metaPrimaryCombinedLightDenoiser());
@@ -1090,7 +1092,9 @@ namespace dxvk {
     constants.enableEmissiveBlendEmissiveOverride = RtxOptions::enableEmissiveBlendEmissiveOverride();
     constants.enableRtxdi = RtxOptions::useRTXDI();
     constants.enableSecondaryBounces = RtxOptions::enableSecondaryBounces();
-    constants.enableSeparatedDenoisers = RtxOptions::denoiseDirectAndIndirectLightingSeparately();
+    constants.enableSeparatedDenoisers =
+      RtxOptions::denoiseDirectAndIndirectLightingSeparately()
+      && RtxOptions::denoiserBackend() != DenoiserBackend::OIDN;
     constants.enableCalculateVirtualShadingNormals = RtxOptions::useVirtualShadingNormalsForDenoising();
     constants.enableViewModelVirtualInstances = RtxOptions::ViewModel::enableVirtualInstances();
     constants.enablePSRR = RtxOptions::enablePSRR();
@@ -1517,7 +1521,11 @@ namespace dxvk {
     auto& rayReconstruction = getCommonObjects()->metaRayReconstruction();
 
     // Primary direct denoiser used for primary direct lighting when separated, otherwise a special combined direct+indirect denoiser is used when both direct and indirect signals are combined.
-    DxvkDenoise& denoiser0 = RtxOptions::denoiseDirectAndIndirectLightingSeparately() ? m_common->metaPrimaryDirectLightDenoiser() : m_common->metaPrimaryCombinedLightDenoiser();
+    const bool separateDenoiserEnabled =
+      RtxOptions::denoiseDirectAndIndirectLightingSeparately()
+      && RtxOptions::denoiserBackend() != DenoiserBackend::OIDN;
+
+    DxvkDenoise& denoiser0 = separateDenoiserEnabled ? m_common->metaPrimaryDirectLightDenoiser() : m_common->metaPrimaryCombinedLightDenoiser();
     DxvkDenoise& referenceDenoiserSecondLobe0 = m_common->metaReferenceDenoiserSecondLobe0();
     // Primary Indirect denoiser used for primary indirect lighting when separated.
     DxvkDenoise& denoiser1 = m_common->metaPrimaryIndirectLightDenoiser();
@@ -1604,7 +1612,7 @@ namespace dxvk {
     }
 
     // Primary Indirect light denoiser, if separate denoiser is used.
-    if (RtxOptions::denoiseDirectAndIndirectLightingSeparately() && !isSecondaryOnly)
+    if (separateDenoiserEnabled && !isSecondaryOnly)
     {
       ScopedGpuProfileZone(this, "Primary Indirect Denoising");
 

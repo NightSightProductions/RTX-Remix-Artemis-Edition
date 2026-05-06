@@ -115,6 +115,29 @@ namespace dxvk {
     return m_deviceAddress;
   }
 
+
+  // NV-DXVK start: export buffer memory as a Win32 shared handle
+  HANDLE DxvkBuffer::sharedHandle() const {
+    HANDLE handle = INVALID_HANDLE_VALUE;
+
+    if (m_info.sharing.mode != DxvkSharedHandleMode::Export)
+      return INVALID_HANDLE_VALUE;
+
+#ifdef _WIN32
+    VkMemoryGetWin32HandleInfoKHR handleInfo;
+    handleInfo.sType = VK_STRUCTURE_TYPE_MEMORY_GET_WIN32_HANDLE_INFO_KHR;
+    handleInfo.pNext = nullptr;
+    handleInfo.handleType = m_info.sharing.type;
+    handleInfo.memory = m_buffer.memory.memory();
+
+    if (m_device->vkd()->vkGetMemoryWin32HandleKHR(m_device->vkd()->device(), &handleInfo, &handle) != VK_SUCCESS)
+      return INVALID_HANDLE_VALUE;
+#endif
+
+    return handle;
+  }
+  // NV-DXVK end
+
   DxvkBufferHandle DxvkBuffer::allocBuffer(VkDeviceSize sliceCount, DxvkMemoryStats::Category category) const {
     const auto& vkd = m_device->vkd();
 

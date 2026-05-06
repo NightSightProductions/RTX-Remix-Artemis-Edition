@@ -281,6 +281,8 @@ dxvk_src = files([
   'rtx_render/rtx_nrd_context.h',
   'rtx_render/rtx_nrd_settings.cpp',
   'rtx_render/rtx_nrd_settings.h',
+  'rtx_render/rtx_oidn_context.cpp',
+  'rtx_render/rtx_oidn_context.h',
   'rtx_render/rtx_objectpicking.h',
   'rtx_render/rtx_objectpicking.cpp',
   'rtx_render/rtx_opacity_micromap_manager.cpp',
@@ -432,6 +434,15 @@ nrd_dep = declare_dependency(
   include_directories : nrd_include_dir
 )
 
+oidn_include_path = join_paths('../../', 'external/oidn/include')
+if not fs.is_dir(join_paths(global_src_root_norm, 'external/oidn/include'))
+  oidn_include_path = join_paths('../../', 'submodules/oidn/include')
+endif
+oidn_include_dir = include_directories(oidn_include_path)
+oidn_dep = declare_dependency(
+  include_directories : oidn_include_dir
+)
+
 # Note: Include directory paths must be relative paths due to a limitation in Meson (currently at least)
 dlss_include_dir = include_directories(join_paths('../../', dlss_root_path, 'include'))
 dlss_lib_path = join_paths(global_src_root_norm, dlss_root_path, 'lib/Windows_x86_64/x86_64')
@@ -484,7 +495,7 @@ dxvk_embedded_data_files = files([
 
 dxvk_generated_embedded_files = embedding_compiler.process(dxvk_embedded_data_files)
 
-dxvk_deps = [ thread_dep, vkcommon_dep, dxvk_extradep, usd_dep, lssUsd_dep, nrc_dep, nrd_dep, dlss_dep, submodules_dep, xess_dep, tracy_dep, tracy_dep_dynamic, aftermath_dep, nvapi_dep, reflex_dep, usd_plugin_deps ]
+dxvk_deps = [ thread_dep, vkcommon_dep, dxvk_extradep, usd_dep, lssUsd_dep, nrc_dep, nrd_dep, oidn_dep, dlss_dep, submodules_dep, xess_dep, tracy_dep, tracy_dep_dynamic, aftermath_dep, nvapi_dep, reflex_dep, usd_plugin_deps ]
 
 if enable_rtxio
   dxvk_deps += rtxio_dep

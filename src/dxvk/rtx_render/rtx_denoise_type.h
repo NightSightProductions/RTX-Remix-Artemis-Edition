@@ -36,4 +36,15 @@ enum class DenoiserType {
   Reference
 };
 
+enum class DenoiserBackend : int {
+  NRD = 0,
+  OIDN = 1
+};
+
+enum class OidnQuality : int {
+  Fast = 0,
+  Balanced = 1,
+  High = 2
+};
+
 }  // namespace dxvk

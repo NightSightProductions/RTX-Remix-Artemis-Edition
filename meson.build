@@ -560,6 +560,13 @@ nrc_dll_name = 'NRC_Vulkan.dll'
 nrc_dll_path = join_paths(global_src_root_norm, 'submodules/nrc/bin/')
 
 xess_dll_path = join_paths(global_src_root_norm, 'submodules/xess/bin/')
+oidn_dll_path = join_paths(global_src_root_norm, 'external/oidn/bin/')
+if not fs.is_dir(oidn_dll_path)
+  oidn_dll_path = join_paths(global_src_root_norm, 'submodules/oidn/bin/')
+endif
+if fs.is_dir(oidn_dll_path)
+  external_dll_paths += oidn_dll_path
+endif
 
 nrd_lib_path = join_paths(global_src_root_norm, 'external/nrd/Lib/Release/')
 if get_option('buildtype') == 'debug'  
@@ -747,6 +754,14 @@ if dxvk_is_ninja
     install_data(join_paths(nrc_dll_path, 'nvrtc-builtins64_125.dll'), install_dir : output_path, install_tag: target_suffix) 
 
     install_data(join_paths(nrd_lib_path, 'NRD.dll'), install_dir : output_path, install_tag: target_suffix) 
+
+    if fs.is_file(join_paths(oidn_dll_path, 'OpenImageDenoise.dll'))
+      meson.add_install_script(
+        join_paths(global_src_root_norm, 'scripts-common/install_file_in_dir.bat'),
+        join_paths(oidn_dll_path, '*.dll'), output_path,
+        install_tag: target_suffix
+      )
+    endif
     
     install_data(join_paths(xess_dll_path, 'libxess.dll'), install_dir : output_path, install_tag: target_suffix)
 
@@ -816,6 +831,6 @@ if dxvk_is_ninja
   endif
 endif # dxvk_is_ninja
 
-if fs.is_dir('nv-private')
+if fs.is_dir('nv-private') and fs.is_file('nv-private/meson.build')
   subdir('nv-private')
 endif

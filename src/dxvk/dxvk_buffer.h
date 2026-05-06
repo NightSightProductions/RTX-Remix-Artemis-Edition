@@ -334,6 +334,10 @@ namespace dxvk {
       return m_physSlice.handle;
     }
 
+    // NV-DXVK start: export buffer memory as a Win32 shared handle
+    HANDLE sharedHandle() const;
+    // NV-DXVK end
+
     VkDeviceAddress getDeviceAddress();
 
     // NV-DXVK start: buffer clones for orphaned slices

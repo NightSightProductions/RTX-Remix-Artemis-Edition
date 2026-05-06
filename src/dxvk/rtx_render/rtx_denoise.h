@@ -32,6 +32,7 @@ struct NrdArgs;
 namespace dxvk {
 
   class NRDContext;
+  class OIDNContext;
   class DxvkDevice;
 
   class DxvkDenoise : public CommonDeviceObject {
@@ -92,7 +93,9 @@ namespace dxvk {
     void onDestroy();
 
   private:
+    DenoiserType m_type;
     std::unique_ptr<NRDContext> m_nrdContext;
+    std::unique_ptr<OIDNContext> m_oidnContext;
 
   };
 }  // namespace dxvk

@@ -3771,6 +3771,8 @@ namespace dxvk {
     if (RemixGui::CollapsingHeader("Denoising", collapsingHeaderClosedFlags)) {
       bool isRayReconstructionEnabled = RtxOptions::isRayReconstructionEnabled();
       bool useNRD = !isRayReconstructionEnabled || common->metaRayReconstruction().enableNRDForTraining();
+      bool isOidnBackend = RtxOptions::denoiserBackend() == DenoiserBackend::OIDN;
+      bool showNrdSettings = useNRD && !isOidnBackend;
       ImGui::Indent();
       ImGui::BeginDisabled(!useNRD);
       RemixGui::Checkbox("Denoising Enabled", &RtxOptions::useDenoiserObject());
@@ -3784,6 +3786,11 @@ namespace dxvk {
 
       if(RemixGui::CollapsingHeader("Settings", collapsingHeaderClosedFlags)) {
         ImGui::Indent();
+        RemixGui::Combo("Denoiser Backend", &RtxOptions::denoiserBackendObject(), "NRD\0OIDN\0");
+        if (isOidnBackend) {
+          RemixGui::Combo("OIDN Quality", &RtxOptions::oidnQualityObject(), "Fast\0Balanced\0High\0");
+          ImGui::TextWrapped("OIDN integration currently denoises color only (alpha/HitT is preserved).");
+        }
         RemixGui::Checkbox("Separate Primary Direct/Indirect Denoiser", &RtxOptions::denoiseDirectAndIndirectLightingSeparatelyObject());
         RemixGui::Checkbox("Reset History On Settings Change", &RtxOptions::resetDenoiserHistoryOnSettingsChangeObject());
         RemixGui::Checkbox("Replace Direct Specular HitT with Indirect Specular HitT", &RtxOptions::replaceDirectSpecularHitTWithIndirectSpecularHitTObject());
@@ -3805,7 +3812,7 @@ namespace dxvk {
         }
       }
       
-      if (useNRD)
+      if (showNrdSettings)
       {
         if (useDoubleDenoisers) {
           if (RemixGui::CollapsingHeader("Primary Direct Light Denoiser", collapsingHeaderClosedFlags)) {

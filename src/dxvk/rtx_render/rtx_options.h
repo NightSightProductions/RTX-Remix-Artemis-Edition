@@ -42,6 +42,7 @@
 #include "rtx_pathtracer_integrate_indirect.h"
 #include "rtx_dlss.h"
 #include "rtx_materials.h"
+#include "rtx_denoise_type.h"
 #include "rtx/pass/material_args.h"
 #include "rtx_option.h"
 #include "rtx_option_manager.h"
@@ -585,6 +586,16 @@ namespace dxvk {
                    "or for more accurately comparing subtle effects of potentially biased rendering techniques\n"
                    "which may be hard to see through noise and filtering.\n"
                    "It is also useful for higher quality artistic renders of a scene beyond what is possible in real-time.");
+            RTX_OPTION_ARGS("rtx", DenoiserBackend, denoiserBackend, DenoiserBackend::NRD,
+                     "Selects the denoiser backend.\n"
+                     "0: NRD (default), 1: OIDN.",
+                     args.environment = "DXVK_DENOISER_BACKEND",
+                     args.flags = RtxOptionFlags::UserSetting);
+            RTX_OPTION_ARGS("rtx.oidn", OidnQuality, oidnQuality, OidnQuality::Balanced,
+                     "Selects Open Image Denoise quality mode.\n"
+                     "0: Fast, 1: Balanced, 2: High.",
+                     args.environment = "DXVK_OIDN_QUALITY",
+                     args.flags = RtxOptionFlags::UserSetting);
 
     struct Accumulation {
       RTX_OPTION_ARGS("rtx.accumulation", uint32_t, numberOfFramesToAccumulate, 1024,
