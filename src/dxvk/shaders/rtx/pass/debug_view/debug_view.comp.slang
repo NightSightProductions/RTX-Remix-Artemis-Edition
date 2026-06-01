@@ -84,6 +84,45 @@ Texture2D<float4> RenderOutput;
 Texture2D<uint> Instrumentation;
 [[vk::binding(DEBUG_VIEW_BINDING_TERRAIN_INPUT)]]
 Texture2D<float4> TerrainTexture;
+
+// Fork: cloud-occluded sky-ambient transmittance LUT (32x16 R16F).
+// Visualized by DEBUG_VIEW_CLOUD_SKY_TRANSMITTANCE_LUT.
+[[vk::binding(DEBUG_VIEW_BINDING_CLOUD_SKY_TRANSMITTANCE_LUT_INPUT)]]
+Texture2D<float> CloudSkyTransmittanceLut;
+
+// Fork: Nubis Cubed sun-direction optical-depth voxel grid (R16F 3D).
+// Visualized by DEBUG_VIEW_CLOUD_D_SUN.
+[[vk::binding(DEBUG_VIEW_BINDING_CLOUD_D_SUN_INPUT)]]
+Texture3D<float> DebugViewCloudDSun;
+
+// Fork: Nubis Cubed zenith optical-depth voxel grid (R16F 3D).
+// Visualized by DEBUG_VIEW_CLOUD_D_AMBIENT.
+[[vk::binding(DEBUG_VIEW_BINDING_CLOUD_D_AMBIENT_INPUT)]]
+Texture3D<float> DebugViewCloudDAmbient;
+
+// Fork: Nubis Cubed screen-space cloud render RT (RGBA16F, premultiplied
+// radiance in rgb + cloud transmittance in alpha). Visualized by
+// DEBUG_VIEW_CLOUD_RENDER_RT (enum 876).
+[[vk::binding(DEBUG_VIEW_BINDING_CLOUD_RENDER_RT_INPUT)]]
+Texture2D<float4> DebugViewCloudRenderRT;
+
+// Fork: post-denoise cumulus shadow factor (R16F screen-extent, 2026-05-18).
+// Visualized by DEBUG_VIEW_CLOUD_SHADOW_FACTOR_RAW (enum 878). Texture is
+// written by integrate_direct's evalAtmosphereSunNEE as newShadow / oldShadow
+// and read by composite through saturate() + pow() — this debug view inspects
+// the value before those operations collapse the > 1 ratio amplification.
+[[vk::binding(DEBUG_VIEW_BINDING_PRIMARY_CLOUD_SHADOW_FACTOR_INPUT)]]
+Texture2D<float> DebugViewPrimaryCloudShadowFactor;
+
+// NV-DXVK start: SHARC integration — Stage 5 (debug overlay)
+// RGBA16F screen-extent texture written by the SHARC integrator raygen when
+// debugMode != Off.  Holds the hash-grid debug color (HashGridColor,
+// Occupancy, HashCollisions, BitsOccupancy, or CachedRadiance) for each pixel.
+// Black when SHARC is disabled or debugMode == Off.
+[[vk::binding(DEBUG_VIEW_BINDING_SHARC_DEBUG_INPUT)]]
+Texture2D<float4> SharcDebugOutput;
+// NV-DXVK end
+
 [[vk::binding(DEBUG_VIEW_BINDING_VOLUME_RESERVOIRS_INPUT)]]
 Texture3D<uint4> VolumeReservoirs;
 
@@ -623,6 +662,16 @@ vec4 loadInput(inout RNG randomState, ivec2 threadId)
 
     break;
   }
+  // NV-DXVK start: SHARC integration — Stage 5 (debug overlay)
+  // Reads the SHARC hash-grid debug texture written by the integrator raygen
+  // when rtx.sharc.debugMode != Off.  The debug output is already in display-
+  // ready linear HDR; just pass it through unchanged.
+  case DEBUG_VIEW_SHARC_DEBUG:
+  {
+    value = SharcDebugOutput[threadId];
+    break;
+  }
+  // NV-DXVK end
   default:
     value = DebugView[threadId];
     break;

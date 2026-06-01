@@ -46,6 +46,9 @@
 #include <rtx_shaders/debug_view_render_to_output.h>
 
 #include "rtx_options.h"
+// NV-DXVK start: SHARC integration — Stage 5 (debug overlay)
+#include "rtx_fork_sharc.h"
+// NV-DXVK end
 
 namespace dxvk {
   static const bool s_disableAnimation = (env::getEnvVar("DXVK_DEBUG_VIEW_DISABLE_ANIMATION") == "1");
@@ -134,6 +137,81 @@ namespace dxvk {
                                 "Debug Knob [0]: (rounded down) which texture type to show: \n"
                                 "0: AlbedoOpacity, 1: Normal, 2: Tangent, 3: Height,\n"
                                 "4: Roughness, 5: Metallic, 6: Emissive"},
+
+        {DEBUG_VIEW_CLOUD_SKY_TRANSMITTANCE_LUT, "Atmosphere: Cloud Sky Transmittance LUT",
+                                "Fork diagnostic. Visualizes the 32x16 cloud-occluded sky-ambient\n"
+                                "transmittance LUT baked by cloud_sky_transmittance_lut.comp.slang.\n"
+                                "Stretched to fill the screen; red = full occlusion (thick cumulus),\n"
+                                "black = clear sky in that direction.\n"
+                                "X axis = azimuth [0, 360 deg], Y axis = elevation [-90, +90 deg]\n"
+                                "(bottom half = below horizon, always clear)."},
+        {DEBUG_VIEW_CLOUD_D_SUN, "Atmosphere: Cloud D_sun Voxel Grid",
+                                "Fork diagnostic. Visualizes the Nubis Cubed sun-direction optical-\n"
+                                "depth voxel grid (mid-Z slice). Grayscale: bright = thick cloud\n"
+                                "between voxel and sun, dark = clear sky path. Cumulus cells should\n"
+                                "appear as cellular patterns. Move the sun to verify the pattern\n"
+                                "shifts. Scaling: intensity = saturate(opticalDepth * 0.2)."},
+        {DEBUG_VIEW_CLOUD_D_AMBIENT, "Atmosphere: Cloud D_ambient Voxel Grid",
+                                "Fork diagnostic. Visualizes the Nubis Cubed zenith optical-depth\n"
+                                "voxel grid (mid-Z slice). Expected: mostly uniform brightness\n"
+                                "(zenith path is mostly empty air above the slab); some banding\n"
+                                "where the slab is dense. Scaling: intensity = saturate(opticalDepth * 0.2)."},
+        {DEBUG_VIEW_CLOUD_GROUND_SHADOW_PRODSHAPE, "Atmosphere: Cloud Ground Shadow (Production Call Shape)",
+                                "Fork diagnostic - CRITICAL GATE for the Nubis Cubed cloud-on-terrain\n"
+                                "shadow workstream. Paints sampleCloudGroundShadow_OptionB output at\n"
+                                "each G-buffer pixel using the EXACT per-pixel call shape\n"
+                                "(worldPos, sunDir, args, isZUp) the upcoming NEE wiring will use.\n"
+                                "Grayscale: white = sun unoccluded by clouds, black = full shadow.\n"
+                                "Visual gate: stand on flat terrain at sunset and compare with the\n"
+                                "Cloud D_sun Voxel Grid view (873). Cumulus shadow patches in this\n"
+                                "view should spatially match the D_sun cumulus pattern. If they\n"
+                                "disagree on cumulus position, isZUp handling is mismatched between\n"
+                                "the debug-view call path and the production NEE call path - fix\n"
+                                "before wiring NEE in Task 6."},
+        {DEBUG_VIEW_CLOUD_RENDER_RT, "Atmosphere: Cloud Render RT (Nubis Cubed)",
+                                "Fork diagnostic. Visualizes the Nubis Cubed cloud render RT produced\n"
+                                "by cloud_render.comp.slang (C4 of the 2026-05-12 workstream). Per-\n"
+                                "pixel cloud radiance from the page-137 two-HG-lobe direct term +\n"
+                                "page-142 ambient pow(1 - dim_profile, 0.5) * exp(-D_ambient).\n"
+                                "Visual gate: toggle this debug view off and on with Sky Mode = Physical\n"
+                                "Atmosphere active to A/B against the existing analytical evalClouds\n"
+                                "rendering. Expected improvements: top-bright / bottom-dark cumulus\n"
+                                "gradient, less-flat shadow side, stronger silver lining at backlit\n"
+                                "edges. Tune via the Atmosphere -> Clouds -> Nubis Cubed Lighting\n"
+                                "ImGui block (six magic-constant sliders)."},
+        {DEBUG_VIEW_CLOUD_GROUND_SHADOW_RAW_OD, "Atmosphere: Cloud Ground Shadow RAW OD (Sibling of 875)",
+                                "Fork diagnostic (2026-05-17). Sibling of enum 875: same per-pixel\n"
+                                "call shape but the math stops at the dSunTex.SampleLevel call - NO\n"
+                                "exp(), NO mix(cloudShadowStrength). Exists because 875 paints solid\n"
+                                "white in-game and we need the pre-exp/mix truth.\n"
+                                "Channels:\n"
+                                "  R = saturate(OD * 0.2)   matches 873's vis scale; direct A/B vs bake\n"
+                                "  G = saturate(OD)         raw magnitude; distinguishes amplified-tiny\n"
+                                "                           from actually-visible-sized\n"
+                                "  B = uvw.x at the consumer's lookup position\n"
+                                "Sentinels:\n"
+                                "  magenta = surface above slab; blue = sun below horizon / unreachable\n"
+                                "Discrimination (stand on flat terrain at midday):\n"
+                                "  R uniform AND B uniform   -> SCENE-SCALE bug (every pixel reads same\n"
+                                "                                UVW; fix cloudVoxelGridExtentKm or the\n"
+                                "                                worldPosKm -> UVW conversion)\n"
+                                "  R patterned, matches 873  -> consumer works; exp+mix is killing it\n"
+                                "  R patterned but unrelated -> world-anchoring / slab-bottom bug\n"
+                                "  R dark, G even darker     -> magnitude underflow (bake OD tiny)"},
+        {DEBUG_VIEW_CLOUD_SHADOW_FACTOR_RAW, "Atmosphere: Cloud Shadow Factor (Post-Denoise Diagnostic)",
+                                "Fork diagnostic. After the 2026-05-19 ratio->newShadow simplification,\n"
+                                "the texture holds raw newShadow in [0, 1] from sampleCloudGroundShadow_OptionB\n"
+                                "(integrate_direct line 72). This view is now a direct grayscale equivalent\n"
+                                "of enum 875 -- they should show the SAME pattern at the SAME brightness.\n"
+                                "If they diverge, suspect a path regression (sampler / binding mismatch\n"
+                                "between the production raygen pass and the debug-view pass)."}, 
+        // NV-DXVK start: SHARC integration — Stage 5 (debug overlay)
+        {DEBUG_VIEW_SHARC_DEBUG, "SHARC: Hash Grid Debug Overlay",
+                                "Renders the SHARC hash-grid debug visualisation selected by rtx.sharc.debugMode.\n"
+                                "Modes: HashGridColor, Occupancy, HashCollisions, BitsOccupancy, CachedRadiance.\n"
+                                "Only meaningful when rtx.sharc.enable = true.  Black when SHARC is off\n"
+                                "or debugMode is Off."},
+        // NV-DXVK end,
         {DEBUG_VIEW_CASCADE_LEVEL, "Terrain: Cascade Level"},
 
         {DEBUG_VIEW_VIRTUAL_HIT_DISTANCE, "Virtual Hit Distance"},
@@ -573,7 +651,14 @@ namespace dxvk {
         TEXTURE2D(DEBUG_VIEW_BINDING_COMPOSITE_INPUT)
         TEXTURE2D(DEBUG_VIEW_BINDING_ALTERNATE_DISOCCLUSION_THRESHOLD_INPUT)
         TEXTURE2D(DEBUG_VIEW_BINDING_PREV_WORLD_POSITION_INPUT)
-        TEXTURE2D(DEBUG_VIEW_BINDING_SHARED_TERMINATOR_FIX_INPUT)
+        TEXTURE2D(DEBUG_VIEW_BINDING_CLOUD_SKY_TRANSMITTANCE_LUT_INPUT)
+        TEXTURE3D(DEBUG_VIEW_BINDING_CLOUD_D_SUN_INPUT)
+        TEXTURE3D(DEBUG_VIEW_BINDING_CLOUD_D_AMBIENT_INPUT)
+        TEXTURE2D(DEBUG_VIEW_BINDING_CLOUD_RENDER_RT_INPUT)
+        TEXTURE2D(DEBUG_VIEW_BINDING_PRIMARY_CLOUD_SHADOW_FACTOR_INPUT)
+        // NV-DXVK start: SHARC integration — Stage 5 (debug overlay binding)
+        TEXTURE2D(DEBUG_VIEW_BINDING_SHARC_DEBUG_INPUT)
+        // NV-DXVK end
 
         RW_TEXTURE2D(DEBUG_VIEW_BINDING_ACCUMULATED_DEBUG_VIEW_INPUT_OUTPUT)
 
@@ -1331,6 +1416,25 @@ namespace dxvk {
                       ReplacementMaterialTextureType::Count - 1));
     Resources::Resource terrain = common.getSceneManager().getTerrainBaker().getTerrainTexture(terrainTextureType);
     ctx->bindResourceView(DEBUG_VIEW_BINDING_TERRAIN_INPUT, terrain.view, nullptr);
+
+    // Cloud debug resources are not available in this branch. Bind null views
+    // so the descriptor set stays complete for cloud debug modes.
+    ctx->bindResourceView(DEBUG_VIEW_BINDING_CLOUD_SKY_TRANSMITTANCE_LUT_INPUT, nullptr, nullptr);
+    ctx->bindResourceView(DEBUG_VIEW_BINDING_CLOUD_D_SUN_INPUT, nullptr, nullptr);
+    ctx->bindResourceView(DEBUG_VIEW_BINDING_CLOUD_D_AMBIENT_INPUT, nullptr, nullptr);
+    ctx->bindResourceView(DEBUG_VIEW_BINDING_CLOUD_RENDER_RT_INPUT, nullptr, nullptr);
+    ctx->bindResourceView(DEBUG_VIEW_BINDING_PRIMARY_CLOUD_SHADOW_FACTOR_INPUT, nullptr, nullptr);
+
+    // NV-DXVK start: SHARC integration — Stage 5 (debug overlay)
+    // Bind the SHARC hash-grid debug texture when SHARC is enabled; fall back
+    // to a null view so the sampler returns black when SHARC is off.
+    if (RtxSharc::enable() && rtOutput.m_sharcDebugOutput.isValid()) {
+      ctx->bindResourceView(
+        DEBUG_VIEW_BINDING_SHARC_DEBUG_INPUT,
+        rtOutput.m_sharcDebugOutput.view,
+        nullptr);
+    }
+    // NV-DXVK end
 
     ctx->bindResourceView(DEBUG_VIEW_BINDING_VOLUME_RESERVOIRS_INPUT, globalVolumetrics.getPreviousVolumeReservoirs().view, nullptr);
     ctx->bindResourceView(DEBUG_VIEW_BINDING_VOLUME_AGE_INPUT, globalVolumetrics.getCurrentVolumeAccumulatedRadianceAge().view, nullptr);
