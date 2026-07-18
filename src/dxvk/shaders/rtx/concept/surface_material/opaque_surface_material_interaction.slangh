@@ -886,7 +886,8 @@ OpaqueSurfaceMaterialInteraction opaqueSurfaceMaterialInteractionCreateImpl<let 
 
   opaqueSurfaceMaterialInteraction.subsurfaceMaterialInteraction =
     subSurfaceMaterialReadHelper(opaqueSurfaceMaterial.subsurfaceMaterialIndex, surfaceInteraction, opaqueSurfaceMaterial.samplerIndex);
-  opaqueSurfaceMaterialInteraction.dlssControlMask = opaqueSurfaceMaterial.dlssControlMask;
+  // Note: The per-material DLSS control mask isn't stored on this branch (its material space holds the L4D2 fields), so use the no-effect default
+  opaqueSurfaceMaterialInteraction.dlssControlMask = float4x32ToUnorm4x8(1.0f.rrrr);
 
   // For an eye, load a secondary texture (iris) and blend on top of primary texture (whites)
   if (cb.eyeArgs.enableEyes && surface.isEye)
