@@ -1469,6 +1469,7 @@ namespace dxvk {
     OpaqueMaterialOptions::fillShaderParams(constants.opaqueMaterialArgs);
     TranslucentMaterialOptions::fillShaderParams(constants.translucentMaterialArgs);
     ViewDistanceOptions::fillShaderParams(constants.viewDistanceArgs, RtxOptions::getMeterToWorldUnitScale());
+    SkyNearDistanceOptions::fillShaderParams(constants.skyNearDistanceArgs, RtxOptions::getMeterToWorldUnitScale());
     constants.alphaBlendSurfacePackMult = RtxOptions::getMeterToWorldUnitScale();
 
     constants.timeSinceStartSeconds = GlobalTime::get().animationTimeSeconds();

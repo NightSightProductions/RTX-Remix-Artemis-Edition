@@ -36,6 +36,7 @@
 #include "rtx/pass/volume_args.h"
 #include "rtx/pass/material_args.h"
 #include "rtx/pass/view_distance_args.h"
+#include "rtx/pass/sky_near_distance_args.h"
 #include "rtx/concept/light/light_types.h"
 #include "rtx/concept/surface/surface_shared.h"
 #include "rtx/algorithm/nee_cache_data.h"
@@ -170,6 +171,7 @@ struct RaytraceArgs {
   OpaqueMaterialArgs opaqueMaterialArgs;
   TranslucentMaterialArgs translucentMaterialArgs;
   ViewDistanceArgs viewDistanceArgs;
+  SkyNearDistanceArgs skyNearDistanceArgs;
 
   LightRangeInfo lightRanges[lightTypeCount];
 
