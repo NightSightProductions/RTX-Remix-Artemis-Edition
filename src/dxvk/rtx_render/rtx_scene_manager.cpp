@@ -1677,8 +1677,9 @@ namespace dxvk {
     const bool isBik = drawCallState.getMaterialData().remixModifierFromD3D & REMIX_MODIFIER_FROM_D3D_BIK;
 
     uint32_t samplerIndex = trackSampler(sampler);
-    uint32_t samplerIndex1 = UINT32_MAX;
-    uint32_t samplerIndex2 = UINT32_MAX;
+    // Note: These are written to the GPU as 16-bit values, so they must use the 16-bit invalid index when unused.
+    uint32_t samplerIndex1 = kSurfaceMaterialInvalidTextureIndex;
+    uint32_t samplerIndex2 = kSurfaceMaterialInvalidTextureIndex;
     if (renderMaterialDataType == MaterialDataType::RayPortal) {
       samplerIndex1 = trackSampler(drawCallState.getMaterialData().getSampler1());
     }
