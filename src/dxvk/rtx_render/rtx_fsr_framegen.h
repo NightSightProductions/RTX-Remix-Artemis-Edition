@@ -53,7 +53,7 @@ namespace dxvk {
   }
 
   /**
-   * \brief FSR 3 Frame Generation
+   * \brief FSR Frame Generation
    * 
    * AMD FidelityFX Frame Generation implementation
    */
@@ -138,7 +138,7 @@ namespace dxvk {
 
     // RTX_OPTION accessors
     RTX_OPTION_ENV("rtx.fsrfg", bool, enable, false, "RTX_FSRFG_ENABLE", 
-      "Enables FSR 3 frame generation which generates interpolated frames to increase framerate.");
+      "Enables FSR frame generation which generates interpolated frames to increase framerate.");
 
     /**
      * \brief Create swapchain proxy context
@@ -195,7 +195,13 @@ namespace dxvk {
     PFN_vkAcquireNextImageKHR m_replacedAcquireNextImageKHR = nullptr;
     PFN_vkQueuePresentKHR m_replacedQueuePresentKHR = nullptr;
     PFN_vkGetSwapchainImagesKHR m_replacedGetSwapchainImagesKHR = nullptr;
-    
+
+    // Proxy swapchain created by the swapchain context. The SDK does not destroy it with the context,
+    // so it is destroyed explicitly through the SDK's replacement for vkDestroySwapchainKHR.
+    void (*m_replacedDestroySwapchain)(VkDevice, VkSwapchainKHR, const VkAllocationCallbacks*, void*) = nullptr;
+    VkDevice m_proxyDevice = VK_NULL_HANDLE;
+    VkSwapchainKHR m_proxySwapchain = VK_NULL_HANDLE;
+
     // Swapchain handle (set by presenter)
     VkSwapchainKHR m_swapchain = VK_NULL_HANDLE;
     
@@ -205,9 +211,9 @@ namespace dxvk {
   };
 
   /**
-   * \brief FSR 3 Frame Generation Presenter
+   * \brief FSR Frame Generation Presenter
    * 
-   * Custom presenter that uses FFX swapchain proxy for FSR 3 Frame Generation.
+   * Custom presenter that uses FFX swapchain proxy for FSR Frame Generation.
    * Similar to DxvkDLFGPresenter but uses AMD's FidelityFX SDK.
    */
   class DxvkFSRFGPresenter : public vk::Presenter {

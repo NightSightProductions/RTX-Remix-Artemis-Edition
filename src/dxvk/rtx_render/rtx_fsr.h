@@ -41,9 +41,9 @@
 #pragma warning(push)
 #pragma warning(disable: 4005)
 
-#include <ffx_api/ffx_api.hpp>
-#include <ffx_api/ffx_upscale.hpp>
-#include <ffx_api/vk/ffx_api_vk.hpp>
+#include <api/include/ffx_api.hpp>
+#include <upscalers/include/ffx_upscale.hpp>
+#include <api/include/vk/ffx_api_vk.hpp>
 
 #pragma warning(pop)
 #undef FFX_API_ENTRY
@@ -68,7 +68,7 @@ namespace dxvk {
   const char* fsrPresetToString(FSRPreset preset);
 
   /**
-   * \brief FSR3 upscaler
+   * \brief FSR upscaler
    * 
    * AMD FidelityFX Super Resolution 3 implementation following RtxPass architecture
    */
@@ -80,10 +80,10 @@ namespace dxvk {
       friend class DxvkFSR;
       friend class ImGUI;
 
-      RTX_OPTION("rtx.fsr", FSRPreset, preset, FSRPreset::Balanced, "Adjusts FSR scaling factor, trades quality for performance.");
+      RTX_OPTION("rtx.fsr", FSRPreset, preset, FSRPreset::Balanced, "Adjusts FSR scaling factor, trades quality for performance. 0: Ultra Performance, 1: Performance, 2: Balanced, 3: Quality, 4: Native AA, 5: Custom.");
       RTX_OPTION("rtx.fsr", float, sharpness, 0.0f, "Sharpening amount. 0.0 = off, 1.0 = maximum sharpening.");
-      RTX_OPTION("rtx.fsr", bool, useAutoExposure, false, "Use automatic exposure for FSR3.");
-      RTX_OPTION("rtx.fsr", bool, enableHDR, false, "Enable HDR mode for FSR3 input/output.");
+      RTX_OPTION("rtx.fsr", bool, useAutoExposure, false, "Use automatic exposure for FSR.");
+      RTX_OPTION("rtx.fsr", bool, enableHDR, false, "Enable HDR mode for FSR input/output.");
     };
 
     // Constructor with device
@@ -108,7 +108,7 @@ namespace dxvk {
     void getInputSize(uint32_t& width, uint32_t& height) const;
     void getOutputSize(uint32_t& width, uint32_t& height) const;
     
-    // FSR3 public helper methods
+    // FSR public helper methods
     float calcRecommendedMipBias() const;
     uint32_t calcRecommendedJitterSequenceLength() const;
 

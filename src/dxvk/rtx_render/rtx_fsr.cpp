@@ -42,7 +42,41 @@
 
 // FFX loader is already included via rtx_fsr.h
 
+#ifdef _M_ARM64
+// The prebuilt AMD FSR DLLs are x64 only, so native ARM64 builds don't link the FFX loader.
+// These stand-ins make every FFX call fail, which FSR handles by staying disabled.
+ffxReturnCode_t ffxCreateContext(ffxContext*, ffxCreateContextDescHeader*, const ffxAllocationCallbacks*) {
+  return FFX_API_RETURN_NO_PROVIDER;
+}
+
+ffxReturnCode_t ffxDestroyContext(ffxContext*, const ffxAllocationCallbacks*) {
+  return FFX_API_RETURN_NO_PROVIDER;
+}
+
+ffxReturnCode_t ffxConfigure(ffxContext*, const ffxConfigureDescHeader*) {
+  return FFX_API_RETURN_NO_PROVIDER;
+}
+
+ffxReturnCode_t ffxQuery(ffxContext*, ffxQueryDescHeader*) {
+  return FFX_API_RETURN_NO_PROVIDER;
+}
+
+ffxReturnCode_t ffxDispatch(ffxContext*, const ffxDispatchDescHeader*) {
+  return FFX_API_RETURN_NO_PROVIDER;
+}
+#endif
+
 namespace dxvk {
+
+  // Returns the display name of the SDK version backing a context (the loader picks the newest one the GPU supports)
+  static const char* getProviderVersionName(ffx::Context& context) {
+    ffxQueryGetProviderVersion versionQuery{};
+    versionQuery.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+    if (ffx::Query(context, versionQuery) != ffx::ReturnCode::Ok || versionQuery.versionName == nullptr) {
+      return "unknown";
+    }
+    return versionQuery.versionName;
+  }
 
   // Convert VkFormat to FFX API surface format
   static FfxApiSurfaceFormat vkFormatToFfxFormat(VkFormat format) {
@@ -92,7 +126,7 @@ namespace dxvk {
     case VK_FORMAT_D24_UNORM_S8_UINT:
       return FFX_API_SURFACE_FORMAT_R32_FLOAT; // Approximate as R32
     default:
-      Logger::warn(str::format("FSR3: Unknown VkFormat for FFX conversion: ", static_cast<uint32_t>(format), ", defaulting to R8G8B8A8_UNORM"));
+      Logger::warn(str::format("FSR: Unknown VkFormat for FFX conversion: ", static_cast<uint32_t>(format), ", defaulting to R8G8B8A8_UNORM"));
       return FFX_API_SURFACE_FORMAT_R8G8B8A8_UNORM;
     }
   }
@@ -133,7 +167,7 @@ namespace dxvk {
 
   bool DxvkFSR::onActivation(Rc<DxvkContext>& ctx) {
     m_recreate = true;
-    Logger::info("FSR3: Activated successfully");
+    Logger::info("FSR: Activated successfully");
     return true;
   }
 
@@ -244,7 +278,7 @@ namespace dxvk {
     outRenderSize[0] = m_inputSize.width;
     outRenderSize[1] = m_inputSize.height;
     
-    Logger::debug(str::format("FSR3: setSetting display=", displaySize[0], "x", displaySize[1], 
+    Logger::debug(str::format("FSR: setSetting display=", displaySize[0], "x", displaySize[1], 
                               " render=", m_inputSize.width, "x", m_inputSize.height,
                               " preset=", fsrPresetToString(actualPreset)));
   }
@@ -260,10 +294,13 @@ namespace dxvk {
 
     // Create Vulkan backend
     ffx::CreateBackendVKDesc backendDesc{};
-    backendDesc.header.type = FFX_API_CREATE_CONTEXT_DESC_TYPE_BACKEND_VK;
-    backendDesc.vkDevice = device()->handle();
-    backendDesc.vkPhysicalDevice = device()->adapter()->handle();
-    backendDesc.vkDeviceProcAddr = vkGetDeviceProcAddr;
+    backendDesc.deviceContext.vkDevice = device()->handle();
+    backendDesc.deviceContext.vkPhysicalDevice = device()->adapter()->handle();
+    backendDesc.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
+
+    // Declare the API version we were built against so the loader enables the matching feature set
+    ffx::CreateContextDescUpscaleVersion versionDesc{};
+    versionDesc.version = FFX_UPSCALER_VERSION;
 
     // Create upscale context
     ffx::CreateContextDescUpscale createDesc{};
@@ -282,10 +319,10 @@ namespace dxvk {
     // Assume inverted infinite depth (common in modern renderers)
     createDesc.flags |= FFX_UPSCALE_ENABLE_DEPTH_INVERTED | FFX_UPSCALE_ENABLE_DEPTH_INFINITE;
 
-    ffx::ReturnCode retCode = ffx::CreateContext(m_upscalingContext, nullptr, createDesc, backendDesc);
+    ffx::ReturnCode retCode = ffx::CreateContext(m_upscalingContext, nullptr, createDesc, versionDesc, backendDesc);
     
     if (retCode != ffx::ReturnCode::Ok) {
-      Logger::err(str::format("FSR3: Failed to create upscaling context: ", static_cast<uint32_t>(retCode)));
+      Logger::err(str::format("FSR: Failed to create upscaling context: ", static_cast<uint32_t>(retCode)));
       m_upscalingContext = nullptr;
       m_initialized = false;
       return;
@@ -294,7 +331,8 @@ namespace dxvk {
     m_initialized = true;
     m_jitterIndex = 0;
     
-    Logger::info(str::format("FSR3: Created context ", targetExtent.width, "x", targetExtent.height));
+    Logger::info(str::format("FSR: Created context ", targetExtent.width, "x", targetExtent.height,
+      ", upscaler version ", getProviderVersionName(m_upscalingContext)));
   }
 
   void DxvkFSR::destroyFSRContext() {
@@ -317,7 +355,7 @@ namespace dxvk {
     bool resetHistory,
     float deltaTimeMs) {
     
-    ScopedGpuProfileZone(renderContext, "FSR3 Upscale");
+    ScopedGpuProfileZone(renderContext, "FSR Upscale");
 
     if (!isActive()) {
       // Fallback: just copy input to output
@@ -495,7 +533,7 @@ namespace dxvk {
     ffx::ReturnCode retCode = ffx::Dispatch(m_upscalingContext, dispatchDesc);
     
     if (retCode != ffx::ReturnCode::Ok) {
-      Logger::warn(str::format("FSR3: Dispatch failed: ", static_cast<uint32_t>(retCode)));
+      Logger::warn(str::format("FSR: Dispatch failed: ", static_cast<uint32_t>(retCode)));
       
       // Fallback to simple copy on failure
       renderContext->copyImage(

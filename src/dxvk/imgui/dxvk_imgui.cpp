@@ -1948,8 +1948,6 @@ namespace dxvk {
 
     ImGui::Dummy(ImVec2(0.0f, 5.0f));
 
-    ImGui::BeginDisabled(!common->getSceneManager().areAllReplacementsLoaded());
-
     m_userGraphicsSettingChanged |= RemixGui::Checkbox("Enable All Enhanced Assets", &RtxOptions::enableReplacementAssetsObject());
 
     {
@@ -1967,8 +1965,6 @@ namespace dxvk {
       ImGui::Unindent(static_cast<float>(subItemIndent));
       ImGui::PopItemWidth();
     }
-
-    ImGui::EndDisabled();
 
     ImGui::Dummy(ImVec2(0.0f, 5.0f));
   }

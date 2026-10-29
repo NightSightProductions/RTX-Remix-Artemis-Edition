@@ -33,10 +33,10 @@
 #pragma warning(push)
 #pragma warning(disable: 4005)
 
-#include <ffx_api/ffx_api.hpp>
-#include <ffx_api/ffx_framegeneration.hpp>
-#include <ffx_api/vk/ffx_api_vk.hpp>
-#include <ffx_api/vk/ffx_api_vk.h>
+#include <api/include/ffx_api.hpp>
+#include <framegeneration/include/ffx_framegeneration.hpp>
+#include <api/include/vk/ffx_api_vk.hpp>
+#include <framegeneration/include/vk/ffx_api_framegeneration_vk.hpp>
 
 #pragma warning(pop)
 #undef FFX_API_ENTRY
@@ -83,6 +83,16 @@ namespace dxvk {
         reinterpret_cast<void*>(image->handle()),
         desc,
         state);
+    }
+
+    // Returns the display name of the SDK version backing a context (the loader picks the newest one the GPU supports)
+    const char* getProviderVersionName(ffx::Context& context) {
+      ffxQueryGetProviderVersion versionQuery{};
+      versionQuery.header.type = FFX_API_QUERY_DESC_TYPE_GET_PROVIDER_VERSION;
+      if (ffx::Query(context, versionQuery) != ffx::ReturnCode::Ok || versionQuery.versionName == nullptr) {
+        return "unknown";
+      }
+      return versionQuery.versionName;
     }
   }
 
@@ -200,14 +210,18 @@ namespace dxvk {
   }
 
   bool DxvkFSRFrameGen::supportsFSRFrameGen() {
-    // FSR 3 Frame Generation requires:
+    // FSR Frame Generation requires:
     // 1. Vulkan 1.1+ with VK_KHR_swapchain
     // 2. AMD or other GPU with compute capability
     // 3. FFX SDK libraries available
-    
+#ifdef _M_ARM64
+    // The prebuilt AMD FSR DLLs are x64 only
+    return false;
+#else
     // For now, return true and let runtime initialization fail gracefully
     // if requirements aren't met
     return true;
+#endif
   }
 
 
@@ -446,8 +460,12 @@ namespace dxvk {
     // m_swapChainContext is void* which IS ffx::Context (typedef void*)
     // CreateContext takes a reference to fill in the context handle
     ffx::Context& swapChainCtx = *reinterpret_cast<ffx::Context*>(&m_swapChainContext);
-    
-    ffx::ReturnCode retCode = ffx::CreateContext(swapChainCtx, nullptr, createSwapChainDesc);
+
+    // Required on Vulkan: declares the swapchain API version we were built against
+    ffx::CreateContextDescFrameGenerationSwapChainVersionVK swapChainVersionDesc{};
+    swapChainVersionDesc.version = FFX_FRAMEGENERATION_SWAPCHAIN_VK_VERSION;
+
+    ffx::ReturnCode retCode = ffx::CreateContext(swapChainCtx, nullptr, createSwapChainDesc, swapChainVersionDesc);
     if (retCode != ffx::ReturnCode::Ok) {
       Logger::err(str::format("FSR FG: Failed to create swapchain context: ", static_cast<int>(retCode)));
       return;
@@ -472,10 +490,13 @@ namespace dxvk {
     m_replacedAcquireNextImageKHR = replacementFunctions.pOutAcquireNextImageKHR;
     m_replacedQueuePresentKHR = replacementFunctions.pOutQueuePresentKHR;
     m_replacedGetSwapchainImagesKHR = replacementFunctions.pOutGetSwapchainImagesKHR;
+    m_replacedDestroySwapchain = replacementFunctions.pOutDestroySwapchainFFXAPI;
+    m_proxyDevice = device;
+    m_proxySwapchain = *pSwapchain;
 
     m_asyncWorkloadsSupported = asyncQueueInfo.queueHandle != VK_NULL_HANDLE;
     m_swapchainContextCreated = true;
-    Logger::info("FSR FG: Swapchain proxy created successfully");
+    Logger::info(str::format("FSR FG: Swapchain proxy created successfully, swapchain version ", getProviderVersionName(swapChainCtx)));
   }
 
   void DxvkFSRFrameGen::createFrameGenContext(
@@ -494,9 +515,13 @@ namespace dxvk {
 
     // Create backend for Vulkan
     ffx::CreateBackendVKDesc backendDesc{};
-    backendDesc.vkDevice = device;
-    backendDesc.vkPhysicalDevice = physicalDevice;
-    backendDesc.vkDeviceProcAddr = vkGetDeviceProcAddr;
+    backendDesc.deviceContext.vkDevice = device;
+    backendDesc.deviceContext.vkPhysicalDevice = physicalDevice;
+    backendDesc.deviceContext.vkDeviceProcAddr = vkGetDeviceProcAddr;
+
+    // Without the version struct the SDK disables newer APIs (e.g. DispatchDescFrameGenerationPrepareV2)
+    ffx::CreateContextDescFrameGenerationVersion versionDesc{};
+    versionDesc.version = FFX_FRAMEGENERATION_VERSION;
 
     // Create frame generation context
     ffx::CreateContextDescFrameGeneration createFg{};
@@ -537,7 +562,7 @@ namespace dxvk {
     // m_frameGenContext is void* which IS ffx::Context (typedef void*)
     ffx::Context& frameGenCtx = *reinterpret_cast<ffx::Context*>(&m_frameGenContext);
     
-    ffx::ReturnCode retCode = ffx::CreateContext(frameGenCtx, nullptr, createFg, backendDesc);
+    ffx::ReturnCode retCode = ffx::CreateContext(frameGenCtx, nullptr, createFg, versionDesc, backendDesc);
     if (retCode != ffx::ReturnCode::Ok) {
       Logger::err(str::format("FSR FG: Failed to create frame gen context: ", static_cast<int>(retCode)));
       return;
@@ -545,7 +570,7 @@ namespace dxvk {
 
     m_frameGenContextCreated = true;
     m_initialized = true;
-    Logger::info("FSR FG: Frame gen context created successfully");
+    Logger::info(str::format("FSR FG: Frame gen context created successfully, frame generation version ", getProviderVersionName(frameGenCtx)));
   }
 
   void DxvkFSRFrameGen::destroyContexts() {
@@ -576,7 +601,17 @@ namespace dxvk {
       m_swapChainContext = nullptr;
       m_swapchainContextCreated = false;
       m_asyncWorkloadsSupported = false;
-      
+
+      // The proxy swapchain outlives its context and must be destroyed after it, otherwise it keeps
+      // the window in use and creating the next swapchain fails with VK_ERROR_NATIVE_WINDOW_IN_USE_KHR.
+      if (m_proxySwapchain != VK_NULL_HANDLE && m_replacedDestroySwapchain != nullptr) {
+        m_replacedDestroySwapchain(m_proxyDevice, m_proxySwapchain, nullptr, nullptr);
+      }
+      m_replacedDestroySwapchain = nullptr;
+      m_proxyDevice = VK_NULL_HANDLE;
+      m_proxySwapchain = VK_NULL_HANDLE;
+      m_swapchain = VK_NULL_HANDLE;
+
       m_replacedAcquireNextImageKHR = nullptr;
       m_replacedQueuePresentKHR = nullptr;
       m_replacedGetSwapchainImagesKHR = nullptr;
@@ -787,7 +822,7 @@ namespace dxvk {
     // Dispatch the prepare pass
     ffx::Context& frameGenCtx = *reinterpret_cast<ffx::Context*>(&m_frameGenContext);
     
-    ffx::DispatchDescFrameGenerationPrepare prepareDesc{};
+    ffx::DispatchDescFrameGenerationPrepareV2 prepareDesc{};
     prepareDesc.commandList = cmdBuffer;
     prepareDesc.frameID = fgFrameId;
     prepareDesc.flags = 0;
@@ -809,29 +844,25 @@ namespace dxvk {
     prepareDesc.motionVectors = createFfxResource(motionVectors, FFX_API_RESOURCE_STATE_PIXEL_COMPUTE_READ, FFX_API_RESOURCE_USAGE_READ_ONLY);
     // View-model animation frequently violates the single-camera assumption used by FG reprojection.
     // Reset FG history on those frames to reduce persistent first-person trails.
-    prepareDesc.unused_reset = resetHistory || viewModelActive;
-    
-    // Add camera info for better quality (FSR 3.1.4+)
-    ffx::DispatchDescFrameGenerationPrepareCameraInfo cameraInfo{};
+    prepareDesc.reset = resetHistory || viewModelActive;
+
+    // Camera info improves interpolation quality
     Vector3 cameraPos = camera.getPosition(false);
     Vector3 cameraUp = camera.getUp(false);
     Vector3 cameraRight = camera.getRight(false);
     Vector3 cameraForward = camera.getDirection(false);
-    cameraInfo.cameraPosition[0] = cameraPos.x;
-    cameraInfo.cameraPosition[1] = cameraPos.y;
-    cameraInfo.cameraPosition[2] = cameraPos.z;
-    cameraInfo.cameraUp[0] = cameraUp.x;
-    cameraInfo.cameraUp[1] = cameraUp.y;
-    cameraInfo.cameraUp[2] = cameraUp.z;
-    cameraInfo.cameraRight[0] = cameraRight.x;
-    cameraInfo.cameraRight[1] = cameraRight.y;
-    cameraInfo.cameraRight[2] = cameraRight.z;
-    cameraInfo.cameraForward[0] = cameraForward.x;
-    cameraInfo.cameraForward[1] = cameraForward.y;
-    cameraInfo.cameraForward[2] = cameraForward.z;
-
-    // Link camera info to prepare descriptor
-    prepareDesc.header.pNext = &cameraInfo.header;
+    prepareDesc.cameraPosition[0] = cameraPos.x;
+    prepareDesc.cameraPosition[1] = cameraPos.y;
+    prepareDesc.cameraPosition[2] = cameraPos.z;
+    prepareDesc.cameraUp[0] = cameraUp.x;
+    prepareDesc.cameraUp[1] = cameraUp.y;
+    prepareDesc.cameraUp[2] = cameraUp.z;
+    prepareDesc.cameraRight[0] = cameraRight.x;
+    prepareDesc.cameraRight[1] = cameraRight.y;
+    prepareDesc.cameraRight[2] = cameraRight.z;
+    prepareDesc.cameraForward[0] = cameraForward.x;
+    prepareDesc.cameraForward[1] = cameraForward.y;
+    prepareDesc.cameraForward[2] = cameraForward.z;
 
     Logger::debug(str::format("FSR FG: Dispatching prepare pass for frame ", fgFrameId));
     ffx::ReturnCode retCode = ffx::Dispatch(frameGenCtx, prepareDesc);
@@ -914,11 +945,14 @@ namespace dxvk {
     
     auto& fsrFrameGen = m_device->getCommon()->metaFSRFrameGen();
     fsrFrameGen.waitForPresents();
+    const bool hadProxySwapchain = fsrFrameGen.isSwapchainContextCreated();
     fsrFrameGen.destroyContexts();
 
-    // The proxy swapchain is owned by FFX contexts; clear handle so base presenter
-    // teardown does not try to destroy an already-destroyed swapchain.
-    m_swapchain = VK_NULL_HANDLE;
+    // destroyContexts() destroyed the proxy swapchain; clear the handle so base presenter
+    // teardown does not try to destroy it again. A regular swapchain is left to the base presenter.
+    if (hadProxySwapchain) {
+      m_swapchain = VK_NULL_HANDLE;
+    }
     m_contextCreated = false;
   }
 
@@ -1189,8 +1223,13 @@ namespace dxvk {
     // Wait for any pending presents
     fsrFrameGen.waitForPresents();
     
-    // Destroy old FFX contexts - this releases the swapchain proxy
+    // Destroy old FFX contexts - this releases and destroys the swapchain proxy
+    const bool hadProxySwapchain = fsrFrameGen.isSwapchainContextCreated();
     fsrFrameGen.destroyContexts();
+    if (hadProxySwapchain) {
+      // The handle referred to the destroyed proxy; don't let the base presenter reuse or destroy it
+      m_swapchain = VK_NULL_HANDLE;
+    }
     m_contextCreated = false;
     
     // Now call base implementation to create a new normal swapchain

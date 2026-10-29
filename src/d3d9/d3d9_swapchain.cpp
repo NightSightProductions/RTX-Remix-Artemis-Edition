@@ -1102,6 +1102,12 @@ namespace dxvk {
         m_dlfgPresenter = nullptr;
       }
 
+      // NV-DXVK start: FSR FG integration
+      if (m_fsrfgPresenter != nullptr) {
+        m_fsrfgPresenter = nullptr;
+      }
+      // NV-DXVK end
+
       m_device->waitForSubmission(&m_presentStatus);
       m_device->waitForIdle();
     }
@@ -1419,8 +1425,16 @@ namespace dxvk {
     // This allows reusing the surface when switching presenter types at runtime
     // We call releaseSurface() which sets the presenter's internal handle to VK_NULL_HANDLE
     // so the destructor won't destroy it - we transfer ownership to the new presenter
+    // Note: GetPresenter() can't be used here since no presenter exists yet on first creation
     VkSurfaceKHR existingSurface = VK_NULL_HANDLE;
-    vk::Presenter* currentPresenter = GetPresenter();
+    vk::Presenter* currentPresenter = nullptr;
+    if (m_presenter != nullptr) {
+      currentPresenter = m_presenter.ptr();
+    } else if (m_dlfgPresenter != nullptr) {
+      currentPresenter = m_dlfgPresenter.ptr();
+    } else if (m_fsrfgPresenter != nullptr) {
+      currentPresenter = m_fsrfgPresenter.ptr();
+    }
     if (currentPresenter != nullptr) {
       existingSurface = currentPresenter->releaseSurface();
       Logger::info("CreatePresenter: Captured existing surface for reuse");

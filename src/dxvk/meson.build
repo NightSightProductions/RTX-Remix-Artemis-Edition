@@ -371,7 +371,7 @@ dxvk_src = files([
   'rtx_render/rtx_rcas.cpp',
   'rtx_render/rtx_rcas.h',
 
-  # NOTE: FSR 3.1 links against the prebuilt amd_fidelityfx_vk.dll via import library
+  # NOTE: FSR links against the prebuilt amd_fidelityfx_loader_vk.dll via import library
 
   'rtx_render/rtx_system_info.cpp',
   'rtx_render/rtx_system_info.h',
@@ -488,17 +488,24 @@ if not dxvk_is_woa
   )
 endif
 
-# FSR3 (FidelityFX SDK) dependency
-# Link against the prebuilt import library for the signed DLL
-fsr3_lib_path = join_paths(global_src_root_norm, 'submodules/FidelityFX-SDK/PrebuiltSignedDLL')
+# FSR (AMD FSR SDK) dependency
+# Link against the import library for the signed loader DLL, which loads the upscaler/framegen effect DLLs at runtime
+fsr3_lib_path = join_paths(global_src_root_norm, 'submodules/FidelityFX-SDK/Kits/FidelityFX/signedbin')
 fsr3_include_dir = include_directories(
-  '../../submodules/FidelityFX-SDK/ffx-api/include'
+  '../../submodules/FidelityFX-SDK/Kits/FidelityFX'
 )
-fsr3_lib = dxvk_compiler.find_library('amd_fidelityfx_vk', dirs : fsr3_lib_path, required : true)
-fsr3_dep = declare_dependency(
-  dependencies : [ fsr3_lib ],
-  include_directories : fsr3_include_dir
-)
+if dxvk_is_woa
+  # The prebuilt FSR DLLs are x64 only; native ARM64 builds use the stub entry points in rtx_fsr.cpp
+  fsr3_dep = declare_dependency(
+    include_directories : fsr3_include_dir
+  )
+else
+  fsr3_lib = dxvk_compiler.find_library('amd_fidelityfx_loader_vk', dirs : fsr3_lib_path, required : true)
+  fsr3_dep = declare_dependency(
+    dependencies : [ fsr3_lib ],
+    include_directories : fsr3_include_dir
+  )
+endif
 
 # FidelityFX API dependency
 ffx_api_dep = fsr3_dep

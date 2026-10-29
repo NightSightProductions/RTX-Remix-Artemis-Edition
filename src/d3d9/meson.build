@@ -115,16 +115,19 @@ d3d9_impl_dll = shared_library('d3d9' + d3d9_arch_str, d3d9_src, dxvk_version, g
   install: true
   )
 
-# Copy FSR3 DLL to d3d9 output directory for runtime loading
-fsr3_dll_src = join_paths(global_src_root_norm, 'submodules/FidelityFX-SDK/PrebuiltSignedDLL/amd_fidelityfx_vk.dll')
-fsr3_dll_build = custom_target('copy_fsr3_dll',
-  output: 'amd_fidelityfx_vk.dll',
-  input: fsr3_dll_src,
-  command: [python_interpreter, '-c', 'import shutil; import sys; shutil.copy(sys.argv[1], sys.argv[2])', '@INPUT@', '@OUTPUT@'],
-  build_by_default: true,
-  install: true,
-  install_dir: get_option('bindir')
-)
+# Copy FSR DLLs (loader + effect DLLs it loads) to d3d9 output directory for runtime loading. They are x64 only.
+if not dxvk_is_woa
+  foreach fsr3_dll_name : [ 'amd_fidelityfx_loader_vk.dll', 'amd_fidelityfx_upscaler_vk.dll', 'amd_fidelityfx_framegeneration_vk.dll' ]
+    custom_target('copy_' + fsr3_dll_name.underscorify(),
+      output: fsr3_dll_name,
+      input: join_paths(global_src_root_norm, 'submodules/FidelityFX-SDK/Kits/FidelityFX/signedbin', fsr3_dll_name),
+      command: [python_interpreter, '-c', 'import shutil; import sys; shutil.copy(sys.argv[1], sys.argv[2])', '@INPUT@', '@OUTPUT@'],
+      build_by_default: true,
+      install: true,
+      install_dir: get_option('bindir')
+    )
+  endforeach
+endif
 
 if dxvk_is_x64 and remix_with_shim
   d3d9_shim_src = [

@@ -1942,7 +1942,7 @@ namespace dxvk {
     m_common->metaRCAS().dispatch(
       this,
       rtOutput.m_finalOutput.resource(Resources::AccessType::Read),
-      rtOutput.m_postFxIntermediateTexture,
+      rtOutput.m_postFxIntermediateTexture.resource(Resources::AccessType::Write),
       getResourceManager().getSampler(VK_FILTER_LINEAR, VK_SAMPLER_MIPMAP_MODE_NEAREST, VK_SAMPLER_ADDRESS_MODE_CLAMP_TO_EDGE),
       sharpness);
 
@@ -1950,7 +1950,7 @@ namespace dxvk {
       rtOutput.m_finalOutput.resource(Resources::AccessType::Write).image,
       { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
       { 0, 0, 0 },
-      rtOutput.m_postFxIntermediateTexture.image,
+      rtOutput.m_postFxIntermediateTexture.image(Resources::AccessType::Read),
       { VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1 },
       { 0, 0, 0 },
       rtOutput.m_finalOutputExtent);
