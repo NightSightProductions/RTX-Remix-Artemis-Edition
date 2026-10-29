@@ -301,6 +301,9 @@ private:
   void createAndBuildIntersectionBlas(Rc<DxvkContext> ctx, class DxvkBarrierSet& execBarriers);
   
   Rc<DxvkBuffer> getScratchMemory(const size_t requiredScratchAllocSize);
+  // Returns the scratch buffer's device address rounded up to the scratch alignment.
+  // The buffer allocation itself only guarantees the buffer's memory alignment, so callers reserve m_scratchAlignment extra bytes for this.
+  VkDeviceAddress getAlignedScratchAddress(const Rc<DxvkBuffer>& scratchBuffer) const;
   Rc<PooledBlas> createPooledBlas(size_t bufferSize, const char* name) const;
 
   // The recorder currently lives here because it only captures acceleration

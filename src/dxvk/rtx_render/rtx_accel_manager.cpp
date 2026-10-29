@@ -357,7 +357,7 @@ namespace dxvk {
     geometry.geometry.aabbs.data.deviceAddress = m_aabbBuffer->getDeviceAddress();
 
     const size_t requiredScratchAllocSize = sizeInfo.buildScratchSize + m_scratchAlignment;
-    buildInfo.scratchData.deviceAddress = getScratchMemory(requiredScratchAllocSize)->getDeviceAddress();
+    buildInfo.scratchData.deviceAddress = getAlignedScratchAddress(getScratchMemory(requiredScratchAllocSize));
     assert(buildInfo.scratchData.deviceAddress % m_scratchAlignment == 0); // Note: Required by the Vulkan specification.
 
     VkAccelerationStructureBuildRangeInfoKHR buildRange {};
@@ -388,6 +388,10 @@ namespace dxvk {
     }
 
     return m_scratchBuffer;
+  }
+
+  VkDeviceAddress AccelManager::getAlignedScratchAddress(const Rc<DxvkBuffer>& scratchBuffer) const {
+    return align(scratchBuffer->getDeviceAddress(), m_scratchAlignment);
   }
 
   Rc<PooledBlas> AccelManager::createPooledBlas(size_t bufferSize, const char* name) const {
@@ -1825,7 +1829,7 @@ namespace dxvk {
     if (!blasToBuild.empty()) {
       // Now apply the buffer offset to the scratch address we calculated earlier
       for (auto& desc : blasToBuild) {
-        desc.scratchData.deviceAddress += m_scratchBuffer->getDeviceAddress();
+        desc.scratchData.deviceAddress += getAlignedScratchAddress(m_scratchBuffer);
       }
       assert(blasToBuild.size() == blasRangesToBuild.size());
       m_gpuCrashRecorder.recordBlasBuilds(
@@ -1961,7 +1965,7 @@ namespace dxvk {
 
     // Allocate the scratch memory, we share the same buffer between all TLAS types, so just ensure we handle the offsetting correctly here.
     const size_t requiredScratchAllocSize = align(sizeInfo.buildScratchSize + m_scratchAlignment, m_scratchAlignment);
-    buildInfo.scratchData.deviceAddress = getScratchMemory(totalScratchSize + requiredScratchAllocSize)->getDeviceAddress() + totalScratchSize;
+    buildInfo.scratchData.deviceAddress = getAlignedScratchAddress(getScratchMemory(totalScratchSize + requiredScratchAllocSize)) + totalScratchSize;
     totalScratchSize += requiredScratchAllocSize;
 
     // Update build information
